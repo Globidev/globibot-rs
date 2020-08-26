@@ -1,0 +1,16 @@
+[package]
+name = "globibot-plugin-ping"
+version = "0.1.0"
+authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = "0.2"
+parity-tokio-ipc = "0.7"
+tokio-util = "0.3"
+tokio-serde = { version = "0.6", features = ["json"] }
+futures = "0.3"
+globibot-core = { path = "../globibot-core" }
+tarpc = { version = "0.22",  features = ["serde1", "serde-transport"] }

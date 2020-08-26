@@ -1,0 +1,25 @@
+[package]
+name = "globibot-core"
+version = "0.1.0"
+authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serenity = { version = "0.9.0-rc.0", default_features = false, features = [
+    "builder",
+    "cache",
+    "client",
+    "gateway",
+    "model",
+    "http",
+    "utils",
+    "rustls_backend",
+] }
+tarpc = { version = "0.22",  features = ["serde1", "serde-transport"] }
+anyhow = "1.0"
+tokio = "0.2"
+tokio-util = "0.3"
+tokio-serde = { version = "0.6", features = ["json"] }
+futures = "0.3"
+derive_more = "0.99"

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "globibot-core",
+    "globibot-bot",
+    "globibot-plugin-ping",
+]
