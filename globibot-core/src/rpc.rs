@@ -1,12 +1,12 @@
 use crate::transport::{frame_transport, FramedRead, FramedStream, FramedWrite};
 
-use futures::{Future, SinkExt, StreamExt};
+use futures::{Future, SinkExt, StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use serenity::model::{
     channel::Message,
     id::{ChannelId, MessageId},
 };
-use std::{io, time::Duration};
+use std::{error::Error, io, time::Duration};
 use tarpc::{
     client,
     server::{self, BaseChannel},
@@ -55,7 +55,10 @@ pub async fn connect<T>(
     config: client::Config,
     request: HandshakeRequest,
     mut transport: T,
-) -> io::Result<(ProtocolClient, impl Future<Output = anyhow::Result<()>>)>
+) -> io::Result<(
+    ProtocolClient,
+    impl Future<Output = Result<(), Box<dyn Error>>>,
+)>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -64,7 +67,7 @@ where
 
     let rpc_transport = frame_transport(transport);
     let client::NewClient { client, dispatch } = ProtocolClient::new(config, rpc_transport);
-    Ok((client, dispatch))
+    Ok((client, dispatch.err_into()))
 }
 
 type ServerChannelP<T, Req, Resp> =
