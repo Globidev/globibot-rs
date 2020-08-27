@@ -8,8 +8,6 @@ edition = "2018"
 
 [dependencies]
 tokio = "0.2"
-tokio-util = "0.3"
-tokio-serde = { version = "0.6", features = ["json"] }
 futures = "0.3"
 globibot-core = { path = "../globibot-core" }
-tarpc = { version = "0.22",  features = ["serde1", "serde-transport"] }
+tarpc = { version = "0.22" }
