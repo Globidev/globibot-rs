@@ -1,32 +1,42 @@
-use globibot_core::{event_stream, EventType, SubscriptionRequest};
-use parity_tokio_ipc::Endpoint;
+use globibot_core::{
+    events::{self, Event, EventType},
+    rpc,
+    transport::{Ipc, Protocol, Tcp},
+};
 
-use futures::{lock::Mutex, SinkExt, TryStreamExt};
+use futures::{lock::Mutex, TryStreamExt};
 use std::{collections::HashMap, sync::Arc};
 use tarpc::context;
 
+const PLUGIN_ID: &str = "Ping";
+
 #[tokio::main]
 async fn main() {
-    let rpc_endpoint = Endpoint::connect("globibot-rpc")
+    let rpc_endpoint = Tcp::new("127.0.0.1:4243")
+        .connect()
         .await
-        .expect("Failed to connect to IPC server");
-    let event_endpoint = Endpoint::connect("globibot-events")
-        .await
-        .expect("Failed to connect to event stream");
+        .expect("Failed to reach RPC endpoint");
 
-    let mut event_stream = event_stream(event_endpoint);
-    let events = vec![EventType::MessageCreate, EventType::MessageDelete]
-        .into_iter()
-        .collect();
-    event_stream
-        .send(SubscriptionRequest {
-            id: "Ping".to_owned(),
-            events,
-        })
+    let event_endpoint = Tcp::new("127.0.0.1:4242")
+        .connect()
         .await
-        .expect("Failed to send subscription request");
+        .expect("Failed to reach event endpoint");
 
-    let (rpc_client, dispatch) = globibot_core::rpc_client(Default::default(), rpc_endpoint);
+    let events = vec![EventType::MessageCreate, EventType::MessageDelete];
+    let event_stream = events::connect(
+        event_endpoint,
+        events::HandshakeRequest::new(PLUGIN_ID, events),
+    )
+    .await
+    .expect("Failed to connect to event server");
+
+    let (rpc_client, dispatch) = rpc::connect(
+        Default::default(),
+        rpc::HandshakeRequest::new(PLUGIN_ID),
+        rpc_endpoint,
+    )
+    .await
+    .expect("Failed to connect to RPC server");
 
     let pong_map = Arc::new(Mutex::new(HashMap::new()));
 
@@ -35,7 +45,7 @@ async fn main() {
         let pong_map = Arc::clone(&pong_map);
         async move {
             match event {
-                globibot_core::Event::MessageCreate(message) => {
+                Event::MessageCreate(message) => {
                     if message.content.starts_with("!ping") {
                         let orig_message_id = message.id;
                         let message = rpc_client
@@ -46,7 +56,7 @@ async fn main() {
                         pong_map.lock().await.insert(orig_message_id, message);
                     }
                 }
-                globibot_core::Event::MessageDelete(channel_id, message_id) => {
+                Event::MessageDelete(channel_id, message_id) => {
                     if let Some(message) = pong_map.lock().await.get(&message_id) {
                         rpc_client
                             .delete_message(context::current(), channel_id, message.id)
