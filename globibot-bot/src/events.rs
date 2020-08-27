@@ -1,15 +1,19 @@
 use futures::{
     future, lock::Mutex, pin_mut, stream::FuturesUnordered, Sink, SinkExt, Stream, StreamExt,
 };
-use globibot_core::{event_subscriber, Event, EventSubscriber, EventType, SubscriberProtocolError};
-use std::{collections::HashSet, io, sync::Arc};
-use tokio::io::{AsyncRead, AsyncWrite};
+use globibot_core::events::{accept, AcceptError, Event, EventType, EventWrite};
+use std::{collections::HashSet, fmt::Display, io, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    time::timeout,
+};
 
-pub trait EventSink = Sink<Event> + Send + Unpin + 'static;
+pub trait EventSink =
+    Sink<Event> + Send + Unpin + 'static where <Self as Sink<Event>>::Error: Display;
 
-type FramedSharedPublisher<T> = SharedPublisher<EventSubscriber<T>>;
+type FramedSharedPublisher<T> = SharedPublisher<EventWrite<T>>;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub async fn run_publisher<S, T>(
     transports: S,
@@ -17,13 +21,14 @@ pub async fn run_publisher<S, T>(
 ) -> io::Result<()>
 where
     S: Stream<Item = io::Result<T>>,
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     pin_mut!(transports);
 
     while let Some(transport_result) = transports.next().await {
         let transport = transport_result?;
-        match event_subscriber(transport).await {
+        debug!("About to accept new subscriber");
+        match accept(transport).await {
             Ok((subscription, subscriber)) => {
                 info!("new event subscriber: '{id}'", id = subscription.id);
                 shared_publisher
@@ -31,9 +36,14 @@ where
                     .await
                     .add_subscriber(subscriber, subscription.events);
             }
-            Err(SubscriberProtocolError::IO(err)) => return Err(err),
-            Err(SubscriberProtocolError::MissingSubscribtionRequest) => {
-                warn!("Subscriber did not send subscription request");
+            Err(AcceptError::IO(err)) => {
+                warn!("IO error while accepting new subscriber: {}", err);
+            }
+            Err(AcceptError::HandshakeMissing) => {
+                warn!("Subscriber did not send a subscription request");
+            }
+            Err(AcceptError::HandshakeTimedOut) => {
+                warn!("Subscriber did not send a subscription request in time");
             }
         }
     }
@@ -47,10 +57,7 @@ pub struct Publisher<Transport> {
     subscribers: Vec<(Transport, HashSet<EventType>)>,
 }
 
-impl<Transport> Publisher<Transport>
-where
-    Transport: Sink<Event> + Unpin,
-{
+impl<Transport: EventSink> Publisher<Transport> {
     pub fn add_subscriber(
         &mut self,
         transport: Transport,
@@ -73,11 +80,17 @@ where
             .map(move |(idx, transport)| {
                 let event = event.clone();
                 async move {
-                    // TODO: Timeout
-                    if let Err(_why) = transport.send(event).await {
-                        Some(idx)
-                    } else {
-                        None
+                    let timed_send = timeout(Duration::from_secs(5), transport.send(event));
+                    match timed_send.await {
+                        Ok(Ok(_)) => None,
+                        Ok(Err(why)) => {
+                            warn!("Failed to send event to subscriber: {}", why);
+                            Some(idx)
+                        }
+                        Err(_timed_out) => {
+                            warn!("Timed out while sending event to subscriber");
+                            Some(idx)
+                        }
                     }
                 }
             })

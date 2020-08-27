@@ -4,10 +4,11 @@ mod discord;
 mod events;
 mod rpc;
 
-use futures::TryFutureExt;
 use std::{env, io};
 
-use tracing::{info};
+use futures::TryFutureExt;
+use globibot_core::transport::{Ipc, Protocol, Tcp};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
@@ -15,11 +16,8 @@ async fn main() -> Result<(), AppError> {
 
     let shared_publisher = events::SharedPublisher::default();
 
-    let mut events_endpoint = ipc_endpoint("globibot-events");
-    let raw_event_subscribers = events_endpoint.incoming()?;
-
-    let mut rpc_endpoint = ipc_endpoint("globibot-rpc");
-    let raw_rpc_clients = rpc_endpoint.incoming()?;
+    let raw_event_subscribers = Tcp::new("127.0.0.1:4242").listen().await?;
+    let raw_rpc_clients = Tcp::new("127.0.0.1:4243").listen().await?;
 
     let discord_token = env::var("DISCORD_TOKEN")?;
     let mut discord_client = discord::client(&discord_token, shared_publisher.clone()).await?;
@@ -32,18 +30,12 @@ async fn main() -> Result<(), AppError> {
     info!("Bot running");
 
     futures::try_join!(
-        publish_events.err_into(),
+        publish_events.err_into::<AppError>(),
         run_rpc_server.err_into(),
-        run_discord_client,
+        run_discord_client.err_into(),
     )?;
 
     Ok(())
-}
-
-fn ipc_endpoint(path: impl Into<String>) -> parity_tokio_ipc::Endpoint {
-    let path = path.into();
-    let _ = std::fs::remove_file(&path);
-    parity_tokio_ipc::Endpoint::new(path)
 }
 
 #[derive(Debug, derive_more::From)]

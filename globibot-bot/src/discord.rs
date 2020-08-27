@@ -1,7 +1,15 @@
 use crate::events::{EventSink, SharedPublisher as SharedEventPublisher};
 
-use globibot_core::{ChannelId, Event, EventType, Message};
-use serenity::{async_trait, client::Context, model::id::MessageId, Client};
+use globibot_core::events::{Event, EventType};
+use serenity::{
+    async_trait,
+    client::Context,
+    model::{
+        channel::Message,
+        id::{ChannelId, MessageId},
+    },
+    Client,
+};
 
 struct EventHandler<Transport> {
     event_publisher: SharedEventPublisher<Transport>,
@@ -35,11 +43,9 @@ impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Trans
 
 pub async fn client<Transport: EventSink>(
     token: &str,
-    shared_publisher: SharedEventPublisher<Transport>,
+    event_publisher: SharedEventPublisher<Transport>,
 ) -> serenity::Result<Client> {
-    let event_handler = EventHandler {
-        event_publisher: shared_publisher,
-    };
+    let event_handler = EventHandler { event_publisher };
 
     let discord_client = Client::new(token).event_handler(event_handler).await?;
 

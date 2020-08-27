@@ -1,28 +1,43 @@
 use std::{io, sync::Arc};
 
 use futures::{pin_mut, Stream, StreamExt};
-use globibot_core::{
-    accept_rpc_connection, ChannelId, Message, Protocol, ProtocolResult, ServerChannel,
+use globibot_core::rpc::{self, AcceptError};
+use serenity::{
+    http::Http as DiscordHttp,
+    model::{
+        channel::Message,
+        id::{ChannelId, MessageId},
+    },
 };
-use serenity::{http::Http as DiscordHttp, model::id::MessageId};
 use tarpc::{context::Context, server::Channel};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use tracing::{info, debug};
+use rpc::{Protocol, ProtocolResult, ServerChannel};
+use tracing::{debug, info, warn};
 
 pub async fn run_server<S, T>(transports: S, http: Arc<DiscordHttp>) -> io::Result<()>
 where
     S: Stream<Item = io::Result<T>>,
-    T: AsyncRead + AsyncWrite + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     pin_mut!(transports);
 
     while let Some(transport_result) = transports.next().await {
         let transport = transport_result?;
-        let client = accept_rpc_connection(Default::default(), transport);
-        let handle_client = respond_to_rpc_client(client, Arc::clone(&http));
-        tokio::spawn(handle_client);
-        info!("New RPC client spawned");
+        match rpc::accept(Default::default(), transport).await {
+            Ok((request, client)) => {
+                let handle_client = respond_to_rpc_client(client, Arc::clone(&http));
+                tokio::spawn(handle_client);
+                info!("New RPC client spawned: '{}'", request.id);
+            }
+            Err(AcceptError::IO(err)) => {
+                warn!("IO error while accepting new RPC client : {}", err);
+            }
+            Err(AcceptError::HandshakeMissing) => warn!("RPC client did not send a handshake"),
+            Err(AcceptError::HandshakeTimedOut) => {
+                warn!("RPC client did not send a handshake in time")
+            }
+        }
     }
 
     Ok(())
