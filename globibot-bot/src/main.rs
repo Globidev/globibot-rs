@@ -1,4 +1,9 @@
-#![feature(bool_to_option, type_alias_impl_trait, trait_alias)]
+#![feature(
+    bool_to_option,
+    type_alias_impl_trait,
+    trait_alias,
+    associated_type_bounds
+)]
 
 mod discord;
 mod events;

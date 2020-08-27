@@ -8,8 +8,7 @@ use tokio::{
     time::timeout,
 };
 
-pub trait EventSink =
-    Sink<Event> + Send + Unpin + 'static where <Self as Sink<Event>>::Error: Display;
+pub trait EventSink = Sink<Event, Error: Display> + Send + Unpin + 'static;
 
 type FramedSharedPublisher<T> = SharedPublisher<EventWrite<T>>;
 
