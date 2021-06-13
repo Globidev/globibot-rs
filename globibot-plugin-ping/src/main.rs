@@ -1,74 +1,86 @@
+#![feature(min_type_alias_impl_trait)]
+
+use std::{collections::HashMap, error::Error, sync::Arc};
+
 use globibot_core::{
-    events::{self, Event, EventType},
-    rpc,
-    transport::{Ipc, Protocol, Tcp},
+    events::{Event, EventType},
+    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin, PluginExt},
+    rpc, serenity,
+    transport::Tcp,
 };
+use serenity::model::{channel::Message, id::MessageId};
 
-use futures::{lock::Mutex, TryStreamExt};
-use std::{collections::HashMap, sync::Arc};
-use tarpc::context;
+use futures::{lock::Mutex, Future};
 
-const PLUGIN_ID: &str = "Ping";
+#[derive(Default)]
+struct PingPlugin {
+    message_map: Mutex<HashMap<MessageId, Message>>,
+}
+
+impl Plugin for PingPlugin {
+    const ID: &'static str = "Ping";
+
+    type RpcPolicy = HasRpc<true>;
+    type EventsPolicy = HasEvents<true>;
+}
 
 #[tokio::main]
 async fn main() {
-    let rpc_endpoint = Tcp::new("127.0.0.1:4243")
-        .connect()
+    let plugin = PingPlugin::default();
+
+    let events = [EventType::MessageCreate, EventType::MessageDelete];
+
+    let subscriber_addr = std::env::var("SUBSCRIBER_ADDR").expect("msg");
+    let rpc_addr = std::env::var("RPC_ADDR").expect("msg");
+
+    let endpoints = Endpoints::new()
+        .rpc(Tcp::new(rpc_addr))
+        .events(Tcp::new(subscriber_addr), &events);
+
+    plugin
+        .connect(endpoints)
         .await
-        .expect("Failed to reach RPC endpoint");
-
-    let event_endpoint = Tcp::new("127.0.0.1:4242")
-        .connect()
+        .expect("Failed to connect plugin")
+        .handle_events()
         .await
-        .expect("Failed to reach event endpoint");
+        .expect("Failed to run plugin");
+}
 
-    let events = vec![EventType::MessageCreate, EventType::MessageDelete];
-    let event_stream = events::connect(
-        event_endpoint,
-        events::HandshakeRequest::new(PLUGIN_ID, events),
-    )
-    .await
-    .expect("Failed to connect to event server");
+impl HandleEvents for PingPlugin {
+    type Err = Box<dyn Error>;
+    type Future = impl Future<Output = Result<(), Self::Err>>;
 
-    let (rpc_client, dispatch) = rpc::connect(
-        Default::default(),
-        rpc::HandshakeRequest::new(PLUGIN_ID),
-        rpc_endpoint,
-    )
-    .await
-    .expect("Failed to connect to RPC server");
-
-    let pong_map = Arc::new(Mutex::new(HashMap::new()));
-
-    let work = event_stream.try_for_each(move |event| {
-        let mut rpc_client = rpc_client.clone();
-        let pong_map = Arc::clone(&pong_map);
+    fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
         async move {
             match event {
-                Event::MessageCreate(message) => {
+                Event::MessageCreate { message } => {
                     if message.content.starts_with("!ping") {
                         let orig_message_id = message.id;
-                        let message = rpc_client
-                            .send_message(context::current(), message.channel_id, "pong!".into())
+                        let message = rpc
+                            .send_message(
+                                rpc::context::current(),
+                                message.channel_id,
+                                "pong!".into(),
+                            )
+                            .await??;
+                        self.message_map
+                            .lock()
                             .await
-                            .expect("RPC request Failed")
-                            .expect("Failed to send message");
-                        pong_map.lock().await.insert(orig_message_id, message);
+                            .insert(orig_message_id, message);
                     }
                 }
-                Event::MessageDelete(channel_id, message_id) => {
-                    if let Some(message) = pong_map.lock().await.get(&message_id) {
-                        rpc_client
-                            .delete_message(context::current(), channel_id, message.id)
-                            .await
-                            .expect("RPC request Failed")
-                            .expect("Failed to delete message")
+                Event::MessageDelete {
+                    channel_id,
+                    message_id,
+                } => {
+                    if let Some(message) = self.message_map.lock().await.get(&message_id) {
+                        rpc.delete_message(rpc::context::current(), channel_id, message.id)
+                            .await??;
                     }
                 }
+                _ => (),
             }
             Ok(())
         }
-    });
-
-    let _ = dbg!(futures::join!(work, dispatch));
+    }
 }

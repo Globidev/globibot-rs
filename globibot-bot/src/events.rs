@@ -72,7 +72,7 @@ impl<Transport: EventSink> Publisher<Transport> {
                 .iter_mut()
                 .enumerate()
                 .filter_map(|(idx, (transport, events))| {
-                    events.contains(&event_type).then_some((idx, transport))
+                    events.contains(&event_type).then(|| (idx, transport))
                 });
 
         let sends = subscribers_for_event
@@ -95,12 +95,9 @@ impl<Transport: EventSink> Publisher<Transport> {
             })
             .collect::<FuturesUnordered<_>>();
 
-        let mut failed_sends = sends
-            .filter_map(|send_result| future::ready(send_result))
-            .collect::<Vec<_>>()
-            .await;
+        let mut failed_sends = sends.filter_map(future::ready).collect::<Vec<_>>().await;
 
-        failed_sends.sort();
+        failed_sends.sort_unstable();
 
         for &idx in failed_sends.iter().rev() {
             self.subscribers.remove(idx);

@@ -1,15 +1,17 @@
 use crate::events::{EventSink, SharedPublisher as SharedEventPublisher};
 
-use globibot_core::events::{Event, EventType};
+use globibot_core::events::{CustomInteraction, Event, EventType};
 use serenity::{
     async_trait,
     client::Context,
     model::{
         channel::Message,
-        id::{ChannelId, MessageId},
+        id::{ChannelId, GuildId, MessageId},
+        interactions::Interaction,
     },
     Client,
 };
+use tracing::info;
 
 struct EventHandler<Transport> {
     event_publisher: SharedEventPublisher<Transport>,
@@ -28,14 +30,50 @@ impl<Transport: EventSink> EventHandler<Transport> {
 #[async_trait]
 impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Transport> {
     async fn message(&self, _ctx: Context, new_message: Message) {
-        self.publish(EventType::MessageCreate, Event::MessageCreate(new_message))
-            .await
+        self.publish(
+            EventType::MessageCreate,
+            Event::MessageCreate {
+                message: new_message,
+            },
+        )
+        .await
     }
 
-    async fn message_delete(&self, _ctx: Context, chan_id: ChannelId, message_id: MessageId) {
+    async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
+        dbg!(&interaction);
+        self.publish(
+            EventType::InteractionCreate,
+            Event::InteractionCreate {
+                interaction: CustomInteraction {
+                    id: interaction.id,
+                    application_id: interaction.application_id,
+                    token: interaction.token,
+                    data: interaction.data,
+                    channel_id: interaction.channel_id,
+                    author: interaction.member.map(|m| m.user).or(interaction.user),
+                },
+            },
+        )
+        .await
+    }
+
+    async fn cache_ready(&self, _ctx: Context, _guilds: Vec<GuildId>) {
+        info!("CACHE READY!");
+    }
+
+    async fn message_delete(
+        &self,
+        _ctx: Context,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        _gid: Option<GuildId>,
+    ) {
         self.publish(
             EventType::MessageDelete,
-            Event::MessageDelete(chan_id, message_id),
+            Event::MessageDelete {
+                channel_id,
+                message_id,
+            },
         )
         .await
     }
@@ -44,10 +82,14 @@ impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Trans
 pub async fn client<Transport: EventSink>(
     token: &str,
     event_publisher: SharedEventPublisher<Transport>,
+    application_id: u64,
 ) -> serenity::Result<Client> {
     let event_handler = EventHandler { event_publisher };
 
-    let discord_client = Client::new(token).event_handler(event_handler).await?;
+    let discord_client = Client::builder(token)
+        .event_handler(event_handler)
+        .application_id(application_id)
+        .await?;
 
     Ok(discord_client)
 }

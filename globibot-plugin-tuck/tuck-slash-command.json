@@ -1,0 +1,12 @@
+{
+    "name": "tuck",
+    "description": "Tuck someone you like to help them have a good night's sleep",
+    "options": [
+        {
+            "name": "target",
+            "description": "The user to tuck",
+            "type": 6,
+            "required": true
+        }
+    ]
+}

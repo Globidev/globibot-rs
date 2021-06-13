@@ -6,7 +6,9 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serenity::model::{
     channel::Message,
-    id::{ChannelId, MessageId},
+    id::{ApplicationId, ChannelId, InteractionId, MessageId},
+    interactions::ApplicationCommandInteractionData,
+    prelude::User,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -15,14 +17,33 @@ use tokio::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    MessageCreate(Message),
-    MessageDelete(ChannelId, MessageId),
+    MessageCreate {
+        message: Message,
+    },
+    MessageDelete {
+        channel_id: ChannelId,
+        message_id: MessageId,
+    },
+    InteractionCreate {
+        interaction: CustomInteraction,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomInteraction {
+    pub id: InteractionId,
+    pub application_id: ApplicationId,
+    pub token: String,
+    pub data: Option<ApplicationCommandInteractionData>,
+    pub channel_id: Option<ChannelId>,
+    pub author: Option<User>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventType {
     MessageCreate,
     MessageDelete,
+    InteractionCreate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

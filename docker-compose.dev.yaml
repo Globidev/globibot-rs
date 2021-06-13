@@ -1,0 +1,21 @@
+version: '3.9'
+
+services:
+  builder:
+    build: './builder'
+
+    volumes:
+      - './Cargo.toml:/usr/src/globibot/Cargo.toml'
+      - './Cargo.lock:/usr/src/globibot/Cargo.lock'
+      - './globibot-core:/usr/src/globibot/globibot-core'
+      - './globibot-bot:/usr/src/globibot/globibot-bot'
+      - './globibot-plugin-ping:/usr/src/globibot/globibot-plugin-ping'
+      - './globibot-plugin-rateme:/usr/src/globibot/globibot-plugin-rateme'
+      - './globibot-plugin-openai:/usr/src/globibot/globibot-plugin-openai'
+      - './globibot-plugin-tuck:/usr/src/globibot/globibot-plugin-tuck'
+      - './target-builder:/usr/src/globibot/target'
+
+    environment:
+      RUSTFLAGS: '-C target-feature=-crt-static'
+
+    command: ["cargo", "+nightly", "build", "--release"]

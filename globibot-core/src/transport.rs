@@ -2,7 +2,7 @@ use std::{io, path::Path};
 
 use futures::{
     future::{self, Future},
-    Stream,
+    Stream, TryFutureExt,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
@@ -10,6 +10,7 @@ use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs, UnixListener, UnixStream},
 };
 use tokio_serde::{formats::Json, Framed as SerdeFramed};
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 #[derive(Serialize, Deserialize)]
@@ -36,9 +37,10 @@ where
     Req: Serialize,
     Resp: DeserializeOwned,
 {
-    let length_framed_transport = Framed::new(transport, LengthDelimitedCodec::new());
-    let json_framed_transport = SerdeFramed::new(length_framed_transport, Json::default());
-    json_framed_transport
+    let mut codec = LengthDelimitedCodec::new();
+    codec.set_max_frame_length(32 * 1024 * 1024);
+    let length_framed_transport = Framed::new(transport, codec);
+    SerdeFramed::new(length_framed_transport, Json::default())
 }
 
 pub struct Ipc<P> {
@@ -66,13 +68,13 @@ where
     P: AsRef<Path>,
 {
     type Client = UnixStream;
-    type ClientStream = UnixListener;
+    type ClientStream = UnixListenerStream;
     type ListenFuture = impl Future<Output = io::Result<Self::ClientStream>>;
     type ConnectFuture = impl Future<Output = io::Result<Self::Client>>;
 
     fn listen(self) -> Self::ListenFuture {
         let _ = std::fs::remove_file(&self.path);
-        future::ready(UnixListener::bind(self.path))
+        future::ready(UnixListener::bind(self.path).map(UnixListenerStream::new))
     }
 
     fn connect(self) -> Self::ConnectFuture {
@@ -85,12 +87,12 @@ where
     A: ToSocketAddrs,
 {
     type Client = TcpStream;
-    type ClientStream = TcpListener;
+    type ClientStream = TcpListenerStream;
     type ListenFuture = impl Future<Output = io::Result<Self::ClientStream>>;
     type ConnectFuture = impl Future<Output = io::Result<Self::Client>>;
 
     fn listen(self) -> Self::ListenFuture {
-        TcpListener::bind(self.addr)
+        TcpListener::bind(self.addr).map_ok(TcpListenerStream::new)
     }
 
     fn connect(self) -> Self::ConnectFuture {
