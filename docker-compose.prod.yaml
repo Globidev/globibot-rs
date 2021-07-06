@@ -18,6 +18,8 @@ services:
   plugin-openai:
     image: 'globidocker/globibot'
 
+    depends_on: bot
+
     command: ['/plugins/openai']
 
     environment:
@@ -26,6 +28,8 @@ services:
 
   plugin-rateme:
     image: 'globidocker/globibot'
+
+    depends_on: bot
 
     command: ['/plugins/rateme']
 
@@ -40,6 +44,8 @@ services:
 
   plugin-tuck:
     image: 'globidocker/globibot'
+
+    depends_on: bot
 
     command: ['/plugins/tuck']
 
