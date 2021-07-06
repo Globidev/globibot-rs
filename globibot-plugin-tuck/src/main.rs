@@ -1,13 +1,27 @@
 #![feature(min_type_alias_impl_trait, array_map)]
 
-use std::{error::Error, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    error::Error,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    },
+    time::Instant,
+};
 
 use globibot_core::{
-    events::{CustomInteraction, Event, EventType},
+    events::{Event, EventType},
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin, PluginExt},
     rpc::{self, context::current as rpc_context},
-    serenity::model::{
-        interactions::ApplicationCommandInteractionDataOptionValue, prelude::Mentionable,
+    serenity::{
+        model::{
+            guild::Member,
+            interactions::application_command::{
+                ApplicationCommandInteraction, ApplicationCommandInteractionDataOptionValue,
+            },
+        },
+        prelude::Mentionable,
     },
     transport::Tcp,
 };
@@ -15,7 +29,6 @@ use globibot_plugin_tuck::{
     load_avatar, load_gif, paste_avatar, AvatarPositions, Dimension, PasteAvatarPositions,
 };
 use image::RgbaImage;
-use rand::prelude::SliceRandom;
 
 type PluginError = Box<dyn Error + Send + Sync>;
 
@@ -69,6 +82,7 @@ async fn main() {
             .parse()
             .expect("Malformed command id"),
         tuck_gifs,
+        tuck_gif_idx: AtomicUsize::new(0),
     };
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
@@ -94,6 +108,7 @@ fn load_env(key: &str) -> String {
 struct TuckPlugin<const GIF_COUNT: usize> {
     command_id: u64,
     tuck_gifs: [(TuckGifDescriptor, Vec<RgbaImage>); GIF_COUNT],
+    tuck_gif_idx: AtomicUsize,
 }
 
 impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
@@ -102,11 +117,8 @@ impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
         tucker_avatar_url: &str,
         tucked_avatar_url: &str,
     ) -> Result<Vec<u8>, PluginError> {
-        let (tuck_desc, tuck_gif) = self
-            .tuck_gifs
-            .choose(&mut rand::thread_rng())
-            .cloned()
-            .expect("At least one gif");
+        let idx = self.tuck_gif_idx.fetch_add(1, SeqCst);
+        let (tuck_desc, tuck_gif) = self.tuck_gifs[idx % self.tuck_gifs.len()].clone();
 
         let avatars = futures::try_join!(
             load_avatar(tucker_avatar_url, tuck_desc.avatar_dimensions),
@@ -145,12 +157,12 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                 Event::MessageCreate { message: _ } => {}
                 Event::InteractionCreate {
                     interaction:
-                        CustomInteraction {
+                        ApplicationCommandInteraction {
                             id,
                             token,
-                            data: Some(command),
-                            channel_id: Some(channel_id),
-                            author: Some(author),
+                            data: command,
+                            channel_id,
+                            member: Some(Member { user: author, .. }),
                             ..
                         },
                 } if command.id == self.command_id => {
@@ -171,8 +183,14 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                         .avatar_url()
                         .unwrap_or_else(|| user_to_tuck.default_avatar_url());
 
-                    let generate_gif =
-                        self.generate_tucking_gif(&tucker_avatar_url, &tucked_avatar_url);
+                    let generate_gif = tokio::spawn({
+                        let plugin = Arc::clone(&self);
+                        async move {
+                            plugin
+                                .generate_tucking_gif(&tucker_avatar_url, &tucked_avatar_url)
+                                .await
+                        }
+                    });
 
                     rpc.create_interaction_response(
                         rpc_context(),
@@ -182,15 +200,15 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                             "type": 4,
                             "data": {
                                 "content": format!(
-                                    "Hold on, I'm fetching some blankets for {}",
-                                    user_to_tuck.mention()
+                                    "{} is fetching some blankets for {}",
+                                    author.mention(), user_to_tuck.mention()
                                 )
                             }
                         }),
                     )
                     .await??;
 
-                    let gif = generate_gif.await?;
+                    let gif = generate_gif.await??;
                     tracing::info!("Sending gif of {} bytes", gif.len());
 
                     rpc.send_file(rpc_context(), channel_id, gif, "tuck.gif".to_owned())

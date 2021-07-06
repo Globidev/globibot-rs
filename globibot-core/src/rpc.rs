@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serenity::model::{
     channel::Message,
     id::{ChannelId, GuildId, MessageId},
-    interactions::ApplicationCommand,
+    interactions::application_command::ApplicationCommand,
     prelude::CurrentUser,
 };
 use std::{error::Error, io, time::Duration};

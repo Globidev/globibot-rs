@@ -1,6 +1,6 @@
 use crate::events::{EventSink, SharedPublisher as SharedEventPublisher};
 
-use globibot_core::events::{CustomInteraction, Event, EventType};
+use globibot_core::events::{Event, EventType};
 use serenity::{
     async_trait,
     client::Context,
@@ -40,18 +40,10 @@ impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Trans
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
-        dbg!(&interaction);
         self.publish(
             EventType::InteractionCreate,
             Event::InteractionCreate {
-                interaction: CustomInteraction {
-                    id: interaction.id,
-                    application_id: interaction.application_id,
-                    token: interaction.token,
-                    data: interaction.data,
-                    channel_id: interaction.channel_id,
-                    author: interaction.member.map(|m| m.user).or(interaction.user),
-                },
+                interaction: interaction.application_command().unwrap(),
             },
         )
         .await

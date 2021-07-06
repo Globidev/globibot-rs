@@ -8,7 +8,7 @@ use serenity::{
     model::{
         channel::Message,
         id::{ChannelId, GuildId, MessageId},
-        interactions::ApplicationCommand,
+        interactions::application_command::ApplicationCommand,
         prelude::CurrentUser,
     },
     utils::{self, ContentSafeOptions},
