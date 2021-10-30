@@ -3,7 +3,7 @@ use crate::transport::{frame_transport, FramedRead, FramedStream, FramedWrite};
 use futures::{Future, SinkExt, StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use serenity::model::{
-    channel::Message,
+    channel::{Message, ReactionType},
     id::{ChannelId, GuildId, MessageId},
     interactions::application_command::ApplicationCommand,
     prelude::CurrentUser,
@@ -49,6 +49,12 @@ pub trait Protocol {
         token: String,
         data: serde_json::Value,
     ) -> ProtocolResult<Message>;
+
+    async fn create_reaction(
+        chan_id: ChannelId,
+        message_id: MessageId,
+        reaction: ReactionType,
+    ) -> ProtocolResult<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]

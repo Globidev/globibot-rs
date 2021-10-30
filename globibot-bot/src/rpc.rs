@@ -6,7 +6,7 @@ use serenity::{
     cache::Cache as DiscordCache,
     http::Http as DiscordHttp,
     model::{
-        channel::Message,
+        channel::{Message, ReactionType},
         id::{ChannelId, GuildId, MessageId},
         interactions::application_command::ApplicationCommand,
         prelude::CurrentUser,
@@ -217,6 +217,18 @@ impl Protocol for Server {
         Ok(self
             .discord_http
             .edit_original_interaction_response(&token, &data)
+            .await?)
+    }
+
+    async fn create_reaction(
+        self,
+        _ctx: Context,
+        chan_id: ChannelId,
+        message_id: MessageId,
+        reaction: ReactionType,
+    ) -> ProtocolResult<()> {
+        Ok(chan_id
+            .create_reaction(self.discord_http, message_id, reaction)
             .await?)
     }
 }
