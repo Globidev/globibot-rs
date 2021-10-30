@@ -1,4 +1,4 @@
-FROM rust:1.52-alpine
+FROM rust:1.56-alpine
 
 RUN apk add build-base openssl-dev
 RUN rustup install nightly

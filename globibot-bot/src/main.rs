@@ -1,4 +1,4 @@
-#![feature(min_type_alias_impl_trait, trait_alias, associated_type_bounds)]
+#![feature(type_alias_impl_trait, trait_alias, associated_type_bounds)]
 
 mod discord;
 mod events;

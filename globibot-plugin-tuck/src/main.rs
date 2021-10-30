@@ -1,4 +1,4 @@
-#![feature(min_type_alias_impl_trait, array_map)]
+#![feature(type_alias_impl_trait)]
 
 use std::{
     error::Error,
