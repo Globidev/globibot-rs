@@ -18,7 +18,8 @@ services:
   plugin-openai:
     image: 'globidocker/globibot'
 
-    depends_on: bot
+    depends_on:
+      - bot
 
     command: ['/plugins/openai']
 
@@ -29,7 +30,8 @@ services:
   plugin-rateme:
     image: 'globidocker/globibot'
 
-    depends_on: bot
+    depends_on:
+      - bot
 
     command: ['/plugins/rateme']
 
@@ -41,11 +43,13 @@ services:
       RPC_ADDR: 'bot:4243'
 
       RATEME_IMG_PATH: '/imgs'
+      RATEME_COMMAND_ID: '${RATEME_COMMAND_ID}'
 
   plugin-tuck:
     image: 'globidocker/globibot'
 
-    depends_on: bot
+    depends_on:
+      - bot
 
     command: ['/plugins/tuck']
 
