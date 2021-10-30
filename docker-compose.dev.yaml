@@ -13,6 +13,7 @@ services:
       - './globibot-plugin-rateme:/usr/src/globibot/globibot-plugin-rateme'
       - './globibot-plugin-openai:/usr/src/globibot/globibot-plugin-openai'
       - './globibot-plugin-tuck:/usr/src/globibot/globibot-plugin-tuck'
+      - './globibot-plugin-lang-detect:/usr/src/globibot/globibot-plugin-lang-detect'
       - './target-builder:/usr/src/globibot/target'
 
     environment:

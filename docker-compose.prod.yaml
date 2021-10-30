@@ -64,3 +64,18 @@ services:
       TUCK_COMMAND_ID: '${TUCK_COMMAND_ID}'
 
       RUST_LOG: 'globibot_plugin_tuck=debug'
+
+  plugin-lang-detect:
+    image: 'globidocker/globibot'
+
+    depends_on:
+      - bot
+
+    command: ['/plugins/lang-detect']
+
+    environment:
+      SUBSCRIBER_ADDR: 'bot:4242'
+      RPC_ADDR: 'bot:4243'
+
+      LANG_DETECT_API_KEY: '${LANG_DETECT_API_KEY}'
+      LANG_DETECT_ENABLED_CHANNELS: '${LANG_DETECT_ENABLED_CHANNELS}'
