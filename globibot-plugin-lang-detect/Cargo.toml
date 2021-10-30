@@ -1,0 +1,14 @@
+[package]
+name = "globibot-plugin-lang-detect"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = "1.5"
+futures = "0.3"
+globibot-core = { path = "../globibot-core" }
+reqwest = "0.11"
+thiserror = "1.0"
+anyhow = "1.0"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
