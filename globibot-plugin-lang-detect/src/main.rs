@@ -72,9 +72,6 @@ impl HandleEvents for LangDetectPlugin {
                 return Ok(());
             }
 
-            let channel_id = message.channel_id;
-            let message_id = message.id;
-
             let content_safe = rpc
                 .content_safe(rpc_context(), message.content, message.guild_id)
                 .await??;
@@ -89,7 +86,7 @@ impl HandleEvents for LangDetectPlugin {
             if detection.is_reliable && detection.language != "en" {
                 if let Some(flag) = flag_from_code(&detection.language) {
                     let reaction = ReactionType::Unicode(flag.to_owned());
-                    rpc.create_reaction(rpc_context(), channel_id, message_id, reaction)
+                    rpc.create_reaction(rpc_context(), message.channel_id, message.id, reaction)
                         .await??;
                 }
             }
