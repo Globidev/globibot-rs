@@ -78,6 +78,12 @@ impl HandleEvents for LangDetectPlugin {
             let content_safe = rpc
                 .content_safe(rpc_context(), message.content, message.guild_id)
                 .await??;
+
+            // Don't detect single emoji messages
+            if serenity::utils::parse_emoji(&content_safe).is_some() {
+                return Ok(());
+            }
+
             let detection = self.detector.detect_language(&content_safe).await?;
 
             if detection.is_reliable && detection.language != "en" {
