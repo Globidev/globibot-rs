@@ -95,8 +95,8 @@ pub enum AcceptError {
 
 pub async fn connect<T>(
     config: client::Config,
-    request: HandshakeRequest,
     mut transport: T,
+    request: HandshakeRequest,
 ) -> io::Result<(
     ProtocolClient,
     impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>>,

@@ -208,7 +208,7 @@ where
             let transport = self.0.connect().await?;
             let handshake_request = rpc::HandshakeRequest { id: plugin_id };
             let (client, dispatch) =
-                rpc::connect(Default::default(), handshake_request, transport).await?;
+                rpc::connect(Default::default(), transport, handshake_request).await?;
             tokio::spawn(dispatch);
             Ok(client)
         }

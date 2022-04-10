@@ -12,18 +12,6 @@ use serenity::model::{channel::Message, id::MessageId};
 
 use futures::{lock::Mutex, Future};
 
-#[derive(Default)]
-struct PingPlugin {
-    message_map: Mutex<HashMap<MessageId, Message>>,
-}
-
-impl Plugin for PingPlugin {
-    const ID: &'static str = "Ping";
-
-    type RpcPolicy = HasRpc<true>;
-    type EventsPolicy = HasEvents<true>;
-}
-
 #[tokio::main]
 async fn main() {
     let plugin = PingPlugin::default();
@@ -35,7 +23,7 @@ async fn main() {
 
     let endpoints = Endpoints::new()
         .rpc(Tcp::new(rpc_addr))
-        .events(Tcp::new(subscriber_addr), &events);
+        .events(Tcp::new(subscriber_addr), events);
 
     plugin
         .connect(endpoints)
@@ -44,6 +32,18 @@ async fn main() {
         .handle_events()
         .await
         .expect("Failed to run plugin");
+}
+
+#[derive(Default)]
+struct PingPlugin {
+    message_map: Mutex<HashMap<MessageId, Message>>,
+}
+
+impl Plugin for PingPlugin {
+    const ID: &'static str = "Ping";
+
+    type RpcPolicy = HasRpc<true>;
+    type EventsPolicy = HasEvents<true>;
 }
 
 impl HandleEvents for PingPlugin {
