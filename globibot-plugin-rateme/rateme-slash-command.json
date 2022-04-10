@@ -1,0 +1,12 @@
+{
+    "name": "rate",
+    "description": "Rate someone's appearance",
+    "options": [
+        {
+            "name": "target",
+            "description": "The user to rate. Defaults to yourself if omitted",
+            "type": 6,
+            "required": false
+        }
+    ]
+}
