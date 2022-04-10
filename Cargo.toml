@@ -9,3 +9,6 @@ members = [
     "globibot-plugin-tuck",
     "globibot-plugin-lang-detect",
 ]
+
+[profile.dev.package."*"]
+opt-level = 3
