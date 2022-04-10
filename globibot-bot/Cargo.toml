@@ -2,7 +2,7 @@
 name = "globibot-bot"
 version = "0.1.0"
 authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 serenity = { git = "https://github.com/serenity-rs/serenity", branch = "current", default_features = false, features = [
