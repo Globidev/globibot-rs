@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use image::{
-    imageops, AnimationDecoder, DynamicImage, GenericImageView, ImageResult, Rgba, RgbaImage,
-};
+use globibot_plugin_common::imageops::Avatar;
+use image::{imageops, AnimationDecoder, GenericImageView, ImageResult, Rgba, RgbaImage};
 use rayon::prelude::*;
 
 pub type Dimension = (u16, u16);
@@ -21,40 +20,6 @@ pub fn load_gif(path: impl AsRef<Path>, (width, height): Dimension) -> ImageResu
             ))
         })
         .collect()
-}
-
-pub enum Avatar {
-    Animated(Vec<RgbaImage>),
-    Fixed(DynamicImage),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LoadAvatarError {
-    #[error("Network error while fetching avatar: {0}")]
-    Network(#[from] reqwest::Error),
-    #[error("Decoding error while trying to load avatar: {0}")]
-    ImageFormat(#[from] image::ImageError),
-}
-
-pub async fn load_avatar(url: &str, (width, height): Dimension) -> Result<Avatar, LoadAvatarError> {
-    let raw_avatar = reqwest::get(url).await?.bytes().await?;
-
-    let img = if let Ok(decoder) = image::codecs::gif::GifDecoder::new(&*raw_avatar) {
-        Avatar::Animated(
-            decoder
-                .into_frames()
-                .map(|f| f.map(|f| imageops::thumbnail(f.buffer(), width.into(), height.into())))
-                .collect::<Result<_, _>>()?,
-        )
-    } else {
-        Avatar::Fixed(
-            libwebp_image::webp_load_from_memory(&raw_avatar)
-                .or_else(|_e| image::load_from_memory(&raw_avatar))?
-                .thumbnail(width.into(), height.into()),
-        )
-    };
-
-    Ok(img)
 }
 
 pub struct PasteAvatarPositions {

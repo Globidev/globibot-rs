@@ -7,6 +7,30 @@
             "description": "The user to tuck",
             "type": 6,
             "required": true
+        },
+        {
+            "name": "flavor",
+            "description": "The way you want to tuck them",
+            "type": 4,
+            "choices": [
+                {
+                    "name": "eyebleach kitty 1",
+                    "value": 0
+                },
+                {
+                    "name": "peach kitties",
+                    "value": 1
+                },
+                {
+                    "name": "eyebleach kitty 2",
+                    "value": 2
+                },
+                {
+                    "name": "anime kitty",
+                    "value": 3
+                }
+            ],
+            "required": false
         }
     ]
 }

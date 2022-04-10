@@ -1,10 +1,11 @@
 #![feature(type_alias_impl_trait)]
 
 use std::{
+    convert::TryInto,
     error::Error,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::Instant,
@@ -26,9 +27,10 @@ use globibot_core::{
     transport::Tcp,
 };
 use globibot_plugin_tuck::{
-    load_avatar, load_gif, paste_avatar, AvatarPositions, Dimension, PasteAvatarPositions,
+    load_gif, paste_avatar, AvatarPositions, Dimension, PasteAvatarPositions,
 };
 use image::RgbaImage;
+use rand::Rng;
 
 type PluginError = Box<dyn Error + Send + Sync>;
 
@@ -38,9 +40,10 @@ struct TuckGifDescriptor {
     dimension: Dimension,
     avatar_dimensions: Dimension,
     avatar_positions: AvatarPositions,
+    frame_range: Option<std::ops::Range<usize>>,
 }
 
-const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 2] = [
+const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 4] = [
     TuckGifDescriptor {
         file_name: "eyebleach-tuck.gif",
         dimension: (160, 154),
@@ -54,6 +57,7 @@ const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 2] = [
                 tucker_position: None,
             }
         },
+        frame_range: None,
     },
     TuckGifDescriptor {
         file_name: "tuck-kitties.gif",
@@ -63,6 +67,38 @@ const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 2] = [
             tucked_position: Some((10, 122)),
             tucker_position: Some((65 - (frame_idx % 14) / 2, 90)),
         },
+        frame_range: None,
+    },
+    TuckGifDescriptor {
+        file_name: "tuck-kitty-bman.gif",
+        dimension: (150, 150),
+        avatar_dimensions: (60, 60),
+        avatar_positions: |frame_idx| PasteAvatarPositions {
+            tucked_position: Some((35 + frame_idx / 10, 32 + frame_idx / 30)),
+            tucker_position: None,
+        },
+        frame_range: Some(50..150),
+    },
+    TuckGifDescriptor {
+        file_name: "cat-bed.gif",
+        dimension: (320, 180),
+        avatar_dimensions: (60, 60),
+        avatar_positions: |frame_idx| {
+            let y = match frame_idx {
+                0 => 40,
+                1 => 50,
+                2 => 60,
+                3 => 70,
+                4 => 80,
+                _ => 90,
+            };
+
+            PasteAvatarPositions {
+                tucked_position: Some((180, y)),
+                tucker_position: None,
+            }
+        },
+        frame_range: None,
     },
 ];
 
@@ -73,7 +109,10 @@ async fn main() {
     let tuck_gifs = TUCK_GIF_DESCRIPTORS.map(|d| {
         let mut img_path = PathBuf::from(load_env("TUCK_IMG_PATH"));
         img_path.push(d.file_name);
-        let gif = load_gif(img_path, d.dimension).expect("Failed to load gif");
+        let mut gif = load_gif(img_path, d.dimension).expect("Failed to load gif");
+        if let Some(range) = &d.frame_range {
+            gif = gif.drain(range.clone()).collect();
+        }
         (d, gif)
     });
 
@@ -82,7 +121,7 @@ async fn main() {
             .parse()
             .expect("Malformed command id"),
         tuck_gifs,
-        tuck_gif_idx: AtomicUsize::new(0),
+        command_updated: Arc::new(AtomicBool::new(false)),
     };
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
@@ -108,7 +147,7 @@ fn load_env(key: &str) -> String {
 struct TuckPlugin<const GIF_COUNT: usize> {
     command_id: u64,
     tuck_gifs: [(TuckGifDescriptor, Vec<RgbaImage>); GIF_COUNT],
-    tuck_gif_idx: AtomicUsize,
+    command_updated: Arc<AtomicBool>,
 }
 
 impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
@@ -116,13 +155,20 @@ impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
         &self,
         tucker_avatar_url: &str,
         tucked_avatar_url: &str,
+        gif_idx: Option<usize>,
     ) -> Result<Vec<u8>, PluginError> {
-        let idx = self.tuck_gif_idx.fetch_add(1, SeqCst);
-        let (tuck_desc, tuck_gif) = self.tuck_gifs[idx % self.tuck_gifs.len()].clone();
+        let idx = gif_idx.unwrap_or_else(|| rand::thread_rng().gen_range(0..self.tuck_gifs.len()));
+        let (tuck_desc, tuck_gif) = self.tuck_gifs[idx].clone();
 
         let avatars = futures::try_join!(
-            load_avatar(tucker_avatar_url, tuck_desc.avatar_dimensions),
-            load_avatar(tucked_avatar_url, tuck_desc.avatar_dimensions),
+            globibot_plugin_common::imageops::load_avatar(
+                tucker_avatar_url,
+                tuck_desc.avatar_dimensions
+            ),
+            globibot_plugin_common::imageops::load_avatar(
+                tucked_avatar_url,
+                tuck_desc.avatar_dimensions
+            ),
         )?;
 
         let t0 = Instant::now();
@@ -153,6 +199,20 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
 
     fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
         async move {
+            if !self.command_updated.load(Ordering::Relaxed)
+                && std::env::args().any(|x| x == "--update-slash-cmd")
+            {
+                self.command_updated.store(true, Ordering::Relaxed);
+                let application = rpc
+                    .edit_global_command(
+                        rpc_context(),
+                        self.command_id,
+                        serde_json::from_str(include_str!("../tuck-slash-command.json")).unwrap(),
+                    )
+                    .await??;
+                println!("UPDTED COMMAND ID: {}", application.id);
+            }
+
             match event {
                 Event::MessageCreate { message: _ } => {}
                 Event::InteractionCreate {
@@ -168,10 +228,24 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                 } if command.id == self.command_id => {
                     let user_to_tuck = match command
                         .options
-                        .first()
+                        .iter()
+                        .find(|opt| opt.name == "target")
                         .and_then(|opt| opt.resolved.as_ref())
                     {
                         Some(ApplicationCommandInteractionDataOptionValue::User(u, _)) => u.clone(),
+                        _ => return Ok(()),
+                    };
+
+                    let gif_idx = match command
+                        .options
+                        .iter()
+                        .find(|opt| opt.name == "flavor")
+                        .and_then(|opt| opt.resolved.as_ref())
+                    {
+                        Some(ApplicationCommandInteractionDataOptionValue::Integer(flavor_idx)) => {
+                            Some((*flavor_idx).try_into().unwrap_or(0))
+                        }
+                        None => None,
                         _ => return Ok(()),
                     };
 
@@ -187,7 +261,11 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                         let plugin = Arc::clone(&self);
                         async move {
                             plugin
-                                .generate_tucking_gif(&tucker_avatar_url, &tucked_avatar_url)
+                                .generate_tucking_gif(
+                                    &tucker_avatar_url,
+                                    &tucked_avatar_url,
+                                    gif_idx,
+                                )
                                 .await
                         }
                     });
