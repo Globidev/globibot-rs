@@ -5,25 +5,34 @@ authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
 edition = "2021"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serenity = { git = "https://github.com/serenity-rs/serenity", branch = "current", default_features = false, features = [
-    "builder",
-    "cache",
-    "client",
-    "gateway",
-    "model",
-    "http",
-    "utils",
-    "rustls_backend",
-    "unstable_discord_api"
-] }
-tarpc = { version = "0.26",  features = ["serde1", "serde-transport"] }
-tokio = { version = "1.5" }
-tokio-util = "0.6"
-tokio-stream = { version = "0.1", features = ["net"] }
-tokio-serde = { version = "0.8", features = ["json"] }
-futures = "0.3"
-derive_more = "0.99"
 thiserror = "1.0"
+
+derive_more = "0.99"
+
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+futures = "0.3"
+tokio = { version = "1.5" }
+tokio-serde = { version = "0.8", features = ["json"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = "0.7"
+
 tracing = "0.1"
+
+tarpc = { version = "0.28", features = ["serde1", "serde-transport"] }
+
+[dependencies.serenity]
+default_features = false
+features = [
+  "builder",
+  "cache",
+  "client",
+  "gateway",
+  "model",
+  "http",
+  "utils",
+  "rustls_backend",
+  "unstable_discord_api",
+]
+version = "0.10"
