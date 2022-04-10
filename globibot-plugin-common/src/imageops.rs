@@ -1,7 +1,10 @@
 use std::path::Path;
 
-use image::{AnimationDecoder, ImageResult, RgbaImage};
+use image::{AnimationDecoder, GenericImageView, ImageResult, Rgba, RgbaImage};
 
+use rayon::prelude::*;
+
+#[derive(Debug, Clone, Copy)]
 pub struct Dim<T> {
     width: T,
     height: T,
@@ -38,6 +41,7 @@ pub fn load_gif(path: impl AsRef<Path>, dim: impl Into<Dim<u32>>) -> ImageResult
         .collect()
 }
 
+#[derive(Debug)]
 pub enum Avatar {
     Animated(Vec<image::RgbaImage>),
     Fixed(image::DynamicImage),
@@ -73,4 +77,64 @@ pub async fn load_avatar(url: &str, dim: impl Into<Dim<u32>>) -> Result<Avatar, 
     };
 
     Ok(avatar)
+}
+
+pub struct GifBuilder {
+    frames: Vec<RgbaImage>,
+    dim: Dim<u16>,
+}
+
+impl GifBuilder {
+    pub fn from_background_frames<Frames, D>(frames: Frames, dim: D) -> Self
+    where
+        Frames: IntoIterator<Item = RgbaImage>,
+        D: Into<Dim<u16>>,
+    {
+        Self {
+            frames: frames.into_iter().collect::<Vec<_>>(),
+            dim: dim.into(),
+        }
+    }
+
+    pub fn overlay<Frame, Pos>(&mut self, frames: &[Frame], positions: &[Pos]) -> &mut Self
+    where
+        Frame: GenericImageView<Pixel = Rgba<u8>> + Send + Sync,
+        Pos: Into<(u32, u32)> + Copy + Send + Sync,
+    {
+        self.frames
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, frame)| {
+                let overlay_frame = &frames[idx % frames.len()];
+                let (x, y) = positions[idx % positions.len()].into();
+                image::imageops::overlay(frame, overlay_frame, x, y)
+            });
+
+        self
+    }
+
+    pub fn finish(self) -> Result<Vec<u8>, gif::EncodingError> {
+        let Dim { width, height } = self.dim;
+
+        let gif_frames = self
+            .frames
+            .into_par_iter()
+            .map(|mut bg_frame| {
+                let mut frame = gif::Frame::from_rgba_speed(width, height, &mut bg_frame, 10);
+                frame.dispose = gif::DisposalMethod::Background;
+                frame
+            })
+            .collect::<Vec<_>>();
+
+        let mut writer = std::io::BufWriter::new(Vec::with_capacity(1 << 20));
+        {
+            let mut encoder = gif::Encoder::new(&mut writer, width, height, &[])?;
+            for frame in gif_frames {
+                encoder.write_frame(&frame)?;
+            }
+            encoder.set_repeat(gif::Repeat::Infinite)?;
+        }
+
+        Ok(writer.into_inner().expect("Flushing a Vec cannot fail"))
+    }
 }
