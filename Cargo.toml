@@ -2,6 +2,9 @@
 members = [
     "globibot-core",
     "globibot-bot",
+
+    "globibot-plugin-common",
+
     "globibot-plugin-ping",
     "globibot-plugin-tuck",
     "globibot-plugin-lang-detect",

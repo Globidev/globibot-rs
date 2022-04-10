@@ -1,0 +1,13 @@
+[package]
+name = "globibot-plugin-common"
+version = "0.1.0"
+authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+image = "0.23"
+libwebp-image = "0.2"
+
+reqwest = "0.11"
+
+thiserror = "1.0"
