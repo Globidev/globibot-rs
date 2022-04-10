@@ -34,8 +34,14 @@ pub trait Protocol {
     async fn content_safe(content: String, guild_id: Option<GuildId>) -> ProtocolResult<String>;
 
     async fn create_global_command(data: Value) -> ProtocolResult<ApplicationCommand>;
+    async fn edit_global_command(cmd_id: u64, data: Value) -> ProtocolResult<ApplicationCommand>;
 
     async fn create_guild_command(
+        guild_id: GuildId,
+        data: Value,
+    ) -> ProtocolResult<ApplicationCommand>;
+    async fn edit_guild_command(
+        cmd_id: u64,
         guild_id: GuildId,
         data: Value,
     ) -> ProtocolResult<ApplicationCommand>;

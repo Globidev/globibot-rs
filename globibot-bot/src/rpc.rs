@@ -183,6 +183,18 @@ impl Protocol for Server {
             .await?)
     }
 
+    async fn edit_global_command(
+        self,
+        _ctx: Context,
+        application_id: u64,
+        data: serde_json::Value,
+    ) -> ProtocolResult<ApplicationCommand> {
+        Ok(self
+            .discord_http
+            .edit_global_application_command(application_id, &data)
+            .await?)
+    }
+
     async fn create_guild_command(
         self,
         _ctx: Context,
@@ -192,6 +204,19 @@ impl Protocol for Server {
         Ok(self
             .discord_http
             .create_guild_application_command(guild_id.0, &data)
+            .await?)
+    }
+
+    async fn edit_guild_command(
+        self,
+        _ctx: Context,
+        cmd_id: u64,
+        guild_id: GuildId,
+        data: serde_json::Value,
+    ) -> ProtocolResult<ApplicationCommand> {
+        Ok(self
+            .discord_http
+            .edit_guild_application_command(cmd_id, guild_id.0, &data)
             .await?)
     }
 
