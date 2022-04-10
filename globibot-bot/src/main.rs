@@ -8,7 +8,6 @@ use std::{env, io, num::ParseIntError};
 
 use futures::TryFutureExt;
 use globibot_core::transport::{Protocol, Tcp};
-use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
@@ -32,7 +31,7 @@ async fn main() -> Result<(), AppError> {
     let run_rpc_server = rpc::run_server(raw_rpc_clients, dicord_cache_and_http);
     let run_discord_client = discord_client.start();
 
-    info!("Bot running");
+    tracing::info!("Bot running");
 
     futures::try_join!(
         publish_events.err_into::<AppError>(),

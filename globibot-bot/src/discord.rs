@@ -11,7 +11,6 @@ use serenity::{
     },
     Client,
 };
-use tracing::info;
 
 struct EventHandler<Transport> {
     event_publisher: SharedEventPublisher<Transport>,
@@ -50,7 +49,7 @@ impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Trans
     }
 
     async fn cache_ready(&self, _ctx: Context, _guilds: Vec<GuildId>) {
-        info!("CACHE READY!");
+        tracing::info!("CACHE READY!");
     }
 
     async fn message_delete(

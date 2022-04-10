@@ -2,6 +2,7 @@ use crate::transport::{frame_transport, FramedRead, FramedStream, FramedWrite};
 
 use futures::{Future, SinkExt, StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serenity::model::{
     channel::{Message, ReactionType},
     id::{ChannelId, GuildId, MessageId},
@@ -32,23 +33,17 @@ pub trait Protocol {
     async fn start_typing(chan_id: ChannelId) -> ProtocolResult<()>;
     async fn content_safe(content: String, guild_id: Option<GuildId>) -> ProtocolResult<String>;
 
-    async fn create_global_command(data: serde_json::Value) -> ProtocolResult<ApplicationCommand>;
+    async fn create_global_command(data: Value) -> ProtocolResult<ApplicationCommand>;
 
     async fn create_guild_command(
         guild_id: GuildId,
-        data: serde_json::Value,
+        data: Value,
     ) -> ProtocolResult<ApplicationCommand>;
 
-    async fn create_interaction_response(
-        id: u64,
-        token: String,
-        data: serde_json::Value,
-    ) -> ProtocolResult<()>;
+    async fn create_interaction_response(id: u64, token: String, data: Value)
+        -> ProtocolResult<()>;
 
-    async fn edit_interaction_response(
-        token: String,
-        data: serde_json::Value,
-    ) -> ProtocolResult<Message>;
+    async fn edit_interaction_response(token: String, data: Value) -> ProtocolResult<Message>;
 
     async fn create_reaction(
         chan_id: ChannelId,
