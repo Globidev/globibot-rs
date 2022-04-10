@@ -26,7 +26,7 @@ use globibot_core::{
     },
     transport::Tcp,
 };
-use globibot_plugin_slap::{paste_avatar, AvatarPositions, Dimension, PasteAvatarPositions};
+use globibot_plugin_common::imageops::{load_avatar, Avatar, GifBuilder};
 use image::RgbaImage;
 use rand::Rng;
 
@@ -34,9 +34,10 @@ type PluginError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Clone)]
 struct SlapDescriptor {
-    dimension: Dimension,
-    avatar_dimensions: Dimension,
-    avatar_positions: AvatarPositions,
+    dim: (u16, u16),
+    avatar_dim: (u16, u16),
+    slapper_positions: Vec<(u32, u32)>,
+    slapped_positions: Vec<(u32, u32)>,
     frames: Vec<RgbaImage>,
 }
 
@@ -162,21 +163,17 @@ async fn main() {
 
     let slap_descriptors = vec![
         SlapDescriptor {
-            dimension: (2560, 1707),
-            avatar_dimensions: (300, 300),
-            avatar_positions: |_| PasteAvatarPositions {
-                slapped_position: Some((751, 266)),
-                slapper_position: Some((1631, 207)),
-            },
+            dim: (2560, 1707),
+            avatar_dim: (300, 300),
+            slapper_positions: vec![(1631, 207)],
+            slapped_positions: vec![(751, 266)],
             frames: vec![static_image],
         },
         SlapDescriptor {
-            dimension: (480, 480),
-            avatar_dimensions: (50, 50),
-            avatar_positions: |idx| PasteAvatarPositions {
-                slapped_position: Some(ROCK_POS[idx as usize]),
-                slapper_position: Some(SMITH_POS[idx as usize]),
-            },
+            dim: (480, 480),
+            avatar_dim: (50, 50),
+            slapper_positions: SMITH_POS.to_vec(),
+            slapped_positions: ROCK_POS.to_vec(),
             frames: animated_image_frames,
         },
     ];
@@ -226,24 +223,26 @@ impl SlapPlugin {
             .unwrap_or_else(|| rand::thread_rng().gen_range(0..self.slap_descriptors.len()));
         let desc = self.slap_descriptors[idx].clone();
 
-        let avatars = futures::try_join!(
-            globibot_plugin_common::imageops::load_avatar(
-                slapper_avatar_url,
-                desc.avatar_dimensions
-            ),
-            globibot_plugin_common::imageops::load_avatar(
-                slapped_avatar_url,
-                desc.avatar_dimensions
-            ),
+        let (slapper_avatar, slapped_avatar) = futures::try_join!(
+            load_avatar(slapper_avatar_url, desc.avatar_dim),
+            load_avatar(slapped_avatar_url, desc.avatar_dim),
         )?;
 
         let t0 = Instant::now();
         let gif = tokio::task::spawn_blocking(move || {
-            paste_avatar(
-                (desc.frames, desc.dimension),
-                avatars,
-                desc.avatar_positions,
-            )
+            let mut builder = GifBuilder::from_background_frames(desc.frames, desc.dim);
+
+            match slapper_avatar {
+                Avatar::Animated(frames) => builder.overlay(&frames, &desc.slapper_positions),
+                Avatar::Fixed(frame) => builder.overlay(&[frame], &desc.slapper_positions),
+            };
+
+            match slapped_avatar {
+                Avatar::Animated(frames) => builder.overlay(&frames, &desc.slapped_positions),
+                Avatar::Fixed(frame) => builder.overlay(&[frame], &desc.slapped_positions),
+            };
+
+            builder.finish()
         })
         .await??;
         tracing::info!("Generated image in {}ms", t0.elapsed().as_millis());
