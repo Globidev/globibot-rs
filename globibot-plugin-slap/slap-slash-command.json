@@ -1,0 +1,28 @@
+{
+    "name": "slap",
+    "description": "Slap someone you don't like",
+    "options": [
+        {
+            "name": "target",
+            "description": "The user to slap",
+            "type": 6,
+            "required": true
+        },
+        {
+            "name": "flavor",
+            "description": "The way you want to slap them",
+            "type": 4,
+            "choices": [
+                {
+                    "name": "HD static slap",
+                    "value": 0
+                },
+                {
+                    "name": "Animated slap",
+                    "value": 1
+                }
+            ],
+            "required": false
+        }
+    ]
+}

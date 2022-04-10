@@ -8,5 +8,6 @@ COPY ./target-builder/release/globibot-plugin-rateme /plugins/rateme
 COPY ./target-builder/release/globibot-plugin-ping /plugins/ping
 COPY ./target-builder/release/globibot-plugin-tuck /plugins/tuck
 COPY ./target-builder/release/globibot-plugin-lang-detect /plugins/lang-detect
+COPY ./target-builder/release/globibot-plugin-slap /plugins/slap
 
 CMD "/globibot"

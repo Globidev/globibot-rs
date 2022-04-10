@@ -8,6 +8,7 @@ members = [
     "globibot-plugin-ping",
     "globibot-plugin-tuck",
     "globibot-plugin-lang-detect",
+    "globibot-plugin-slap",
 ]
 
 [profile.dev.package."*"]

@@ -18,9 +18,6 @@ services:
   plugin-openai:
     image: 'globidocker/globibot'
 
-    depends_on:
-      - bot
-
     command: ['/plugins/openai']
 
     environment:
@@ -29,9 +26,6 @@ services:
 
   plugin-rateme:
     image: 'globidocker/globibot'
-
-    depends_on:
-      - bot
 
     command: ['/plugins/rateme']
 
@@ -48,10 +42,10 @@ services:
   plugin-tuck:
     image: 'globidocker/globibot'
 
-    depends_on:
-      - bot
-
-    command: ['/plugins/tuck']
+    command: [
+      '/plugins/tuck',
+      # '--update-slash-cmd',
+    ]
 
     volumes:
       - '${TUCK_IMG_PATH}:/imgs'
@@ -65,17 +59,34 @@ services:
 
       RUST_LOG: 'globibot_plugin_tuck=debug'
 
-  plugin-lang-detect:
+  plugin-slap:
     image: 'globidocker/globibot'
 
-    depends_on:
-      - bot
+    command: [
+      '/plugins/slap',
+    ]
 
-    command: ['/plugins/lang-detect']
+    volumes:
+      - '${SLAP_IMG_PATH}:/imgs'
 
     environment:
       SUBSCRIBER_ADDR: 'bot:4242'
       RPC_ADDR: 'bot:4243'
 
-      LANG_DETECT_API_KEY: '${LANG_DETECT_API_KEY}'
-      LANG_DETECT_ENABLED_CHANNELS: '${LANG_DETECT_ENABLED_CHANNELS}'
+      SLAP_IMG_PATH: '/imgs'
+      SLAP_COMMAND_ID: '${SLAP_COMMAND_ID}'
+
+      RUST_LOG: 'globibot_plugin_slap=debug'
+
+
+  # plugin-lang-detect:
+  #   image: 'globidocker/globibot'
+
+  #   command: ['/plugins/lang-detect']
+
+  #   environment:
+  #     SUBSCRIBER_ADDR: 'bot:4242'
+  #     RPC_ADDR: 'bot:4243'
+
+  #     LANG_DETECT_API_KEY: '${LANG_DETECT_API_KEY}'
+  #     LANG_DETECT_ENABLED_CHANNELS: '${LANG_DETECT_ENABLED_CHANNELS}'
