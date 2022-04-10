@@ -58,7 +58,7 @@ pub trait PluginExt: Plugin {
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
         E: EndpointPolicy<Policy = Self::EventsPolicy>,
     {
-        Self::connect_init(endpoints, |_| std::future::ready(self))
+        async move { Self::connect_init(endpoints, |_| std::future::ready(self)).await }
     }
 
     fn connect_init<R, E, F, Fut>(
