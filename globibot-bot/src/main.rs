@@ -44,7 +44,7 @@ async fn main() -> Result<(), AppError> {
 #[derive(Debug, derive_more::From)]
 enum AppError {
     IO(io::Error),
-    Discord(serenity::Error),
+    Discord(globibot_core::serenity::Error),
     MissingEnvVar(env::VarError),
     MalformedApplicationId(ParseIntError),
 }

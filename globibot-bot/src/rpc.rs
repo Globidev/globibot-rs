@@ -2,7 +2,7 @@ use std::{io, sync::Arc, time::Duration};
 
 use futures::{pin_mut, Stream, StreamExt};
 use globibot_core::rpc::{self, AcceptError};
-use serenity::{
+use globibot_core::serenity::{
     cache::Cache as DiscordCache,
     http::Http as DiscordHttp,
     model::{

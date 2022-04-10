@@ -21,18 +21,3 @@ tracing-subscriber = "0.3"
 tarpc = { version = "0.28", features = ["serde1", "serde-transport"] }
 
 globibot-core = { path = "../globibot-core" }
-
-[dependencies.serenity]
-default_features = false
-features = [
-  "builder",
-  "cache",
-  "client",
-  "gateway",
-  "model",
-  "http",
-  "utils",
-  "rustls_backend",
-  "unstable_discord_api",
-]
-version = "0.10"

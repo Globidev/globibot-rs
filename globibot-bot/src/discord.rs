@@ -1,8 +1,8 @@
 use crate::events::{EventSink, SharedPublisher as SharedEventPublisher};
 
 use globibot_core::events::{Event, EventType};
-use serenity::{
-    async_trait,
+use globibot_core::serenity::{
+    self, async_trait,
     client::Context,
     model::{
         channel::Message,
