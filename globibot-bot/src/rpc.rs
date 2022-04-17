@@ -216,7 +216,7 @@ impl Protocol for Server {
     ) -> ProtocolResult<ApplicationCommand> {
         Ok(self
             .discord_http
-            .edit_guild_application_command(cmd_id, guild_id.0, &data)
+            .edit_guild_application_command(guild_id.0, cmd_id, &data)
             .await?)
     }
 
