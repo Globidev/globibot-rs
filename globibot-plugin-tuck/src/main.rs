@@ -1,15 +1,6 @@
 #![feature(type_alias_impl_trait)]
 
-use std::{
-    convert::TryInto,
-    error::Error,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
+use std::{convert::TryInto, error::Error, path::PathBuf, sync::Arc, time::Instant};
 
 use globibot_core::{
     events::{Event, EventType},
@@ -121,7 +112,6 @@ async fn main() {
             .parse()
             .expect("Malformed command id"),
         tuck_gifs,
-        command_updated: Arc::new(AtomicBool::new(false)),
     };
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
@@ -147,7 +137,6 @@ fn load_env(key: &str) -> String {
 struct TuckPlugin<const GIF_COUNT: usize> {
     command_id: u64,
     tuck_gifs: [(TuckGifDescriptor, Vec<RgbaImage>); GIF_COUNT],
-    command_updated: Arc<AtomicBool>,
 }
 
 impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
@@ -199,20 +188,6 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
 
     fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
         async move {
-            if !self.command_updated.load(Ordering::Relaxed)
-                && std::env::args().any(|x| x == "--update-slash-cmd")
-            {
-                self.command_updated.store(true, Ordering::Relaxed);
-                let application = rpc
-                    .edit_global_command(
-                        rpc_context(),
-                        self.command_id,
-                        serde_json::from_str(include_str!("../tuck-slash-command.json")).unwrap(),
-                    )
-                    .await??;
-                println!("UPDTED COMMAND ID: {}", application.id);
-            }
-
             match event {
                 Event::MessageCreate { message: _ } => {}
                 Event::InteractionCreate {
@@ -235,7 +210,6 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                         Some(ApplicationCommandInteractionDataOptionValue::User(u, _)) => u.clone(),
                         _ => return Ok(()),
                     };
-
                     let gif_idx = match command
                         .options
                         .iter()
