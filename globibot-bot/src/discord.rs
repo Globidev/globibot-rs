@@ -1,6 +1,6 @@
-use crate::events::{EventSink, SharedPublisher as SharedEventPublisher};
+use crate::events::Publisher;
 
-use globibot_core::events::{Event, EventType};
+use globibot_core::events::Event;
 use globibot_core::serenity::{
     self, async_trait,
     client::Context,
@@ -12,40 +12,22 @@ use globibot_core::serenity::{
     Client,
 };
 
-struct EventHandler<Transport> {
-    event_publisher: SharedEventPublisher<Transport>,
-}
-
-impl<Transport: EventSink> EventHandler<Transport> {
-    async fn publish(&self, event_type: EventType, event: Event) {
-        self.event_publisher
-            .lock()
-            .await
-            .publish(event_type, event)
-            .await
-    }
+struct EventHandler {
+    publisher: Publisher,
 }
 
 #[async_trait]
-impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Transport> {
+impl serenity::client::EventHandler for EventHandler {
     async fn message(&self, _ctx: Context, new_message: Message) {
-        self.publish(
-            EventType::MessageCreate,
-            Event::MessageCreate {
-                message: new_message,
-            },
-        )
-        .await
+        self.publisher.broadcast(Event::MessageCreate {
+            message: new_message,
+        });
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
-        self.publish(
-            EventType::InteractionCreate,
-            Event::InteractionCreate {
-                interaction: interaction.application_command().unwrap(),
-            },
-        )
-        .await
+        self.publisher.broadcast(Event::InteractionCreate {
+            interaction: interaction.application_command().unwrap(),
+        });
     }
 
     async fn cache_ready(&self, _ctx: Context, _guilds: Vec<GuildId>) {
@@ -59,23 +41,19 @@ impl<Transport: EventSink> serenity::client::EventHandler for EventHandler<Trans
         message_id: MessageId,
         _gid: Option<GuildId>,
     ) {
-        self.publish(
-            EventType::MessageDelete,
-            Event::MessageDelete {
-                channel_id,
-                message_id,
-            },
-        )
-        .await
+        self.publisher.broadcast(Event::MessageDelete {
+            channel_id,
+            message_id,
+        });
     }
 }
 
-pub async fn client<Transport: EventSink>(
+pub async fn client(
     token: &str,
-    event_publisher: SharedEventPublisher<Transport>,
+    publisher: Publisher,
     application_id: u64,
 ) -> serenity::Result<Client> {
-    let event_handler = EventHandler { event_publisher };
+    let event_handler = EventHandler { publisher };
 
     let discord_client = Client::builder(token)
         .event_handler(event_handler)

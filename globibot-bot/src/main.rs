@@ -13,7 +13,7 @@ use globibot_core::transport::{Protocol, Tcp};
 async fn main() -> Result<(), AppError> {
     tracing_subscriber::fmt::init();
 
-    let shared_publisher = events::SharedPublisher::default();
+    let publisher = events::Publisher::new();
 
     let subscriber_addr = env::var("SUBSCRIBER_ADDR")?;
     let rpc_addr = env::var("RPC_ADDR")?;
@@ -24,10 +24,10 @@ async fn main() -> Result<(), AppError> {
     let discord_token = env::var("DISCORD_TOKEN")?;
     let application_id = env::var("APPLICATION_ID")?.parse()?;
     let mut discord_client =
-        discord::client(&discord_token, shared_publisher.clone(), application_id).await?;
+        discord::client(&discord_token, publisher.clone(), application_id).await?;
     let dicord_cache_and_http = discord_client.cache_and_http.clone();
 
-    let publish_events = events::run_publisher(raw_event_subscribers, shared_publisher);
+    let publish_events = events::run_publisher(raw_event_subscribers, publisher);
     let run_rpc_server = rpc::run_server(raw_rpc_clients, dicord_cache_and_http);
     let run_discord_client = discord_client.start();
 

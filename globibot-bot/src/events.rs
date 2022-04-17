@@ -1,39 +1,28 @@
-use futures::{
-    future, lock::Mutex, pin_mut, stream::FuturesUnordered, Sink, SinkExt, Stream, StreamExt,
-};
-use globibot_core::events::{accept, AcceptError, Event, EventType, EventWrite};
-use std::{collections::HashSet, fmt::Display, io, sync::Arc, time::Duration};
+use futures::{pin_mut, Sink, SinkExt, Stream, StreamExt};
+use globibot_core::events::{accept, AcceptError, Event, EventType};
+use std::{collections::HashSet, fmt::Display, io, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
+    sync::broadcast,
     time::timeout,
 };
+use tracing::{debug, info, warn};
 
 pub trait EventSink = Sink<Event, Error: Display> + Send + Unpin + 'static;
 
-type FramedSharedPublisher<T> = SharedPublisher<EventWrite<T>>;
-
-use tracing::{debug, info, warn};
-
-pub async fn run_publisher<S, T>(
-    transports: S,
-    shared_publisher: FramedSharedPublisher<T>,
-) -> io::Result<()>
+pub async fn run_publisher<S, T>(transports: S, publisher: Publisher) -> io::Result<()>
 where
     S: Stream<Item = io::Result<T>>,
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     pin_mut!(transports);
 
-    while let Some(transport_result) = transports.next().await {
-        let transport = transport_result?;
+    while let Some(transport) = transports.next().await.transpose()? {
         debug!("About to accept new subscriber");
         match accept(transport).await {
             Ok((subscription, subscriber)) => {
                 info!("new event subscriber: '{id}'", id = subscription.id);
-                shared_publisher
-                    .lock()
-                    .await
-                    .add_subscriber(subscriber, subscription.events);
+                publisher.add_subscriber(subscriber, subscription.events);
             }
             Err(AcceptError::IO(err)) => {
                 warn!("IO error while accepting new subscriber: {}", err);
@@ -50,65 +39,74 @@ where
     Ok(())
 }
 
-pub type SharedPublisher<T> = Arc<Mutex<Publisher<T>>>;
-
-pub struct Publisher<Transport> {
-    subscribers: Vec<(Transport, HashSet<EventType>)>,
+#[derive(Debug, Clone)]
+struct BroadcastMessage {
+    event: Event,
 }
 
-impl<Transport: EventSink> Publisher<Transport> {
-    pub fn add_subscriber(
-        &mut self,
-        transport: Transport,
-        events: impl IntoIterator<Item = EventType>,
-    ) {
-        self.subscribers
-            .push((transport, events.into_iter().collect()))
-    }
+#[derive(Debug, Clone)]
+pub struct Publisher {
+    sender: broadcast::Sender<BroadcastMessage>,
+}
 
-    pub async fn publish(&mut self, event_type: EventType, event: Event) {
-        let subscribers_for_event =
-            self.subscribers
-                .iter_mut()
-                .enumerate()
-                .filter_map(|(idx, (transport, events))| {
-                    events.contains(&event_type).then(|| (idx, transport))
-                });
+#[derive(Debug)]
+struct Subscriber<Transport> {
+    transport: Transport,
+    events: HashSet<EventType>,
+    receiver: broadcast::Receiver<BroadcastMessage>,
+}
 
-        let sends = subscribers_for_event
-            .map(move |(idx, transport)| {
-                let event = event.clone();
-                async move {
-                    let timed_send = timeout(Duration::from_secs(5), transport.send(event));
-                    match timed_send.await {
-                        Ok(Ok(_)) => None,
-                        Ok(Err(why)) => {
-                            warn!("Failed to send event to subscriber: {}", why);
-                            Some(idx)
-                        }
-                        Err(_timed_out) => {
-                            warn!("Timed out while sending event to subscriber");
-                            Some(idx)
-                        }
-                    }
+impl<Transport: EventSink> Subscriber<Transport> {
+    async fn run(mut self) {
+        while let Ok(BroadcastMessage { event }) = self.receiver.recv().await {
+            if !self.events.contains(&event.ty()) {
+                continue;
+            }
+
+            let send_task = timeout(Duration::from_secs(5), self.transport.send(event.clone()));
+
+            match send_task.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(why)) => {
+                    warn!("Failed to send event to subscriber: {why}");
+                    return;
                 }
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        let mut failed_sends = sends.filter_map(future::ready).collect::<Vec<_>>().await;
-
-        failed_sends.sort_unstable();
-
-        for &idx in failed_sends.iter().rev() {
-            self.subscribers.remove(idx);
+                Err(_timed_out) => {
+                    warn!("Timed out while sending event to subscriber");
+                    return;
+                }
+            }
         }
     }
 }
 
-impl<T> Default for Publisher<T> {
-    fn default() -> Self {
+impl Publisher {
+    pub fn new() -> Self {
         Self {
-            subscribers: Default::default(),
+            sender: broadcast::channel(16).0,
+        }
+    }
+
+    pub fn add_subscriber(
+        &self,
+        transport: impl EventSink,
+        events: impl IntoIterator<Item = EventType>,
+    ) {
+        let subscriber = Subscriber {
+            transport,
+            events: events.into_iter().collect(),
+            receiver: self.sender.subscribe(),
+        };
+
+        tokio::spawn(async move { subscriber.run().await });
+    }
+
+    pub fn broadcast(&self, event: Event) {
+        let ty = event.ty();
+
+        match self.sender.send(BroadcastMessage { event }) {
+            Ok(count) => debug!("Broadcasted {ty:?} to {count} subscribers"),
+            Err(_) => warn!("Failed to broadcast event"),
         }
     }
 }

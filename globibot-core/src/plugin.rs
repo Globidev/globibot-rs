@@ -123,11 +123,11 @@ where
                     match event_res {
                         Ok(event) => {
                             if let Err(why) = plugin.on_event(rpc, event).await {
-                                tracing::warn!("Failed to handle event: {}", why.to_string());
+                                tracing::warn!("Failed to handle event: {why}");
                             }
                         }
                         Err(why) => {
-                            tracing::error!("Invalid event: {}", why);
+                            tracing::error!("Invalid event: {why}");
                         }
                     }
                 }

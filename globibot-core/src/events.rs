@@ -35,6 +35,16 @@ pub enum EventType {
     InteractionCreate,
 }
 
+impl Event {
+    pub fn ty(&self) -> EventType {
+        match self {
+            Event::MessageCreate { .. } => EventType::MessageCreate,
+            Event::MessageDelete { .. } => EventType::MessageDelete,
+            Event::InteractionCreate { .. } => EventType::InteractionCreate,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     pub id: String,
