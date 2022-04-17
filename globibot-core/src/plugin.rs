@@ -96,7 +96,7 @@ impl<T: Plugin> PluginExt for T {}
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
     plugin: T,
-    rpc: Rpc,
+    pub rpc: Rpc,
     events: Events,
 }
 
