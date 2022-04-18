@@ -20,7 +20,7 @@ use tarpc::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use rpc::{Protocol, ProtocolResult, ServerChannel};
+use rpc::{DiscordApiResult, Protocol, ServerChannel};
 use tracing::{debug, info, warn};
 
 pub async fn run_server<S, T>(transports: S, cache_and_http: Arc<CacheAndHttp>) -> io::Result<()>
@@ -98,7 +98,7 @@ impl Protocol for Server {
         _ctx: Context,
         chan_id: ChannelId,
         content: String,
-    ) -> ProtocolResult<Message> {
+    ) -> DiscordApiResult<Message> {
         Ok(chan_id
             .send_message(self.discord_http, |message| {
                 message.content(content);
@@ -112,7 +112,7 @@ impl Protocol for Server {
         _ctx: Context,
         chan_id: ChannelId,
         message_id: MessageId,
-    ) -> ProtocolResult<()> {
+    ) -> DiscordApiResult<()> {
         Ok(chan_id
             .delete_message(self.discord_http, message_id)
             .await?)
@@ -123,7 +123,7 @@ impl Protocol for Server {
         _ctx: Context,
         mut message: Message,
         new_content: String,
-    ) -> ProtocolResult<Message> {
+    ) -> DiscordApiResult<Message> {
         message
             .edit(self.discord_http, |message| message.content(new_content))
             .await?;
@@ -136,7 +136,7 @@ impl Protocol for Server {
         chan_id: ChannelId,
         data: Vec<u8>,
         name: String,
-    ) -> ProtocolResult<Message> {
+    ) -> DiscordApiResult<Message> {
         Ok(chan_id
             .send_message(self.discord_http, |message| {
                 message.add_file((data.as_slice(), name.as_str()));
@@ -145,11 +145,8 @@ impl Protocol for Server {
             .await?)
     }
 
-    async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> ProtocolResult<()> {
-        let typing = self
-            .discord_http
-            .start_typing(chan_id.0)
-            .map_err(|e| format!("{}", e))?;
+    async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<()> {
+        let typing = self.discord_http.start_typing(chan_id.0)?;
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
@@ -164,7 +161,7 @@ impl Protocol for Server {
         _ctx: Context,
         content: String,
         guild_id: Option<GuildId>,
-    ) -> ProtocolResult<String> {
+    ) -> DiscordApiResult<String> {
         let mut opts = ContentSafeOptions::new().show_discriminator(false);
         if let Some(gid) = guild_id {
             opts = opts.display_as_member_from(gid);
@@ -176,7 +173,7 @@ impl Protocol for Server {
         self,
         _ctx: Context,
         data: serde_json::Value,
-    ) -> ProtocolResult<ApplicationCommand> {
+    ) -> DiscordApiResult<ApplicationCommand> {
         Ok(self
             .discord_http
             .create_global_application_command(&data)
@@ -188,7 +185,7 @@ impl Protocol for Server {
         _ctx: Context,
         application_id: u64,
         data: serde_json::Value,
-    ) -> ProtocolResult<ApplicationCommand> {
+    ) -> DiscordApiResult<ApplicationCommand> {
         Ok(self
             .discord_http
             .edit_global_application_command(application_id, &data)
@@ -200,7 +197,7 @@ impl Protocol for Server {
         _ctx: Context,
         guild_id: GuildId,
         data: serde_json::Value,
-    ) -> ProtocolResult<ApplicationCommand> {
+    ) -> DiscordApiResult<ApplicationCommand> {
         Ok(self
             .discord_http
             .create_guild_application_command(guild_id.0, &data)
@@ -213,7 +210,7 @@ impl Protocol for Server {
         cmd_id: u64,
         guild_id: GuildId,
         data: serde_json::Value,
-    ) -> ProtocolResult<ApplicationCommand> {
+    ) -> DiscordApiResult<ApplicationCommand> {
         Ok(self
             .discord_http
             .edit_guild_application_command(guild_id.0, cmd_id, &data)
@@ -226,7 +223,7 @@ impl Protocol for Server {
         id: u64,
         token: String,
         data: serde_json::Value,
-    ) -> ProtocolResult<()> {
+    ) -> DiscordApiResult<()> {
         Ok(self
             .discord_http
             .create_interaction_response(id, &token, &data)
@@ -238,7 +235,7 @@ impl Protocol for Server {
         _ctx: Context,
         token: String,
         data: serde_json::Value,
-    ) -> ProtocolResult<Message> {
+    ) -> DiscordApiResult<Message> {
         Ok(self
             .discord_http
             .edit_original_interaction_response(&token, &data)
@@ -251,7 +248,7 @@ impl Protocol for Server {
         chan_id: ChannelId,
         message_id: MessageId,
         reaction: ReactionType,
-    ) -> ProtocolResult<()> {
+    ) -> DiscordApiResult<()> {
         Ok(chan_id
             .create_reaction(self.discord_http, message_id, reaction)
             .await?)

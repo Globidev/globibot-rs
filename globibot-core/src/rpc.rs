@@ -26,52 +26,54 @@ pub use tarpc::context;
 pub trait Protocol {
     async fn current_user() -> CurrentUser;
 
-    async fn send_message(chan_id: ChannelId, content: String) -> ProtocolResult<Message>;
-    async fn edit_message(message: Message, new_content: String) -> ProtocolResult<Message>;
-    async fn delete_message(chan_id: ChannelId, message_id: MessageId) -> ProtocolResult<()>;
-    async fn send_file(chan_id: ChannelId, data: Vec<u8>, name: String) -> ProtocolResult<Message>;
-    async fn start_typing(chan_id: ChannelId) -> ProtocolResult<()>;
-    async fn content_safe(content: String, guild_id: Option<GuildId>) -> ProtocolResult<String>;
+    async fn send_message(chan_id: ChannelId, content: String) -> DiscordApiResult<Message>;
+    async fn edit_message(message: Message, new_content: String) -> DiscordApiResult<Message>;
+    async fn delete_message(chan_id: ChannelId, message_id: MessageId) -> DiscordApiResult<()>;
+    async fn send_file(
+        chan_id: ChannelId,
+        data: Vec<u8>,
+        name: String,
+    ) -> DiscordApiResult<Message>;
+    async fn start_typing(chan_id: ChannelId) -> DiscordApiResult<()>;
+    async fn content_safe(content: String, guild_id: Option<GuildId>) -> DiscordApiResult<String>;
 
-    async fn create_global_command(data: Value) -> ProtocolResult<ApplicationCommand>;
-    async fn edit_global_command(cmd_id: u64, data: Value) -> ProtocolResult<ApplicationCommand>;
+    async fn create_global_command(data: Value) -> DiscordApiResult<ApplicationCommand>;
+    async fn edit_global_command(cmd_id: u64, data: Value) -> DiscordApiResult<ApplicationCommand>;
 
     async fn create_guild_command(
         guild_id: GuildId,
         data: Value,
-    ) -> ProtocolResult<ApplicationCommand>;
+    ) -> DiscordApiResult<ApplicationCommand>;
     async fn edit_guild_command(
         cmd_id: u64,
         guild_id: GuildId,
         data: Value,
-    ) -> ProtocolResult<ApplicationCommand>;
+    ) -> DiscordApiResult<ApplicationCommand>;
 
-    async fn create_interaction_response(id: u64, token: String, data: Value)
-        -> ProtocolResult<()>;
+    async fn create_interaction_response(
+        id: u64,
+        token: String,
+        data: Value,
+    ) -> DiscordApiResult<()>;
 
-    async fn edit_interaction_response(token: String, data: Value) -> ProtocolResult<Message>;
+    async fn edit_interaction_response(token: String, data: Value) -> DiscordApiResult<Message>;
 
     async fn create_reaction(
         chan_id: ChannelId,
         message_id: MessageId,
         reaction: ReactionType,
-    ) -> ProtocolResult<()>;
+    ) -> DiscordApiResult<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
-#[error("Protocol error: {0}")]
-pub struct ProtocolError(String);
-pub type ProtocolResult<T> = Result<T, ProtocolError>;
+#[error("Discord API error: {0}")]
+pub struct DiscordApiError(String);
 
-impl From<serenity::Error> for ProtocolError {
+pub type DiscordApiResult<T> = Result<T, DiscordApiError>;
+
+impl From<serenity::Error> for DiscordApiError {
     fn from(err: serenity::Error) -> Self {
         Self(err.to_string())
-    }
-}
-
-impl From<String> for ProtocolError {
-    fn from(err: String) -> Self {
-        Self(err)
     }
 }
 
