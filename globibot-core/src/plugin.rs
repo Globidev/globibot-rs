@@ -15,43 +15,7 @@ pub trait Plugin {
 
     type RpcPolicy: RpcContex;
     type EventsPolicy;
-}
 
-trait PluginID {
-    const ID: &'static str;
-}
-
-impl<T: Plugin> PluginID for T {
-    const ID: &'static str = T::ID;
-}
-
-pub struct HasRpc<const ENABLED: bool>;
-pub struct HasEvents<const ENABLED: bool>;
-
-pub trait RpcContex {
-    type Context: Clone;
-}
-
-impl RpcContex for HasRpc<true> {
-    type Context = rpc::ProtocolClient;
-}
-
-impl RpcContex for HasRpc<false> {
-    type Context = ();
-}
-
-pub trait HandleEvents: Plugin {
-    type Err;
-    type Future: Future<Output = Result<(), Self::Err>>;
-
-    fn on_event(
-        self: Arc<Self>,
-        ctx: <Self::RpcPolicy as RpcContex>::Context,
-        event: Event,
-    ) -> Self::Future;
-}
-
-pub trait PluginExt: Plugin {
     fn connect<R, E>(self, endpoints: Endpoints<R, E>) -> ConnectFut<Self, R, E>
     where
         Self: Sized,
@@ -86,13 +50,37 @@ pub trait PluginExt: Plugin {
     }
 }
 
+pub struct HasRpc<const ENABLED: bool>;
+pub struct HasEvents<const ENABLED: bool>;
+
+pub trait RpcContex {
+    type Context: Clone;
+}
+
+impl RpcContex for HasRpc<true> {
+    type Context = rpc::ProtocolClient;
+}
+
+impl RpcContex for HasRpc<false> {
+    type Context = ();
+}
+
+pub trait HandleEvents: Plugin {
+    type Err;
+    type Future: Future<Output = Result<(), Self::Err>>;
+
+    fn on_event(
+        self: Arc<Self>,
+        ctx: <Self::RpcPolicy as RpcContex>::Context,
+        event: Event,
+    ) -> Self::Future;
+}
+
 type ConnectFut<T, R: EndpointPolicy, E: EndpointPolicy> =
     impl Future<Output = io::Result<ConnectedPlugin<T, R::Client, E::Client>>>;
 
 type ConnectInitFut<T, R: EndpointPolicy, E: EndpointPolicy, F, Fut> =
     impl Future<Output = io::Result<ConnectedPlugin<T, R::Client, E::Client>>>;
-
-impl<T: Plugin> PluginExt for T {}
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
     plugin: T,

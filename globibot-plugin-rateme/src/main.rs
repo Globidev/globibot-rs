@@ -8,7 +8,7 @@ use std::{
 
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin, PluginExt},
+    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
         model::{

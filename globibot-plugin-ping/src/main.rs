@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error, sync::Arc};
 
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin, PluginExt},
+    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc, serenity,
     transport::Tcp,
 };
