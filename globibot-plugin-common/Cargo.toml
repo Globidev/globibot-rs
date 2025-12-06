@@ -2,7 +2,7 @@
 name = "globibot-plugin-common"
 version = "0.1.0"
 authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 image = "0.23"
@@ -11,7 +11,7 @@ gif = "0.11"
 
 rayon = "1.5"
 
-reqwest = "0.11"
+reqwest = { workspace = true }
 
-thiserror = "1.0"
+thiserror = { workspace = true }
 anyhow = "1.0"

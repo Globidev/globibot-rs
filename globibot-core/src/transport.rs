@@ -1,15 +1,15 @@
 use std::{io, path::Path};
 
 use futures::{
-    future::{self, Future},
     Stream, TryFutureExt,
+    future::{self, Future},
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream, ToSocketAddrs, UnixListener, UnixStream},
 };
-use tokio_serde::{formats::Json, Framed as SerdeFramed};
+use tokio_serde::{Framed as SerdeFramed, formats::Json};
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -24,11 +24,9 @@ pub type FramedWrite<T, Resp> = FramedStream<T, NoData, Resp>;
 pub trait Protocol {
     type Client;
     type ClientStream: Stream<Item = io::Result<Self::Client>>;
-    type ListenFuture: Future<Output = io::Result<Self::ClientStream>>;
-    type ConnectFuture: Future<Output = io::Result<Self::Client>>;
 
-    fn listen(self) -> Self::ListenFuture;
-    fn connect(self) -> Self::ConnectFuture;
+    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>>;
+    fn connect(self) -> impl Future<Output = io::Result<Self::Client>>;
 }
 
 pub(crate) fn frame_transport<T, Req, Resp>(transport: T) -> FramedStream<T, Req, Resp>
@@ -69,15 +67,13 @@ where
 {
     type Client = UnixStream;
     type ClientStream = UnixListenerStream;
-    type ListenFuture = impl Future<Output = io::Result<Self::ClientStream>>;
-    type ConnectFuture = impl Future<Output = io::Result<Self::Client>>;
 
-    fn listen(self) -> Self::ListenFuture {
+    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>> {
         let _ = std::fs::remove_file(&self.path);
         future::ready(UnixListener::bind(self.path).map(UnixListenerStream::new))
     }
 
-    fn connect(self) -> Self::ConnectFuture {
+    fn connect(self) -> impl Future<Output = io::Result<Self::Client>> {
         UnixStream::connect(self.path)
     }
 }
@@ -88,14 +84,12 @@ where
 {
     type Client = TcpStream;
     type ClientStream = TcpListenerStream;
-    type ListenFuture = impl Future<Output = io::Result<Self::ClientStream>>;
-    type ConnectFuture = impl Future<Output = io::Result<Self::Client>>;
 
-    fn listen(self) -> Self::ListenFuture {
+    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>> {
         TcpListener::bind(self.addr).map_ok(TcpListenerStream::new)
     }
 
-    fn connect(self) -> Self::ConnectFuture {
+    fn connect(self) -> impl Future<Output = io::Result<Self::Client>> {
         TcpStream::connect(self.addr)
     }
 }

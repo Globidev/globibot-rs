@@ -1,6 +1,4 @@
-#![feature(type_alias_impl_trait)]
-
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{collections::HashMap, error::Error};
 
 use globibot_core::{
     events::{Event, EventType},
@@ -10,7 +8,7 @@ use globibot_core::{
 };
 use serenity::model::{channel::Message, id::MessageId};
 
-use futures::{lock::Mutex, Future};
+use futures::lock::Mutex;
 
 #[tokio::main]
 async fn main() {
@@ -25,13 +23,12 @@ async fn main() {
         .rpc(Tcp::new(rpc_addr))
         .events(Tcp::new(subscriber_addr), events);
 
-    plugin
+    let p = plugin
         .connect(endpoints)
         .await
-        .expect("Failed to connect plugin")
-        .handle_events()
-        .await
-        .expect("Failed to run plugin");
+        .expect("Failed to connect plugin");
+
+    p.handle_events().await.expect("Failed to run plugin");
 }
 
 #[derive(Default)]
@@ -48,39 +45,32 @@ impl Plugin for PingPlugin {
 
 impl HandleEvents for PingPlugin {
     type Err = Box<dyn Error>;
-    type Future = impl Future<Output = Result<(), Self::Err>>;
 
-    fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
-        async move {
-            match event {
-                Event::MessageCreate { message } => {
-                    if message.content.starts_with("!ping") {
-                        let orig_message_id = message.id;
-                        let message = rpc
-                            .send_message(
-                                rpc::context::current(),
-                                message.channel_id,
-                                "pong!".into(),
-                            )
-                            .await??;
-                        self.message_map
-                            .lock()
-                            .await
-                            .insert(orig_message_id, message);
-                    }
+    async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
+        match event {
+            Event::MessageCreate { message } => {
+                if message.content.starts_with("!ping") {
+                    let orig_message_id = message.id;
+                    let message = rpc
+                        .send_message(rpc::context::current(), message.channel_id, "pong!".into())
+                        .await??;
+                    self.message_map
+                        .lock()
+                        .await
+                        .insert(orig_message_id, message);
                 }
-                Event::MessageDelete {
-                    channel_id,
-                    message_id,
-                } => {
-                    if let Some(message) = self.message_map.lock().await.get(&message_id) {
-                        rpc.delete_message(rpc::context::current(), channel_id, message.id)
-                            .await??;
-                    }
-                }
-                _ => (),
             }
-            Ok(())
+            Event::MessageDelete {
+                channel_id,
+                message_id,
+            } => {
+                if let Some(message) = self.message_map.lock().await.get(&message_id) {
+                    rpc.delete_message(rpc::context::current(), channel_id, message.id)
+                        .await??;
+                }
+            }
+            _ => (),
         }
+        Ok(())
     }
 }

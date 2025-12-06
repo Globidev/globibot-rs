@@ -1,13 +1,13 @@
-use crate::transport::{frame_transport, FramedRead, FramedWrite};
+use crate::transport::{FramedRead, FramedWrite, frame_transport};
 
 use std::{collections::HashSet, io, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serenity::model::{
+    application::CommandInteraction,
     channel::Message,
     id::{ChannelId, MessageId},
-    interactions::application_command::ApplicationCommandInteraction,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -24,7 +24,7 @@ pub enum Event {
         message_id: MessageId,
     },
     InteractionCreate {
-        interaction: ApplicationCommandInteraction,
+        interaction: CommandInteraction,
     },
 }
 
@@ -60,10 +60,13 @@ impl HandshakeRequest {
     }
 }
 
-#[derive(Debug, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
-    IO(io::Error),
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+    #[error("Handshake timed out")]
     HandshakeTimedOut,
+    #[error("Handshake missing")]
     HandshakeMissing,
 }
 

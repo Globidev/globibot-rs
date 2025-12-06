@@ -1,5 +1,5 @@
-use futures::{pin_mut, Sink, SinkExt, Stream, StreamExt};
-use globibot_core::events::{accept, AcceptError, Event, EventType};
+use futures::{Sink, SinkExt, Stream, StreamExt};
+use globibot_core::events::{AcceptError, Event, EventType, accept};
 use std::{collections::HashSet, fmt::Display, io, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -15,7 +15,7 @@ where
     S: Stream<Item = io::Result<T>>,
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    pin_mut!(transports);
+    let mut transports = std::pin::pin!(transports);
 
     while let Some(transport) = transports.next().await.transpose()? {
         debug!("About to accept new subscriber");

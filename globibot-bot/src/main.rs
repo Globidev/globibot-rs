@@ -1,4 +1,4 @@
-#![feature(type_alias_impl_trait, trait_alias, associated_type_bounds)]
+#![feature(trait_alias)]
 
 mod discord;
 mod events;
@@ -25,10 +25,13 @@ async fn main() -> Result<(), AppError> {
     let application_id = env::var("APPLICATION_ID")?.parse()?;
     let mut discord_client =
         discord::client(&discord_token, publisher.clone(), application_id).await?;
-    let dicord_cache_and_http = discord_client.cache_and_http.clone();
 
     let publish_events = events::run_publisher(raw_event_subscribers, publisher);
-    let run_rpc_server = rpc::run_server(raw_rpc_clients, dicord_cache_and_http);
+    let run_rpc_server = rpc::run_server(
+        raw_rpc_clients,
+        discord_client.cache.clone(),
+        discord_client.http.clone(),
+    );
     let run_discord_client = discord_client.start();
 
     tracing::info!("Bot running");
@@ -41,10 +44,23 @@ async fn main() -> Result<(), AppError> {
 
     Ok(())
 }
-#[derive(Debug, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 enum AppError {
-    IO(io::Error),
-    Discord(globibot_core::serenity::Error),
-    MissingEnvVar(env::VarError),
-    MalformedApplicationId(ParseIntError),
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+
+    #[error("Discord error: {0}")]
+    Discord(Box<globibot_core::serenity::Error>),
+
+    #[error("Missing environment variable: {0}")]
+    MissingEnvVar(#[from] env::VarError),
+
+    #[error("Malformed application ID: {0}")]
+    MalformedApplicationId(#[from] ParseIntError),
+}
+
+impl From<globibot_core::serenity::Error> for AppError {
+    fn from(err: globibot_core::serenity::Error) -> Self {
+        AppError::Discord(Box::new(err))
+    }
 }

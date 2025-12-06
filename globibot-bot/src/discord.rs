@@ -1,15 +1,15 @@
 use crate::events::Publisher;
 
 use globibot_core::events::Event;
+use globibot_core::serenity::all::GatewayIntents;
 use globibot_core::serenity::{
-    self, async_trait,
+    self, Client, async_trait,
     client::Context,
     model::{
+        application::Interaction,
         channel::Message,
         id::{ChannelId, GuildId, MessageId},
-        interactions::Interaction,
     },
-    Client,
 };
 
 struct EventHandler {
@@ -26,7 +26,7 @@ impl serenity::client::EventHandler for EventHandler {
 
     async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
         self.publisher.broadcast(Event::InteractionCreate {
-            interaction: interaction.application_command().unwrap(),
+            interaction: interaction.command().unwrap(),
         });
     }
 
@@ -55,10 +55,13 @@ pub async fn client(
 ) -> serenity::Result<Client> {
     let event_handler = EventHandler { publisher };
 
-    let discord_client = Client::builder(token)
-        .event_handler(event_handler)
-        .application_id(application_id)
-        .await?;
+    let discord_client = Client::builder(
+        token,
+        GatewayIntents::default().union(GatewayIntents::MESSAGE_CONTENT),
+    )
+    .event_handler(event_handler)
+    .application_id(application_id.into())
+    .await?;
 
     Ok(discord_client)
 }

@@ -1,5 +1,3 @@
-#![feature(type_alias_impl_trait)]
-
 use common::{
     anyhow,
     imageops::{self, Avatar, GifBuilder},
@@ -9,18 +7,13 @@ use globibot_core::{
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
-        model::{
-            guild::Member,
-            interactions::application_command::{
-                ApplicationCommandInteraction, ApplicationCommandInteractionDataOptionValue,
-            },
-        },
+        model::application::{CommandDataOptionValue, CommandInteraction},
         prelude::Mentionable,
     },
     transport::Tcp,
 };
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 pub mod scenario {
     pub mod animated_slap;
@@ -131,92 +124,80 @@ impl Plugin for SlapPlugin {
 
 impl HandleEvents for SlapPlugin {
     type Err = anyhow::Error;
-    type Future = impl std::future::Future<Output = Result<(), Self::Err>>;
 
-    fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
-        async move {
-            match event {
-                Event::MessageCreate { message: _ } => {}
-                Event::InteractionCreate {
-                    interaction:
-                        ApplicationCommandInteraction {
-                            id,
-                            token,
-                            data: command,
-                            channel_id,
-                            member: Some(Member { user: author, .. }),
-                            ..
-                        },
-                } if command.id == self.command_id => {
-                    let user_to_slap = match command
-                        .options
-                        .iter()
-                        .find(|opt| opt.name == "target")
-                        .and_then(|opt| opt.resolved.as_ref())
-                    {
-                        Some(ApplicationCommandInteractionDataOptionValue::User(u, _)) => u.clone(),
-                        _ => return Ok(()),
-                    };
+    async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
+        match event {
+            Event::MessageCreate { message: _ } => {}
+            Event::InteractionCreate {
+                interaction:
+                    CommandInteraction {
+                        id,
+                        token,
+                        data: command,
+                        channel_id,
+                        member: Some(member),
+                        ..
+                    },
+            } if command.id == self.command_id => {
+                let author = member.user;
+                let user_id_to_slap = match command
+                    .options
+                    .iter()
+                    .find(|opt| opt.name == "target")
+                    .map(|opt| &opt.value)
+                {
+                    Some(&CommandDataOptionValue::User(user_id)) => user_id,
+                    _ => return Ok(()),
+                };
 
-                    let descriptor_idx = match command
-                        .options
-                        .iter()
-                        .find(|opt| opt.name == "flavor")
-                        .and_then(|opt| opt.resolved.as_ref())
-                    {
-                        Some(ApplicationCommandInteractionDataOptionValue::Integer(flavor_idx)) => {
-                            Some((*flavor_idx).try_into().unwrap_or(0))
+                let descriptor_idx = match command
+                    .options
+                    .iter()
+                    .find(|opt| opt.name == "flavor")
+                    .map(|opt| &opt.value)
+                {
+                    Some(&CommandDataOptionValue::Integer(flavor_idx)) => {
+                        Some(flavor_idx.try_into().unwrap_or(0))
+                    }
+                    None => None,
+                    _ => return Ok(()),
+                };
+
+                let slapper_avatar_url = author
+                    .avatar_url()
+                    .unwrap_or_else(|| author.default_avatar_url());
+
+                let user_to_slap = rpc.get_user(rpc_context(), user_id_to_slap).await??;
+                let slapped_avatar_url = user_to_slap
+                    .avatar_url()
+                    .unwrap_or_else(|| user_to_slap.default_avatar_url());
+
+                rpc.create_interaction_response(
+                    rpc_context(),
+                    id,
+                    token,
+                    serde_json::json!({
+                        "type": 4,
+                        "data": {
+                            "content": format!(
+                                "{} walks angrily towards {}",
+                                author.mention(), user_to_slap.mention()
+                            )
                         }
-                        None => None,
-                        _ => return Ok(()),
-                    };
+                    }),
+                )
+                .await??;
 
-                    let slapper_avatar_url = author
-                        .avatar_url()
-                        .unwrap_or_else(|| author.default_avatar_url());
+                let gif = self
+                    .generate_slapping_gif(&slapper_avatar_url, &slapped_avatar_url, descriptor_idx)
+                    .await?;
+                tracing::info!("Sending gif of {} bytes", gif.len());
 
-                    let slapped_avatar_url = user_to_slap
-                        .avatar_url()
-                        .unwrap_or_else(|| user_to_slap.default_avatar_url());
-
-                    let generate_gif = tokio::spawn({
-                        let plugin = Arc::clone(&self);
-                        async move {
-                            plugin
-                                .generate_slapping_gif(
-                                    &slapper_avatar_url,
-                                    &slapped_avatar_url,
-                                    descriptor_idx,
-                                )
-                                .await
-                        }
-                    });
-
-                    rpc.create_interaction_response(
-                        rpc_context(),
-                        id.0,
-                        token.clone(),
-                        serde_json::json!({
-                            "type": 4,
-                            "data": {
-                                "content": format!(
-                                    "{} walks angrily towards {}",
-                                    author.mention(), user_to_slap.mention()
-                                )
-                            }
-                        }),
-                    )
+                rpc.send_file(rpc_context(), channel_id, gif, "slap.gif".to_owned())
                     .await??;
-
-                    let gif = generate_gif.await??;
-                    tracing::info!("Sending gif of {} bytes", gif.len());
-
-                    rpc.send_file(rpc_context(), channel_id, gif, "slap.gif".to_owned())
-                        .await??;
-                }
-                _ => (),
             }
-            Ok(())
+            _ => (),
         }
+        Ok(())
     }
 }

@@ -16,7 +16,10 @@ pub trait Plugin {
     type RpcPolicy: RpcContex;
     type EventsPolicy;
 
-    fn connect<R, E>(self, endpoints: Endpoints<R, E>) -> ConnectFut<Self, R, E>
+    fn connect<R, E>(
+        self,
+        endpoints: Endpoints<R, E>,
+    ) -> impl Future<Output = io::Result<ConnectedPlugin<Self, R::Client, E::Client>>>
     where
         Self: Sized,
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
@@ -28,7 +31,7 @@ pub trait Plugin {
     fn connect_init<R, E, F, Fut>(
         endpoints: Endpoints<R, E>,
         init: F,
-    ) -> ConnectInitFut<Self, R, E, F, Fut>
+    ) -> impl Future<Output = io::Result<ConnectedPlugin<Self, R::Client, E::Client>>>
     where
         Self: Sized,
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
@@ -67,20 +70,13 @@ impl RpcContex for HasRpc<false> {
 
 pub trait HandleEvents: Plugin {
     type Err;
-    type Future: Future<Output = Result<(), Self::Err>>;
 
     fn on_event(
-        self: Arc<Self>,
+        &self,
         ctx: <Self::RpcPolicy as RpcContex>::Context,
         event: Event,
-    ) -> Self::Future;
+    ) -> impl std::future::Future<Output = Result<(), Self::Err>> + Send;
 }
-
-type ConnectFut<T, R: EndpointPolicy, E: EndpointPolicy> =
-    impl Future<Output = io::Result<ConnectedPlugin<T, R::Client, E::Client>>>;
-
-type ConnectInitFut<T, R: EndpointPolicy, E: EndpointPolicy, F, Fut> =
-    impl Future<Output = io::Result<ConnectedPlugin<T, R::Client, E::Client>>>;
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
     plugin: T,
@@ -177,9 +173,8 @@ pub struct BoundEvents<P>(P, HashSet<EventType>);
 pub trait EndpointPolicy {
     type Policy;
     type Client;
-    type ConnectFut: Future<Output = io::Result<Self::Client>>;
 
-    fn connect(self, plugin_id: String) -> Self::ConnectFut;
+    fn connect(self, plugin_id: String) -> impl Future<Output = io::Result<Self::Client>>;
 }
 
 impl<P> EndpointPolicy for BoundRpc<P>
@@ -189,17 +184,14 @@ where
 {
     type Policy = HasRpc<true>;
     type Client = rpc::ProtocolClient;
-    type ConnectFut = impl Future<Output = io::Result<Self::Client>>;
 
-    fn connect(self, plugin_id: String) -> Self::ConnectFut {
-        async move {
-            let transport = self.0.connect().await?;
-            let handshake_request = rpc::HandshakeRequest { id: plugin_id };
-            let (client, dispatch) =
-                rpc::connect(Default::default(), transport, handshake_request).await?;
-            tokio::spawn(dispatch);
-            Ok(client)
-        }
+    async fn connect(self, plugin_id: String) -> io::Result<Self::Client> {
+        let transport = self.0.connect().await?;
+        let handshake_request = rpc::HandshakeRequest { id: plugin_id };
+        let (client, dispatch) =
+            rpc::connect(Default::default(), transport, handshake_request).await?;
+        tokio::spawn(dispatch);
+        Ok(client)
     }
 }
 
@@ -210,37 +202,32 @@ where
 {
     type Policy = HasEvents<true>;
     type Client = EventRead<P::Client>;
-    type ConnectFut = impl Future<Output = io::Result<Self::Client>>;
 
-    fn connect(self, plugin_id: String) -> Self::ConnectFut {
-        async move {
-            let transport = self.0.connect().await?;
-            let handshake_request = events::HandshakeRequest {
-                id: plugin_id,
-                events: self.1,
-            };
-            let events = events::connect(transport, handshake_request).await?;
-            Ok(events)
-        }
+    async fn connect(self, plugin_id: String) -> io::Result<Self::Client> {
+        let transport = self.0.connect().await?;
+        let handshake_request = events::HandshakeRequest {
+            id: plugin_id,
+            events: self.1,
+        };
+        let events = events::connect(transport, handshake_request).await?;
+        Ok(events)
     }
 }
 
 impl EndpointPolicy for UnboundRpc {
     type Policy = HasRpc<false>;
     type Client = ();
-    type ConnectFut = impl Future<Output = io::Result<Self::Client>>;
 
-    fn connect(self, _plugin_id: String) -> Self::ConnectFut {
-        async { Ok(()) }
+    async fn connect(self, _plugin_id: String) -> io::Result<Self::Client> {
+        Ok(())
     }
 }
 
 impl EndpointPolicy for UnboundEvents {
     type Policy = HasEvents<false>;
     type Client = ();
-    type ConnectFut = impl Future<Output = io::Result<Self::Client>>;
 
-    fn connect(self, _plugin_id: String) -> Self::ConnectFut {
-        async { Ok(()) }
+    async fn connect(self, _plugin_id: String) -> io::Result<Self::Client> {
+        Ok(())
     }
 }

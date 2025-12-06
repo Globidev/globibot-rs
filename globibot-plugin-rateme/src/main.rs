@@ -1,8 +1,5 @@
-#![feature(type_alias_impl_trait)]
-
 use std::{
     error::Error,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -10,20 +7,19 @@ use globibot_core::{
     events::{Event, EventType},
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
+    serde::Deserialize,
     serenity::{
         model::{
+            application::{CommandDataOptionValue, CommandInteraction, CommandOption},
             id::UserId,
-            interactions::application_command::{
-                ApplicationCommandInteraction, ApplicationCommandInteractionDataOptionValue,
-            },
-            misc::Mentionable,
+            mention::Mentionable,
         },
-        utils::parse_username,
+        utils::parse_user_mention,
     },
     transport::Tcp,
 };
 
-use futures::{lock::Mutex, Future};
+use futures::lock::Mutex;
 use globibot_plugin_rateme::{load_rating_images, paste_rates_on_avatar, rate};
 use rand::{Rng, SeedableRng};
 use rate::Rate;
@@ -40,27 +36,72 @@ async fn main() {
     let rating_images_medium =
         load_rating_images(&img_path, (50, 50)).expect("Failed to load rating images");
 
-    let plugin = RatemePlugin {
-        rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
-        rating_images_small,
-        rating_images_medium,
-        command_id: load_env("RATEME_COMMAND_ID")
-            .parse()
-            .expect("Invalid command id"),
-    };
+    // let plugin = RatemePlugin {
+    //     rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
+    //     rating_images_small,
+    //     rating_images_medium,
+    //     command_id: load_env("RATEME_COMMAND_ID")
+    //         .parse()
+    //         .expect("Invalid command id"),
+    // };
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
     let endpoints = Endpoints::new()
         .rpc(Tcp::new(load_env("RPC_ADDR")))
         .events(Tcp::new(load_env("SUBSCRIBER_ADDR")), events);
 
-    plugin
-        .connect(endpoints)
-        .await
-        .expect("Failed to connect plugin")
-        .handle_events()
-        .await
-        .expect("Failed to run plugin");
+    let desired_command: serde_json::Value =
+        serde_json::from_str(include_str!("../rateme-slash-command.json"))
+            .expect("Malformed slash command");
+
+    RatemePlugin::connect_init(endpoints, |rpc| {
+        let rpc = rpc.clone();
+
+        async move {
+            let commands = rpc
+                .application_commands(rpc_context())
+                .await
+                .expect("Failed to perform rpc query")
+                .expect("Failed to query commands");
+
+            let command_id = if let Some(rate_cmd) = commands.iter().find(|c| c.name == "rate") {
+                let description_changed = rate_cmd.description != desired_command["description"];
+                let opts_changed = {
+                    let current_options =
+                        Vec::<CommandOption>::deserialize(&desired_command["options"]).expect("");
+                    if current_options.len() != rate_cmd.options.len() {
+                        true
+                    } else {
+                        current_options.iter().any(|opt| {
+                            if let Some(o) = rate_cmd.options.iter().find(|o| o.name == opt.name) {
+                                serde_json::to_string(o).unwrap()
+                                    != serde_json::to_string(opt).unwrap()
+                            } else {
+                                true
+                            }
+                        })
+                    }
+                };
+                dbg!(description_changed, opts_changed);
+
+                rate_cmd.id.get()
+            } else {
+                todo!()
+            };
+
+            RatemePlugin {
+                rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
+                rating_images_small,
+                rating_images_medium,
+                command_id,
+            }
+        }
+    })
+    .await
+    .expect("Failed to connect plugin")
+    .handle_events()
+    .await
+    .expect("Failed to run plugin");
 }
 
 fn load_env(key: &str) -> String {
@@ -111,113 +152,102 @@ impl<R: Rng> RatemePlugin<R> {
 impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
     type Err = PluginError;
 
-    type Future = impl Future<Output = Result<(), Self::Err>>;
+    async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
+        match event {
+            Event::MessageCreate { message: _ } => {}
+            Event::InteractionCreate {
+                interaction:
+                    CommandInteraction {
+                        id,
+                        data: command,
+                        channel_id,
+                        token,
+                        member: Some(member),
+                        ..
+                    },
+            } if command.id == self.command_id => {
+                let author = member.user;
+                let (target, user_to_rate) = match command.options.first().map(|opt| &opt.value) {
+                    Some(&CommandDataOptionValue::User(user_id)) => {
+                        let user = rpc.get_user(rpc_context(), user_id).await??;
+                        (RateTarget::User(user_id), user)
+                    }
+                    _ => (RateTarget::Me, author.clone()),
+                };
 
-    fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
-        async move {
-            match event {
-                Event::MessageCreate { message: _ } => {}
-                Event::InteractionCreate {
-                    interaction:
-                        ApplicationCommandInteraction {
-                            id,
-                            data: command,
-                            channel_id,
-                            token,
-                            member: Some(author),
-                            ..
-                        },
-                } if command.id == self.command_id => {
-                    let (target, user_to_rate) = match command
-                        .options
-                        .first()
-                        .and_then(|opt| opt.resolved.as_ref())
-                    {
-                        Some(ApplicationCommandInteractionDataOptionValue::User(u, _)) => {
-                            (RateTarget::User(u.id), u)
+                let rate = self.rng.lock().await.r#gen::<Rate>();
+
+                let whose_face = match target {
+                    RateTarget::User(user_id) => format!("{}'s", user_id.mention()),
+                    RateTarget::Me => "your".to_owned(),
+                };
+
+                let avatar_url = user_to_rate
+                    .avatar_url()
+                    .unwrap_or_else(|| user_to_rate.default_avatar_url());
+
+                rpc.create_interaction_response(
+                    rpc_context(),
+                    id,
+                    token.clone(),
+                    serde_json::json!({
+                        "type": 4,
+                        "data": {
+                            "content": format!(
+                                "{} hold on, I'm computing {} face…",
+                                author.mention(),
+                                whose_face
+                            ),
                         }
-                        _ => (RateTarget::Me, &author.user),
-                    };
+                    }),
+                )
+                .await??;
 
-                    let rate = self.rng.lock().await.gen::<Rate>();
-
-                    let whose_face = match target {
-                        RateTarget::User(user_id) => format!("{}'s", user_id.mention()),
-                        RateTarget::Me => "your".to_owned(),
-                    };
-
-                    let avatar_url = user_to_rate
-                        .avatar_url()
-                        .unwrap_or_else(|| user_to_rate.default_avatar_url());
-
-                    let generate_gif = tokio::spawn({
-                        let plugin = Arc::clone(&self);
-                        async move { plugin.generate_rating_gif(rate, &avatar_url).await }
-                    });
-
-                    rpc.create_interaction_response(
-                        rpc_context(),
-                        id.0,
-                        token.clone(),
-                        serde_json::json!({
-                            "type": 4,
-                            "data": {
-                                "content": format!(
-                                    "{} hold on, I'm computing {} face…",
-                                    author.mention(),
-                                    whose_face
+                let gif = match self.generate_rating_gif(rate, &avatar_url).await {
+                    Ok(gif) => gif,
+                    Err(e) => {
+                        tracing::error!("failed to generate gif: {}", &e);
+                        rpc.edit_interaction_response(
+                            rpc_context(),
+                            token,
+                            serde_json::json!({ "content":
+                                format!(
+                                    "I am unable to accurately compute the rating for some \
+                                    reason\nbut {} look like an __HB{}__ {}",
+                                    match target {
+                                        RateTarget::User(_) => "they",
+                                        RateTarget::Me => "you",
+                                    },
+                                    rate as u8,
+                                    rate.emote()
                                 ),
-                            }
-                        }),
-                    )
+                            }),
+                        )
+                        .await??;
+                        return Err(e);
+                    }
+                };
+
+                let p2message = rpc
+                    .send_file(rpc_context(), channel_id, gif, "rate.gif".to_owned())
                     .await??;
 
-                    let gif = match generate_gif.await? {
-                        Ok(gif) => gif,
-                        Err(e) => {
-                            tracing::error!("failed to generate gif: {}", &e);
-                            rpc.edit_interaction_response(
-                                rpc_context(),
-                                token,
-                                serde_json::json!({ "content":
-                                    format!(
-                                        "I am unable to accurately compute the rating for some \
-                                        reason\nbut {} look like an __HB{}__ {}",
-                                        match target {
-                                            RateTarget::User(_) => "they",
-                                            RateTarget::Me => "you",
-                                        },
-                                        rate as u8,
-                                        rate.emote()
-                                    ),
-                                }),
-                            )
-                            .await??;
-                            return Err(e);
-                        }
-                    };
-
-                    let p2message = rpc
-                        .send_file(rpc_context(), channel_id, gif, "rate.gif".to_owned())
-                        .await??;
-
-                    tokio::time::sleep(Duration::from_secs(19)).await;
-                    let p2content = format!(
-                        "Looks like {} an __HB{}__ {}",
-                        match target {
-                            RateTarget::User(user_id) => format!("{} is", user_id.mention()),
-                            RateTarget::Me => "you are".to_owned(),
-                        },
-                        rate as u8,
-                        rate.emote()
-                    );
-                    rpc.edit_message(rpc_context(), p2message, p2content)
-                        .await??;
-                }
-                _ => {}
+                tokio::time::sleep(Duration::from_secs(19)).await;
+                let p2content = format!(
+                    "Looks like {} an __HB{}__ {}",
+                    match target {
+                        RateTarget::User(user_id) => format!("{} is", user_id.mention()),
+                        RateTarget::Me => "you are".to_owned(),
+                    },
+                    rate as u8,
+                    rate.emote()
+                );
+                rpc.edit_message(rpc_context(), p2message, p2content)
+                    .await??;
             }
-            Ok(())
+            _ => {}
         }
+        Ok(())
     }
 }
 
@@ -231,7 +261,7 @@ enum RateTarget {
 fn parse_rate_command(content: &str) -> Option<RateTarget> {
     let mut words = content.split_whitespace();
     let first_word = words.next()?;
-    let first_mention = parse_username(first_word)?;
+    let first_mention = parse_user_mention(first_word)?;
 
     if first_mention != 168304788465909760 {
         return None;
@@ -242,6 +272,6 @@ fn parse_rate_command(content: &str) -> Option<RateTarget> {
     if following_rate == "me" {
         Some(RateTarget::Me)
     } else {
-        Some(RateTarget::User(UserId(parse_username(following_rate)?)))
+        Some(RateTarget::User(parse_user_mention(following_rate)?))
     }
 }

@@ -1,18 +1,21 @@
 use std::{io, sync::Arc, time::Duration};
 
-use futures::{pin_mut, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use globibot_core::rpc::{self, AcceptError};
+use globibot_core::serenity::all::{
+    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, UserId,
+};
+use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
     cache::Cache as DiscordCache,
     http::Http as DiscordHttp,
     model::{
+        application::Command,
         channel::{Message, ReactionType},
         id::{ChannelId, GuildId, MessageId},
-        interactions::application_command::ApplicationCommand,
         prelude::CurrentUser,
     },
     utils::{self, ContentSafeOptions},
-    CacheAndHttp,
 };
 use tarpc::{
     context::Context,
@@ -23,19 +26,23 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use rpc::{DiscordApiResult, Protocol, ServerChannel};
 use tracing::{debug, info, warn};
 
-pub async fn run_server<S, T>(transports: S, cache_and_http: Arc<CacheAndHttp>) -> io::Result<()>
+pub async fn run_server<S, T>(
+    transports: S,
+    cache: Arc<DiscordCache>,
+    http: Arc<DiscordHttp>,
+) -> io::Result<()>
 where
     S: Stream<Item = io::Result<T>>,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    pin_mut!(transports);
+    let mut transports = std::pin::pin!(transports);
 
     while let Some(transport_result) = transports.next().await {
         let transport = transport_result?;
         match rpc::accept(Default::default(), transport).await {
             Ok((request, client)) => {
-                let http = Arc::clone(&cache_and_http.http);
-                let cache = Arc::clone(&cache_and_http.cache);
+                let http = Arc::clone(&http);
+                let cache = Arc::clone(&cache);
                 let handle_client = respond_to_rpc_client(client, http, cache);
                 tokio::spawn(handle_client);
                 info!("New RPC client spawned: '{}'", request.id);
@@ -67,8 +74,7 @@ where
     };
 
     let serve = server.serve();
-    let requests = client.requests();
-    pin_mut!(requests);
+    let mut requests = std::pin::pin!(client.requests());
 
     while let Some(request_result) = requests.next().await {
         debug!("Handling RPC request");
@@ -90,7 +96,7 @@ struct Server {
 #[tarpc::server]
 impl Protocol for Server {
     async fn current_user(self, _ctx: Context) -> CurrentUser {
-        self.discord_cache.current_user().await
+        self.discord_cache.current_user().clone()
     }
 
     async fn send_message(
@@ -100,10 +106,7 @@ impl Protocol for Server {
         content: String,
     ) -> DiscordApiResult<Message> {
         Ok(chan_id
-            .send_message(self.discord_http, |message| {
-                message.content(content);
-                message
-            })
+            .send_message(self.discord_http, CreateMessage::new().content(content))
             .await?)
     }
 
@@ -125,7 +128,7 @@ impl Protocol for Server {
         new_content: String,
     ) -> DiscordApiResult<Message> {
         message
-            .edit(self.discord_http, |message| message.content(new_content))
+            .edit(self.discord_http, EditMessage::new().content(new_content))
             .await?;
         Ok(message)
     }
@@ -137,16 +140,14 @@ impl Protocol for Server {
         data: Vec<u8>,
         name: String,
     ) -> DiscordApiResult<Message> {
+        let attachment = CreateAttachment::bytes(data, name);
         Ok(chan_id
-            .send_message(self.discord_http, |message| {
-                message.add_file((data.as_slice(), name.as_str()));
-                message
-            })
+            .send_message(self.discord_http, CreateMessage::new().add_file(attachment))
             .await?)
     }
 
     async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<()> {
-        let typing = self.discord_http.start_typing(chan_id.0)?;
+        let typing = self.discord_http.start_typing(chan_id);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
@@ -166,29 +167,26 @@ impl Protocol for Server {
         if let Some(gid) = guild_id {
             opts = opts.display_as_member_from(gid);
         }
-        Ok(utils::content_safe(self.discord_cache, content, &opts).await)
+        Ok(utils::content_safe(self.discord_cache, content, &opts, &[]))
     }
 
     async fn create_global_command(
         self,
         _ctx: Context,
         data: serde_json::Value,
-    ) -> DiscordApiResult<ApplicationCommand> {
-        Ok(self
-            .discord_http
-            .create_global_application_command(&data)
-            .await?)
+    ) -> DiscordApiResult<Command> {
+        Ok(self.discord_http.create_global_command(&data).await?)
     }
 
     async fn edit_global_command(
         self,
         _ctx: Context,
-        application_id: u64,
+        command_id: CommandId,
         data: serde_json::Value,
-    ) -> DiscordApiResult<ApplicationCommand> {
+    ) -> DiscordApiResult<Command> {
         Ok(self
             .discord_http
-            .edit_global_application_command(application_id, &data)
+            .edit_global_command(command_id, &data)
             .await?)
     }
 
@@ -197,36 +195,44 @@ impl Protocol for Server {
         _ctx: Context,
         guild_id: GuildId,
         data: serde_json::Value,
-    ) -> DiscordApiResult<ApplicationCommand> {
+    ) -> DiscordApiResult<Command> {
         Ok(self
             .discord_http
-            .create_guild_application_command(guild_id.0, &data)
+            .create_guild_command(guild_id, &data)
             .await?)
     }
 
     async fn edit_guild_command(
         self,
         _ctx: Context,
-        cmd_id: u64,
+        cmd_id: CommandId,
         guild_id: GuildId,
         data: serde_json::Value,
-    ) -> DiscordApiResult<ApplicationCommand> {
+    ) -> DiscordApiResult<Command> {
         Ok(self
             .discord_http
-            .edit_guild_application_command(guild_id.0, cmd_id, &data)
+            .edit_guild_command(guild_id, cmd_id, &data)
             .await?)
+    }
+
+    async fn application_commands(self, _ctx: Context) -> DiscordApiResult<Vec<Command>> {
+        Ok(self.discord_http.get_global_commands().await?)
+    }
+
+    async fn guild_application_commands(self, _ctx: Context) -> DiscordApiResult<Vec<Command>> {
+        todo!()
     }
 
     async fn create_interaction_response(
         self,
         _ctx: Context,
-        id: u64,
+        id: InteractionId,
         token: String,
         data: serde_json::Value,
     ) -> DiscordApiResult<()> {
         Ok(self
             .discord_http
-            .create_interaction_response(id, &token, &data)
+            .create_interaction_response(id, &token, &data, vec![])
             .await?)
     }
 
@@ -238,7 +244,7 @@ impl Protocol for Server {
     ) -> DiscordApiResult<Message> {
         Ok(self
             .discord_http
-            .edit_original_interaction_response(&token, &data)
+            .edit_original_interaction_response(&token, &data, vec![])
             .await?)
     }
 
@@ -252,5 +258,21 @@ impl Protocol for Server {
         Ok(chan_id
             .create_reaction(self.discord_http, message_id, reaction)
             .await?)
+    }
+
+    async fn get_user(self, _ctx: Context, user_id: UserId) -> DiscordApiResult<User> {
+        if let Some(user) = self.discord_cache.user(user_id) {
+            return Ok(user.clone());
+        }
+
+        Ok(self.discord_http.get_user(user_id).await?)
+    }
+
+    async fn get_channel(
+        self,
+        _ctx: Context,
+        channel_id: ChannelId,
+    ) -> DiscordApiResult<DiscordChannel> {
+        Ok(self.discord_http.get_channel(channel_id).await?)
     }
 }

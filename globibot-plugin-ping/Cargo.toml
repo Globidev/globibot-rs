@@ -2,11 +2,11 @@
 name = "globibot-plugin-ping"
 version = "0.1.0"
 authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = "1.5"
-futures = "0.3"
+tokio = { workspace = true }
+futures = { workspace = true }
 globibot-core = { path = "../globibot-core" }

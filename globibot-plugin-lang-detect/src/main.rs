@@ -1,8 +1,4 @@
-#![feature(type_alias_impl_trait, let_else)]
-
-use futures::Future;
 use serenity::model::id::ChannelId;
-use std::sync::Arc;
 
 use globibot_core::{
     events::{Event, EventType},
@@ -11,7 +7,7 @@ use globibot_core::{
     serenity::{self, model::channel::ReactionType},
     transport::Tcp,
 };
-use globibot_plugin_lang_detect::{flag_from_code, LanguageDetector};
+use globibot_plugin_lang_detect::{LanguageDetector, flag_from_code};
 
 struct LangDetectPlugin {
     enabled_channels: Vec<ChannelId>,
@@ -62,36 +58,36 @@ async fn main() {
 
 impl HandleEvents for LangDetectPlugin {
     type Err = anyhow::Error;
-    type Future = impl Future<Output = Result<(), Self::Err>>;
 
-    fn on_event(self: Arc<Self>, rpc: rpc::ProtocolClient, event: Event) -> Self::Future {
-        async move {
-            let Event::MessageCreate { message } = event else { return Ok(()) };
+    async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
+        let Event::MessageCreate { message } = event else {
+            return Ok(());
+        };
 
-            if !self.enabled_channels.contains(&message.channel_id) {
-                return Ok(());
-            }
-
-            let content_safe = rpc
-                .content_safe(rpc_context(), message.content, message.guild_id)
-                .await??;
-
-            // Don't detect single emoji messages
-            if serenity::utils::parse_emoji(&content_safe).is_some() {
-                return Ok(());
-            }
-
-            let detection = self.detector.detect_language(&content_safe).await?;
-
-            if detection.is_reliable && detection.language != "en" {
-                if let Some(flag) = flag_from_code(&detection.language) {
-                    let reaction = ReactionType::Unicode(flag.to_owned());
-                    rpc.create_reaction(rpc_context(), message.channel_id, message.id, reaction)
-                        .await??;
-                }
-            }
-
-            Ok(())
+        if !self.enabled_channels.contains(&message.channel_id) {
+            return Ok(());
         }
+
+        let content_safe = rpc
+            .content_safe(rpc_context(), message.content, message.guild_id)
+            .await??;
+
+        // Don't detect single emoji messages
+        if serenity::utils::parse_emoji(&content_safe).is_some() {
+            return Ok(());
+        }
+
+        let detection = self.detector.detect_language(&content_safe).await?;
+
+        if detection.is_reliable
+            && detection.language != "en"
+            && let Some(flag) = flag_from_code(&detection.language)
+        {
+            let reaction = ReactionType::Unicode(flag.to_owned());
+            rpc.create_reaction(rpc_context(), message.channel_id, message.id, reaction)
+                .await??;
+        }
+
+        Ok(())
     }
 }

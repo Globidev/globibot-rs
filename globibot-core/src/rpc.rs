@@ -1,19 +1,21 @@
-use crate::transport::{frame_transport, FramedRead, FramedStream, FramedWrite};
+use crate::transport::{FramedRead, FramedStream, FramedWrite, frame_transport};
 
 use futures::{Future, SinkExt, StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serenity::model::{
-    channel::{Message, ReactionType},
-    id::{ChannelId, GuildId, MessageId},
-    interactions::application_command::ApplicationCommand,
-    prelude::CurrentUser,
+use serenity::{
+    all::{CommandId, InteractionId, UserId},
+    model::{
+        application::Command,
+        channel::{Message, ReactionType},
+        id::{ChannelId, GuildId, MessageId},
+        prelude::{Channel, CurrentUser, User},
+    },
 };
 use std::{error::Error, io, time::Duration};
 use tarpc::{
-    client,
+    ClientMessage, Response, client,
     server::{self, BaseChannel},
-    ClientMessage, Response,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -37,21 +39,21 @@ pub trait Protocol {
     async fn start_typing(chan_id: ChannelId) -> DiscordApiResult<()>;
     async fn content_safe(content: String, guild_id: Option<GuildId>) -> DiscordApiResult<String>;
 
-    async fn create_global_command(data: Value) -> DiscordApiResult<ApplicationCommand>;
-    async fn edit_global_command(cmd_id: u64, data: Value) -> DiscordApiResult<ApplicationCommand>;
+    async fn create_global_command(data: Value) -> DiscordApiResult<Command>;
+    async fn edit_global_command(cmd_id: CommandId, data: Value) -> DiscordApiResult<Command>;
 
-    async fn create_guild_command(
-        guild_id: GuildId,
-        data: Value,
-    ) -> DiscordApiResult<ApplicationCommand>;
+    async fn create_guild_command(guild_id: GuildId, data: Value) -> DiscordApiResult<Command>;
     async fn edit_guild_command(
-        cmd_id: u64,
+        cmd_id: CommandId,
         guild_id: GuildId,
         data: Value,
-    ) -> DiscordApiResult<ApplicationCommand>;
+    ) -> DiscordApiResult<Command>;
+
+    async fn application_commands() -> DiscordApiResult<Vec<Command>>;
+    async fn guild_application_commands() -> DiscordApiResult<Vec<Command>>;
 
     async fn create_interaction_response(
-        id: u64,
+        id: InteractionId,
         token: String,
         data: Value,
     ) -> DiscordApiResult<()>;
@@ -63,11 +65,14 @@ pub trait Protocol {
         message_id: MessageId,
         reaction: ReactionType,
     ) -> DiscordApiResult<()>;
+
+    async fn get_user(user_id: UserId) -> DiscordApiResult<User>;
+    async fn get_channel(channel_id: ChannelId) -> DiscordApiResult<Channel>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("Discord API error: {0}")]
-pub struct DiscordApiError(String);
+pub struct DiscordApiError(pub String);
 
 pub type DiscordApiResult<T> = Result<T, DiscordApiError>;
 
@@ -88,10 +93,15 @@ impl HandshakeRequest {
     }
 }
 
-#[derive(Debug, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
-    IO(io::Error),
+    #[error("IO error: {0}")]
+    IO(#[from] io::Error),
+
+    #[error("Handshake timed out")]
     HandshakeTimedOut,
+
+    #[error("Handshake missing")]
     HandshakeMissing,
 }
 
