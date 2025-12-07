@@ -18,10 +18,7 @@ use globibot_core::serenity::{
     },
     utils::{self, ContentSafeOptions},
 };
-use tarpc::{
-    context::Context,
-    server::{Channel, ChannelError},
-};
+use tarpc::{ChannelError, context::Context, server::Channel};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use rpc::{DiscordApiResult, Protocol, ServerChannel};
@@ -98,7 +95,6 @@ struct Server {
     typings: Arc<Mutex<slotmap::SlotMap<TypingKey, Typing>>>,
 }
 
-#[tarpc::server]
 impl Protocol for Server {
     async fn current_user(self, _ctx: Context) -> CurrentUser {
         self.discord_cache.current_user().clone()
