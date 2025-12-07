@@ -32,5 +32,7 @@ tracing-subscriber = "0.3"
 
 tarpc = { version = "0.28", features = ["serde1", "serde-transport"] }
 
+slotmap = { version = "1.1", features = ["serde"] }
+
 [profile.dev.package."*"]
 opt-level = 3

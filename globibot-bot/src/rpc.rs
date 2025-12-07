@@ -110,9 +110,21 @@ impl Protocol for Server {
         chan_id: ChannelId,
         content: String,
     ) -> DiscordApiResult<Message> {
-        Ok(chan_id
-            .send_message(self.discord_http, CreateMessage::new().content(content))
-            .await?)
+        let message = CreateMessage::new().content(content);
+        Ok(chan_id.send_message(self.discord_http, message).await?)
+    }
+
+    async fn send_reply(
+        self,
+        _ctx: Context,
+        chan_id: ChannelId,
+        content: String,
+        reference: MessageId,
+    ) -> DiscordApiResult<Message> {
+        let message = CreateMessage::new()
+            .content(content)
+            .reference_message((chan_id, reference));
+        Ok(chan_id.send_message(self.discord_http, message).await?)
     }
 
     async fn delete_message(

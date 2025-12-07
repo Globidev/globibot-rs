@@ -29,6 +29,11 @@ pub trait Protocol {
     async fn current_user() -> CurrentUser;
 
     async fn send_message(chan_id: ChannelId, content: String) -> DiscordApiResult<Message>;
+    async fn send_reply(
+        chan_id: ChannelId,
+        content: String,
+        reference: MessageId,
+    ) -> DiscordApiResult<Message>;
     async fn edit_message(message: Message, new_content: String) -> DiscordApiResult<Message>;
     async fn delete_message(chan_id: ChannelId, message_id: MessageId) -> DiscordApiResult<()>;
     async fn send_file(
