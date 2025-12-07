@@ -5,6 +5,8 @@ authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
 edition = "2024"
 
 [dependencies]
+globibot-core = { path = "../globibot-core" }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -20,4 +22,4 @@ thiserror = { workspace = true }
 
 tarpc = { workspace = true }
 
-globibot-core = { path = "../globibot-core" }
+slotmap = { workspace = true }

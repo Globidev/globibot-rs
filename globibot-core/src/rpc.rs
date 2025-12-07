@@ -36,8 +36,10 @@ pub trait Protocol {
         data: Vec<u8>,
         name: String,
     ) -> DiscordApiResult<Message>;
-    async fn start_typing(chan_id: ChannelId) -> DiscordApiResult<()>;
     async fn content_safe(content: String, guild_id: Option<GuildId>) -> DiscordApiResult<String>;
+
+    async fn start_typing(chan_id: ChannelId) -> DiscordApiResult<TypingKey>;
+    async fn stop_typing(key: TypingKey) -> DiscordApiResult<()>;
 
     async fn create_global_command(data: Value) -> DiscordApiResult<Command>;
     async fn edit_global_command(cmd_id: CommandId, data: Value) -> DiscordApiResult<Command>;
@@ -145,4 +147,8 @@ where
     let rpc_transport = frame_transport(transport);
     let rpc_channel = ServerChannel::new(config, rpc_transport);
     Ok((request, rpc_channel))
+}
+
+slotmap::new_key_type! {
+    pub struct TypingKey;
 }

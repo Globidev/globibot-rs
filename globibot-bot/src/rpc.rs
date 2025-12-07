@@ -1,9 +1,10 @@
+use std::sync::Mutex;
 use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
-use globibot_core::rpc::{self, AcceptError};
+use globibot_core::rpc::{self, AcceptError, TypingKey};
 use globibot_core::serenity::all::{
-    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, UserId,
+    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, Typing, UserId,
 };
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
@@ -71,6 +72,8 @@ where
     let server = Server {
         discord_http: http,
         discord_cache: cache,
+
+        typings: <_>::default(),
     };
 
     let serve = server.serve();
@@ -91,6 +94,8 @@ where
 struct Server {
     discord_http: Arc<DiscordHttp>,
     discord_cache: Arc<DiscordCache>,
+
+    typings: Arc<Mutex<slotmap::SlotMap<TypingKey, Typing>>>,
 }
 
 #[tarpc::server]
@@ -146,14 +151,20 @@ impl Protocol for Server {
             .await?)
     }
 
-    async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<()> {
+    async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<TypingKey> {
         let typing = self.discord_http.start_typing(chan_id);
+        let key = self.typings.lock().unwrap().insert(typing);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
-            typing.stop();
+            self.typings.lock().unwrap().remove(key);
         });
 
+        Ok(key)
+    }
+
+    async fn stop_typing(self, _ctx: Context, key: TypingKey) -> DiscordApiResult<()> {
+        let _ = self.typings.lock().unwrap().remove(key);
         Ok(())
     }
 

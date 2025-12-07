@@ -20,6 +20,8 @@ tracing = { workspace = true }
 
 tarpc = { workspace = true }
 
+slotmap = { workspace = true }
+
 [dependencies.serenity]
 default-features = false
 features = [
