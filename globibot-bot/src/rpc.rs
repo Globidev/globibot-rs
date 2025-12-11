@@ -2,9 +2,10 @@ use std::sync::Mutex;
 use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
-use globibot_core::rpc::{self, AcceptError, TypingKey};
+use globibot_core::rpc::{self, AcceptError, DiscordApiError, TypingKey};
 use globibot_core::serenity::all::{
-    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, Typing, UserId,
+    CommandId, CommandOption, CreateAttachment, CreateMessage, EditMessage, InteractionId, Typing,
+    UserId,
 };
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
@@ -18,6 +19,7 @@ use globibot_core::serenity::{
     },
     utils::{self, ContentSafeOptions},
 };
+use serde::Deserialize;
 use tarpc::{ChannelError, context::Context, server::Channel};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -232,6 +234,58 @@ impl Protocol for Server {
             .discord_http
             .edit_guild_command(guild_id, cmd_id, &data)
             .await?)
+    }
+
+    async fn upsert_guild_command(
+        self,
+        ctx: Context,
+        guild_id: GuildId,
+        cmd_data: serde_json::Value,
+    ) -> DiscordApiResult<Command> {
+        let cmd_name = cmd_data
+            .get("name")
+            .ok_or("Missing command name")?
+            .as_str()
+            .ok_or("Invalid command name")?;
+
+        let existing_commands = self.discord_http.get_guild_commands(guild_id).await?;
+
+        let Some(existing_cmd) = existing_commands
+            .into_iter()
+            .find(|cmd| cmd.name == cmd_name)
+        else {
+            return self.create_guild_command(ctx, guild_id, cmd_data).await;
+        };
+
+        let cmd_description = cmd_data
+            .get("description")
+            .ok_or("Missing command description")?
+            .as_str()
+            .ok_or("Invalid command description")?;
+
+        let description_changed = existing_cmd.description != cmd_description;
+        let opts_changed = 'opts_changed: {
+            let existing_opts = &existing_cmd.options;
+            let Some(cmd_opts) = cmd_data.get("options") else {
+                break 'opts_changed existing_opts.is_empty();
+            };
+            let cmd_opts = Vec::<CommandOption>::deserialize(cmd_opts)
+                .map_err(|e| DiscordApiError(e.to_string()))?;
+
+            cmd_opts.iter().any(|opt| {
+                let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
+                    return true;
+                };
+                serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
+            })
+        };
+
+        if description_changed || opts_changed {
+            self.edit_guild_command(ctx, existing_cmd.id, guild_id, cmd_data)
+                .await
+        } else {
+            Ok(existing_cmd)
+        }
     }
 
     async fn application_commands(self, _ctx: Context) -> DiscordApiResult<Vec<Command>> {

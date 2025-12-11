@@ -55,6 +55,7 @@ pub trait Protocol {
         guild_id: GuildId,
         data: Value,
     ) -> DiscordApiResult<Command>;
+    async fn upsert_guild_command(guild_id: GuildId, data: Value) -> DiscordApiResult<Command>;
 
     async fn application_commands() -> DiscordApiResult<Vec<Command>>;
     async fn guild_application_commands() -> DiscordApiResult<Vec<Command>>;
@@ -85,6 +86,12 @@ pub type DiscordApiResult<T> = Result<T, DiscordApiError>;
 
 impl From<serenity::Error> for DiscordApiError {
     fn from(err: serenity::Error) -> Self {
+        Self(err.to_string())
+    }
+}
+
+impl From<&'_ str> for DiscordApiError {
+    fn from(err: &str) -> Self {
         Self(err.to_string())
     }
 }
