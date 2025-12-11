@@ -1,13 +1,15 @@
-FROM alpine:3.13
+FROM alpine:3.23
 
-RUN apk add openssl libgcc
+RUN apk add openssl libssl3 libgcc
 
-COPY ./target-builder/release/globibot-bot /globibot
-COPY ./target-builder/release/globibot-plugin-openai /plugins/openai
-COPY ./target-builder/release/globibot-plugin-rateme /plugins/rateme
-COPY ./target-builder/release/globibot-plugin-ping /plugins/ping
-COPY ./target-builder/release/globibot-plugin-tuck /plugins/tuck
-COPY ./target-builder/release/globibot-plugin-lang-detect /plugins/lang-detect
-COPY ./target-builder/release/globibot-plugin-slap /plugins/slap
+COPY ./x64-artifacts/globibot-bot /globibot
+COPY ./x64-artifacts/globibot-plugin-openai /plugins/openai
+COPY ./x64-artifacts/globibot-plugin-rateme /plugins/rateme
+COPY ./x64-artifacts/globibot-plugin-ping /plugins/ping
+COPY ./x64-artifacts/globibot-plugin-tuck /plugins/tuck
+COPY ./x64-artifacts/globibot-plugin-lang-detect /plugins/lang-detect
+COPY ./x64-artifacts/globibot-plugin-slap /plugins/slap
+COPY ./x64-artifacts/globibot-plugin-movienight /plugins/movienight
+COPY ./x64-artifacts/globibot-plugin-llm /plugins/llm
 
-CMD "/globibot"
+CMD ["/globibot"]
