@@ -54,47 +54,42 @@ async fn main() {
         serde_json::from_str(include_str!("../rateme-slash-command.json"))
             .expect("Malformed slash command");
 
-    RatemePlugin::connect_init(endpoints, |rpc| {
-        let rpc = rpc.clone();
+    RatemePlugin::connect_init(endpoints, async |rpc| {
+        let commands = rpc
+            .application_commands(rpc_context())
+            .await
+            .expect("Failed to perform rpc query")
+            .expect("Failed to query commands");
 
-        async move {
-            let commands = rpc
-                .application_commands(rpc_context())
-                .await
-                .expect("Failed to perform rpc query")
-                .expect("Failed to query commands");
-
-            let command_id = if let Some(rate_cmd) = commands.iter().find(|c| c.name == "rate") {
-                let description_changed = rate_cmd.description != desired_command["description"];
-                let opts_changed = {
-                    let current_options =
-                        Vec::<CommandOption>::deserialize(&desired_command["options"]).expect("");
-                    if current_options.len() != rate_cmd.options.len() {
-                        true
-                    } else {
-                        current_options.iter().any(|opt| {
-                            if let Some(o) = rate_cmd.options.iter().find(|o| o.name == opt.name) {
-                                serde_json::to_string(o).unwrap()
-                                    != serde_json::to_string(opt).unwrap()
-                            } else {
-                                true
-                            }
-                        })
-                    }
-                };
-                dbg!(description_changed, opts_changed);
-
-                rate_cmd.id.get()
-            } else {
-                todo!()
+        let command_id = if let Some(rate_cmd) = commands.iter().find(|c| c.name == "rate") {
+            let description_changed = rate_cmd.description != desired_command["description"];
+            let opts_changed = {
+                let current_options =
+                    Vec::<CommandOption>::deserialize(&desired_command["options"]).expect("");
+                if current_options.len() != rate_cmd.options.len() {
+                    true
+                } else {
+                    current_options.iter().any(|opt| {
+                        if let Some(o) = rate_cmd.options.iter().find(|o| o.name == opt.name) {
+                            serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
+                        } else {
+                            true
+                        }
+                    })
+                }
             };
+            dbg!(description_changed, opts_changed);
 
-            RatemePlugin {
-                rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
-                rating_images_small,
-                rating_images_medium,
-                command_id,
-            }
+            rate_cmd.id.get()
+        } else {
+            todo!()
+        };
+
+        RatemePlugin {
+            rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
+            rating_images_small,
+            rating_images_medium,
+            command_id,
         }
     })
     .await

@@ -25,10 +25,10 @@ pub trait Plugin {
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
         E: EndpointPolicy<Policy = Self::EventsPolicy>,
     {
-        async move { Self::connect_init(endpoints, |_| std::future::ready(self)).await }
+        async move { Self::connect_init(endpoints, async |_| self).await }
     }
 
-    fn connect_init<R, E, F, Fut>(
+    fn connect_init<R, E, F>(
         endpoints: Endpoints<R, E>,
         init: F,
     ) -> impl Future<Output = io::Result<ConnectedPlugin<Self, R::Client, E::Client>>>
@@ -36,8 +36,7 @@ pub trait Plugin {
         Self: Sized,
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
         E: EndpointPolicy<Policy = Self::EventsPolicy>,
-        F: FnOnce(&R::Client) -> Fut,
-        Fut: Future<Output = Self>,
+        F: AsyncFnOnce(&R::Client) -> Self,
     {
         async move {
             let rpc = endpoints.rpc.connect(Self::ID.to_owned()).await?;
