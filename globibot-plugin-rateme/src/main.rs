@@ -150,18 +150,16 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate {
-                interaction:
-                    CommandInteraction {
-                        id,
-                        data: command,
-                        channel_id,
-                        token,
-                        member: Some(member),
-                        ..
-                    },
-            } if command.id == self.command_id => {
-                let author = member.user;
+            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+                let CommandInteraction {
+                    id,
+                    data: command,
+                    token,
+                    channel_id,
+                    user: author,
+                    ..
+                } = *interaction;
+
                 let (target, user_to_rate) = match command.options.first().map(|opt| &opt.value) {
                     Some(&CommandDataOptionValue::User(user_id)) => {
                         let user = rpc.get_user(rpc_context(), user_id).await??;

@@ -20,13 +20,16 @@ struct EventHandler {
 impl serenity::client::EventHandler for EventHandler {
     async fn message(&self, _ctx: Context, new_message: Message) {
         self.publisher.broadcast(Event::MessageCreate {
-            message: new_message,
+            message: Box::new(new_message),
         });
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
+        let Some(command) = interaction.command() else {
+            return;
+        };
         self.publisher.broadcast(Event::InteractionCreate {
-            interaction: interaction.command().unwrap(),
+            interaction: Box::new(command),
         });
     }
 

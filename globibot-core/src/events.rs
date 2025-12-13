@@ -17,14 +17,14 @@ use tokio::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     MessageCreate {
-        message: Message,
+        message: Box<Message>,
     },
     MessageDelete {
         channel_id: ChannelId,
         message_id: MessageId,
     },
     InteractionCreate {
-        interaction: CommandInteraction,
+        interaction: Box<CommandInteraction>,
     },
 }
 

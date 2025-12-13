@@ -11,7 +11,7 @@ use globibot_core::{
     transport::Tcp,
 };
 use globibot_plugin_tuck::{
-    load_gif, paste_avatar, AvatarPositions, Dimension, PasteAvatarPositions,
+    AvatarPositions, Dimension, PasteAvatarPositions, load_gif, paste_avatar,
 };
 use image::RgbaImage;
 use rand::Rng;
@@ -181,18 +181,15 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate {
-                interaction:
-                    CommandInteraction {
-                        id,
-                        token,
-                        data: command,
-                        channel_id,
-                        member: Some(member),
-                        ..
-                    },
-            } if command.id == self.command_id => {
-                let author = member.user;
+            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+                let CommandInteraction {
+                    id,
+                    token,
+                    data: command,
+                    channel_id,
+                    user: author,
+                    ..
+                } = *interaction;
                 let user_id_to_tuck = match command
                     .options
                     .iter()

@@ -128,18 +128,15 @@ impl HandleEvents for SlapPlugin {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate {
-                interaction:
-                    CommandInteraction {
-                        id,
-                        token,
-                        data: command,
-                        channel_id,
-                        member: Some(member),
-                        ..
-                    },
-            } if command.id == self.command_id => {
-                let author = member.user;
+            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+                let CommandInteraction {
+                    id,
+                    token,
+                    data: command,
+                    channel_id,
+                    user: author,
+                    ..
+                } = *interaction;
                 let user_id_to_slap = match command
                     .options
                     .iter()
