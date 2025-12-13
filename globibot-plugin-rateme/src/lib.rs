@@ -1,7 +1,7 @@
 use std::{iter::repeat_n, path::Path, time::Instant};
 
 use common::{gif, image, imageops::Avatar};
-use image::{DynamicImage, GenericImageView, imageops};
+use image::{DynamicImage, imageops};
 use rand::{Rng, prelude::SliceRandom};
 use rayon::prelude::*;
 
@@ -99,7 +99,7 @@ pub fn paste_rates_on_avatar(
         .map(|(bottom_frame, (top_frame, (x, y)))| {
             let mut bg_frame = bottom_frame.clone();
 
-            imageops::overlay(&mut bg_frame, top_frame, x, y);
+            imageops::overlay(&mut bg_frame, top_frame, x.into(), y.into());
             let mut frame = gif::Frame::from_rgba_speed(w as _, h as _, &mut bg_frame, 5);
             frame.dispose = gif::DisposalMethod::Background;
             frame.delay = 2; // 50 FPS …

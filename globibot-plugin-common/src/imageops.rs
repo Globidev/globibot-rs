@@ -24,9 +24,11 @@ where
 }
 
 pub fn load_gif(path: impl AsRef<Path>, dim: impl Into<Dim<u32>>) -> ImageResult<Vec<RgbaImage>> {
+    use ::std::{fs, io};
+
     let dim = dim.into();
 
-    let gif_file = std::fs::File::open(path)?;
+    let gif_file = io::BufReader::new(fs::File::open(path)?);
     let decoder = image::codecs::gif::GifDecoder::new(gif_file)?;
 
     decoder
@@ -60,8 +62,9 @@ pub async fn load_avatar(url: &str, dim: impl Into<Dim<u32>>) -> Result<Avatar, 
     let Dim { width, height } = dim.into();
 
     let avatar_data = reqwest::get(url).await?.bytes().await?;
+    let avatar_cursor = std::io::Cursor::new(&*avatar_data);
 
-    let avatar = if let Ok(decoder) = image::codecs::gif::GifDecoder::new(&*avatar_data) {
+    let avatar = if let Ok(decoder) = image::codecs::gif::GifDecoder::new(avatar_cursor) {
         let frames = decoder
             .into_frames()
             .map(|f| f.map(|f| image::imageops::thumbnail(f.buffer(), width, height)))
@@ -99,7 +102,7 @@ impl GifBuilder {
     pub fn overlay<Frame, Pos>(&mut self, frames: &[Frame], positions: &[Pos]) -> &mut Self
     where
         Frame: GenericImageView<Pixel = Rgba<u8>> + Send + Sync,
-        Pos: Into<(u32, u32)> + Copy + Send + Sync,
+        Pos: Into<(i64, i64)> + Copy + Send + Sync,
     {
         self.frames
             .par_iter_mut()

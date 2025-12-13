@@ -19,7 +19,7 @@ pub fn load_scenario() -> anyhow::Result<SlapScenario> {
 
 const DIMENSIONS: (u16, u16) = (480, 480);
 
-const ROCK_POS: [(u32, u32); 47] = [
+const ROCK_POS: [(i64, i64); 47] = [
     (139, 138),
     (139, 138),
     (144, 136),
@@ -69,7 +69,7 @@ const ROCK_POS: [(u32, u32); 47] = [
     (110, 146),
 ];
 
-const SMITH_POS: [(u32, u32); 47] = [
+const SMITH_POS: [(i64, i64); 47] = [
     (278, 98),
     (276, 98),
     (274, 101),

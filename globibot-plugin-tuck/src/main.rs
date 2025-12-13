@@ -33,8 +33,8 @@ const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 4] = [
         dimension: (160, 154),
         avatar_dimensions: (50, 50),
         avatar_positions: |frame_idx| {
-            let x = 45 + (frame_idx / 5 * 2);
-            let y = 26_u32.saturating_sub(frame_idx * 5 / 4).max(5);
+            let x = 45_i64 + (frame_idx / 5 * 2);
+            let y = 26_i64.saturating_sub(frame_idx * 5 / 4).max(5);
 
             PasteAvatarPositions {
                 tucked_position: Some((x, y)),

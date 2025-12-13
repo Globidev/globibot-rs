@@ -23,11 +23,11 @@ pub fn load_gif(path: impl AsRef<Path>, (width, height): Dimension) -> ImageResu
 }
 
 pub struct PasteAvatarPositions {
-    pub tucked_position: Option<(u32, u32)>,
-    pub tucker_position: Option<(u32, u32)>,
+    pub tucked_position: Option<(i64, i64)>,
+    pub tucker_position: Option<(i64, i64)>,
 }
 
-pub type AvatarPositions = fn(u32) -> PasteAvatarPositions;
+pub type AvatarPositions = fn(i64) -> PasteAvatarPositions;
 
 pub fn paste_avatar(
     background: (Vec<RgbaImage>, Dimension),
@@ -47,7 +47,7 @@ pub fn paste_avatar(
                 let PasteAvatarPositions {
                     tucker_position,
                     tucked_position,
-                } = positions(idx as u32);
+                } = positions(idx as i64);
 
                 if let Some((x, y)) = tucker_position {
                     let top_frame = &tucker_frames[idx % tucker_frames.len()];

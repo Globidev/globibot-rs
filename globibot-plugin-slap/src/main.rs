@@ -32,8 +32,8 @@ pub mod scenario {
     pub struct SlapScenario {
         pub dim: (u16, u16),
         pub avatar_dim: (u16, u16),
-        pub slapper_positions: Vec<(u32, u32)>,
-        pub slapped_positions: Vec<(u32, u32)>,
+        pub slapper_positions: Vec<(i64, i64)>,
+        pub slapped_positions: Vec<(i64, i64)>,
         pub frames: Vec<common::image::RgbaImage>,
     }
 }
