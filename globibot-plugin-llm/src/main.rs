@@ -2,11 +2,9 @@ mod openrouter;
 mod personality;
 
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
+use parking_lot::Mutex;
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Mutex,
-};
+use std::collections::{HashMap, VecDeque};
 
 use globibot_core::{
     events::{Event, EventType},
@@ -89,7 +87,7 @@ impl LlmPlugin {
         parts.push(user_llm_message.clone());
 
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
-        let completion = self.llm_client.lock().unwrap().complete(parts);
+        let completion = self.llm_client.lock().complete(parts);
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
         self.register_message(message, user_llm_message);
@@ -120,7 +118,7 @@ impl LlmPlugin {
     }
 
     fn register_message(&self, message: &Message, llm_message: LlmMessage) {
-        let mut contexts_by_channel = self.contexts_by_channel.lock().unwrap();
+        let mut contexts_by_channel = self.contexts_by_channel.lock();
         let context = contexts_by_channel.entry(message.channel_id).or_default();
 
         context.push_back(llm_message);
@@ -130,7 +128,7 @@ impl LlmPlugin {
     }
 
     fn context_for_channel(&self, chan_id: ChannelId) -> Vec<openrouter::Message> {
-        let contexts_by_channel = self.contexts_by_channel.lock().unwrap();
+        let contexts_by_channel = self.contexts_by_channel.lock();
         let context = contexts_by_channel.get(&chan_id);
 
         if let Some(context) = context {
@@ -154,7 +152,7 @@ impl LlmPlugin {
                 "data": {
                     "content": format!(
                         "Current model is set to `{}`",
-                        self.llm_client.lock().unwrap().model
+                        self.llm_client.lock().model
                     )
                 }
             }),
@@ -190,7 +188,7 @@ impl LlmPlugin {
             && opt.name == "model"
             && let Some(new_model) = opt.value.as_str()
         {
-            self.llm_client.lock().unwrap().model = new_model.trim().to_string();
+            self.llm_client.lock().model = new_model.trim().to_string();
             rpc.create_interaction_response(
                 rpc::context::current(),
                 interaction.id,
@@ -222,7 +220,7 @@ impl LlmPlugin {
                 "data": {
                     "content": format!(
                         "Current personality is set to `{}`",
-                        self.llm_client.lock().unwrap().personality
+                        self.llm_client.lock().personality
                     )
                 }
             }),
@@ -258,10 +256,9 @@ impl LlmPlugin {
                 return Ok(());
             };
 
-            self.llm_client.lock().unwrap().personality = new_personality;
+            self.llm_client.lock().personality = new_personality;
             self.contexts_by_channel
                 .lock()
-                .unwrap()
                 .remove(&interaction.channel_id);
 
             rpc.create_interaction_response(

@@ -8,8 +8,6 @@ use globibot_core::{
 };
 use serenity::model::{channel::Message, id::MessageId};
 
-use futures::lock::Mutex;
-
 #[tokio::main]
 async fn main() {
     let plugin = PingPlugin::default();
@@ -33,7 +31,7 @@ async fn main() {
 
 #[derive(Default)]
 struct PingPlugin {
-    message_map: Mutex<HashMap<MessageId, Message>>,
+    message_map: parking_lot::Mutex<HashMap<MessageId, Message>>,
 }
 
 impl Plugin for PingPlugin {
@@ -54,20 +52,19 @@ impl HandleEvents for PingPlugin {
                     let message = rpc
                         .send_message(rpc::context::current(), message.channel_id, "pong!".into())
                         .await??;
-                    self.message_map
-                        .lock()
-                        .await
-                        .insert(orig_message_id, message);
+                    self.message_map.lock().insert(orig_message_id, message);
                 }
             }
             Event::MessageDelete {
                 channel_id,
                 message_id,
             } => {
-                if let Some(message) = self.message_map.lock().await.get(&message_id) {
-                    rpc.delete_message(rpc::context::current(), channel_id, message.id)
-                        .await??;
-                }
+                let Some(&Message { id, .. }) = self.message_map.lock().get(&message_id) else {
+                    return Ok(());
+                };
+
+                rpc.delete_message(rpc::context::current(), channel_id, id)
+                    .await??;
             }
             _ => (),
         }

@@ -19,7 +19,6 @@ use globibot_core::{
     transport::Tcp,
 };
 
-use futures::lock::Mutex;
 use globibot_plugin_rateme::{load_rating_images, paste_rates_on_avatar, rate};
 use rand::{Rng, SeedableRng};
 use rate::Rate;
@@ -50,7 +49,7 @@ async fn main() -> common::anyhow::Result<()> {
             .expect("Failed to upsert guild command");
 
         RatemePlugin {
-            rng: Mutex::new(rand::rngs::StdRng::from_os_rng()),
+            rng: rand::rngs::StdRng::from_os_rng().into(),
             rating_images_small,
             rating_images_medium,
             command_id: command.id,
@@ -69,7 +68,7 @@ fn load_env(key: &str) -> String {
 }
 
 struct RatemePlugin<R: Rng> {
-    rng: Mutex<R>,
+    rng: parking_lot::Mutex<R>,
     rating_images_small: Vec<common::image::DynamicImage>,
     rating_images_medium: Vec<common::image::DynamicImage>,
     command_id: CommandId,
@@ -131,7 +130,7 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
                     _ => (RateTarget::Me, author.clone()),
                 };
 
-                let rate = self.rng.lock().await.random::<Rate>();
+                let rate = self.rng.lock().random::<Rate>();
 
                 let whose_face = match target {
                     RateTarget::User(user_id) => format!("{}'s", user_id.mention()),

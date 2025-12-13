@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
@@ -94,7 +93,7 @@ struct Server {
     discord_http: Arc<DiscordHttp>,
     discord_cache: Arc<DiscordCache>,
 
-    typings: Arc<Mutex<slotmap::SlotMap<TypingKey, Typing>>>,
+    typings: Arc<parking_lot::Mutex<slotmap::SlotMap<TypingKey, Typing>>>,
 }
 
 impl Protocol for Server {
@@ -163,18 +162,18 @@ impl Protocol for Server {
 
     async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<TypingKey> {
         let typing = self.discord_http.start_typing(chan_id);
-        let key = self.typings.lock().unwrap().insert(typing);
+        let key = self.typings.lock().insert(typing);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
-            self.typings.lock().unwrap().remove(key);
+            self.typings.lock().remove(key);
         });
 
         Ok(key)
     }
 
     async fn stop_typing(self, _ctx: Context, key: TypingKey) -> DiscordApiResult<()> {
-        let _ = self.typings.lock().unwrap().remove(key);
+        let _ = self.typings.lock().remove(key);
         Ok(())
     }
 
