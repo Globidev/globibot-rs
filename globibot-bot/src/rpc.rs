@@ -257,13 +257,11 @@ impl Protocol for Server {
             return self.create_guild_command(ctx, guild_id, cmd_data).await;
         };
 
-        let cmd_description = cmd_data
-            .get("description")
-            .ok_or("Missing command description")?
-            .as_str()
-            .ok_or("Invalid command description")?;
+        let description_changed = {
+            let cmd_description = cmd_data.get("description").and_then(|v| v.as_str());
+            cmd_description.is_some_and(|desc| existing_cmd.description != desc)
+        };
 
-        let description_changed = existing_cmd.description != cmd_description;
         let opts_changed = 'opts_changed: {
             let existing_opts = &existing_cmd.options;
             let Some(cmd_opts) = cmd_data.get("options") else {

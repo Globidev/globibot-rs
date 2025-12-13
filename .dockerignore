@@ -2,5 +2,7 @@
 
 /infra
 
+/assets
+
 /.env.example
 /*.env
