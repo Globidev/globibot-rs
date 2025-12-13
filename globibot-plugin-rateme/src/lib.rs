@@ -1,8 +1,8 @@
-use std::{path::Path, time::Instant};
+use std::{iter::repeat_n, path::Path, time::Instant};
 
 use globibot_plugin_common::imageops::Avatar;
-use image::{imageops, DynamicImage, GenericImageView};
-use rand::{prelude::SliceRandom, thread_rng, Rng};
+use image::{DynamicImage, GenericImageView, imageops};
+use rand::{Rng, prelude::SliceRandom, thread_rng};
 use rayon::prelude::*;
 
 pub type Dimension = (u16, u16);
@@ -57,10 +57,9 @@ pub fn paste_rates_on_avatar(
     };
 
     let initial_delay = 1;
-    let delays = repeat(0)
-        .take(30)
+    let delays = repeat_n(0, 30)
         .chain(repeat([1, 0, 0, 0, 0]).flatten().take(55))
-        .chain(repeat(1).take(10))
+        .chain(repeat_n(1, 10))
         .chain([3, 4, 5, 6, 7])
         .scan(initial_delay, |delay, delta| {
             *delay += delta;
@@ -82,7 +81,7 @@ pub fn paste_rates_on_avatar(
         .flat_map(|(frame, delay)| {
             let x = rng.gen_range(0..w32 - frame.width());
             let y = rng.gen_range(0..h32 - frame.height());
-            repeat((frame, (x, y))).take(delay)
+            repeat_n((frame, (x, y)), delay)
         })
         .enumerate()
         .map(|(idx, frame)| (&bottom_frames[idx % bottom_frames.len()], frame))
@@ -101,7 +100,7 @@ pub fn paste_rates_on_avatar(
             let mut bg_frame = bottom_frame.clone();
 
             imageops::overlay(&mut bg_frame, top_frame, x, y);
-            let mut frame = gif::Frame::from_rgba_speed(w as _, h as _, &mut *bg_frame, 5);
+            let mut frame = gif::Frame::from_rgba_speed(w as _, h as _, &mut bg_frame, 5);
             frame.dispose = gif::DisposalMethod::Background;
             frame.delay = 2; // 50 FPS …
             frame

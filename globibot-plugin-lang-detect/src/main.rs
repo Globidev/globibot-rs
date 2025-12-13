@@ -45,7 +45,7 @@ async fn main() {
 
     let endpoints = Endpoints::new()
         .rpc(Tcp::new(rpc_addr))
-        .events(Tcp::new(subscriber_addr), &events);
+        .events(Tcp::new(subscriber_addr), events);
 
     plugin
         .connect(endpoints)

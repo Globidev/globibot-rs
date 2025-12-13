@@ -344,15 +344,18 @@ impl HandleEvents for LlmPlugin {
                         kind: "text",
                         text: format!("{user_name} (<@{user_id}>): {content_safe}"),
                     })];
-                    // content.extend(message.attachments.iter().filter_map(|att| {
-                    //     let _dims = att.dimensions()?;
-                    //     Some(ContentPart::Image(ImageContentPart {
-                    //         kind: "image_url",
-                    //         image_url: openrouter::ImageUrl {
-                    //             url: att.url.clone(),
-                    //         },
-                    //     }))
-                    // }));
+
+                    if false {
+                        content.extend(message.attachments.iter().filter_map(|att| {
+                            let _dims = att.dimensions()?;
+                            Some(ContentPart::Image(ImageContentPart {
+                                kind: "image_url",
+                                image_url: openrouter::ImageUrl {
+                                    url: att.url.clone(),
+                                },
+                            }))
+                        }));
+                    }
 
                     LlmMessage {
                         role: Role::User,
