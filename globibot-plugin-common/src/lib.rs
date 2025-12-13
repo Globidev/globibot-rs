@@ -1,6 +1,7 @@
 pub mod imageops;
 
 pub use anyhow;
+pub use gif;
 pub use image;
 
 pub fn load_env(key: &str) -> String {

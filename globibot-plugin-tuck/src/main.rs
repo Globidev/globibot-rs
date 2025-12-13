@@ -10,10 +10,10 @@ use globibot_core::{
     },
     transport::Tcp,
 };
+use globibot_plugin_common::image::RgbaImage;
 use globibot_plugin_tuck::{
     AvatarPositions, Dimension, PasteAvatarPositions, load_gif, paste_avatar,
 };
-use image::RgbaImage;
 use rand::Rng;
 
 type PluginError = Box<dyn Error + Send + Sync>;
