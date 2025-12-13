@@ -6,6 +6,7 @@ use globibot_core::{
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
+        all::CommandId,
         model::application::{CommandDataOptionValue, CommandInteraction},
         prelude::Mentionable,
     },
@@ -87,7 +88,7 @@ const TUCK_GIF_DESCRIPTORS: [TuckGifDescriptor; 4] = [
 ];
 
 #[tokio::main]
-async fn main() {
+async fn main() -> common::anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let tuck_gifs = TUCK_GIF_DESCRIPTORS.map(|d| {
@@ -100,26 +101,32 @@ async fn main() {
         (d, gif)
     });
 
-    let plugin = TuckPlugin {
-        command_id: load_env("TUCK_COMMAND_ID")
-            .parse()
-            .expect("Malformed command id"),
-        tuck_gifs,
-    };
-
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
 
     let endpoints = Endpoints::new()
         .rpc(Tcp::new(load_env("RPC_ADDR")))
         .events(Tcp::new(load_env("SUBSCRIBER_ADDR")), events);
 
-    plugin
-        .connect(endpoints)
-        .await
-        .expect("Failed to connect plugin")
-        .handle_events()
-        .await
-        .expect("Failed to run plugin");
+    let desired_command: serde_json::Value =
+        serde_json::from_str(include_str!("../tuck-slash-command.json"))?;
+
+    let plugin = TuckPlugin::connect_init(endpoints, async |rpc| {
+        let command = rpc
+            .upsert_global_command(rpc_context(), desired_command)
+            .await
+            .expect("Failed to perform rpc query")
+            .expect("Failed to upsert guild command");
+
+        TuckPlugin {
+            command_id: command.id,
+            tuck_gifs,
+        }
+    })
+    .await?;
+
+    plugin.handle_events().await?;
+
+    Ok(())
 }
 
 fn load_env(key: &str) -> String {
@@ -128,7 +135,7 @@ fn load_env(key: &str) -> String {
 }
 
 struct TuckPlugin<const GIF_COUNT: usize> {
-    command_id: u64,
+    command_id: CommandId,
     tuck_gifs: [(TuckGifDescriptor, Vec<RgbaImage>); GIF_COUNT],
 }
 

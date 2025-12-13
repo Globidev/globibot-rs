@@ -7,10 +7,10 @@ use globibot_core::{
     events::{Event, EventType},
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
-    serde::Deserialize,
     serenity::{
+        all::CommandId,
         model::{
-            application::{CommandDataOptionValue, CommandInteraction, CommandOption},
+            application::{CommandDataOptionValue, CommandInteraction},
             id::UserId,
             mention::Mentionable,
         },
@@ -27,23 +27,12 @@ use rate::Rate;
 type PluginError = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> common::anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let img_path = load_env("RATEME_IMG_PATH");
-    let rating_images_small =
-        load_rating_images(&img_path, (25, 25)).expect("Failed to load rating images");
-    let rating_images_medium =
-        load_rating_images(&img_path, (50, 50)).expect("Failed to load rating images");
-
-    // let plugin = RatemePlugin {
-    //     rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
-    //     rating_images_small,
-    //     rating_images_medium,
-    //     command_id: load_env("RATEME_COMMAND_ID")
-    //         .parse()
-    //         .expect("Invalid command id"),
-    // };
+    let rating_images_small = load_rating_images(&img_path, (25, 25))?;
+    let rating_images_medium = load_rating_images(&img_path, (50, 50))?;
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
     let endpoints = Endpoints::new()
@@ -51,52 +40,27 @@ async fn main() {
         .events(Tcp::new(load_env("SUBSCRIBER_ADDR")), events);
 
     let desired_command: serde_json::Value =
-        serde_json::from_str(include_str!("../rateme-slash-command.json"))
-            .expect("Malformed slash command");
+        serde_json::from_str(include_str!("../rateme-slash-command.json"))?;
 
-    RatemePlugin::connect_init(endpoints, async |rpc| {
-        let commands = rpc
-            .application_commands(rpc_context())
+    let plugin = RatemePlugin::connect_init(endpoints, async |rpc| {
+        let command = rpc
+            .upsert_global_command(rpc_context(), desired_command)
             .await
             .expect("Failed to perform rpc query")
-            .expect("Failed to query commands");
-
-        let command_id = if let Some(rate_cmd) = commands.iter().find(|c| c.name == "rate") {
-            let description_changed = rate_cmd.description != desired_command["description"];
-            let opts_changed = {
-                let current_options =
-                    Vec::<CommandOption>::deserialize(&desired_command["options"]).expect("");
-                if current_options.len() != rate_cmd.options.len() {
-                    true
-                } else {
-                    current_options.iter().any(|opt| {
-                        if let Some(o) = rate_cmd.options.iter().find(|o| o.name == opt.name) {
-                            serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
-                        } else {
-                            true
-                        }
-                    })
-                }
-            };
-            dbg!(description_changed, opts_changed);
-
-            rate_cmd.id.get()
-        } else {
-            todo!()
-        };
+            .expect("Failed to upsert guild command");
 
         RatemePlugin {
             rng: Mutex::new(rand::rngs::StdRng::from_os_rng()),
             rating_images_small,
             rating_images_medium,
-            command_id,
+            command_id: command.id,
         }
     })
-    .await
-    .expect("Failed to connect plugin")
-    .handle_events()
-    .await
-    .expect("Failed to run plugin");
+    .await?;
+
+    plugin.handle_events().await?;
+
+    Ok(())
 }
 
 fn load_env(key: &str) -> String {
@@ -108,7 +72,7 @@ struct RatemePlugin<R: Rng> {
     rng: Mutex<R>,
     rating_images_small: Vec<common::image::DynamicImage>,
     rating_images_medium: Vec<common::image::DynamicImage>,
-    command_id: u64,
+    command_id: CommandId,
 }
 
 impl<R: Rng> Plugin for RatemePlugin<R> {
