@@ -51,15 +51,6 @@ pub struct HandshakeRequest {
     pub events: HashSet<EventType>,
 }
 
-impl HandshakeRequest {
-    pub fn new(id: impl Into<String>, events: impl IntoIterator<Item = EventType>) -> Self {
-        Self {
-            id: id.into(),
-            events: events.into_iter().collect(),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
     #[error("IO error: {0}")]
