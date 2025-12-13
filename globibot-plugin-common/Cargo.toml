@@ -14,4 +14,4 @@ rayon = "1.5"
 reqwest = { workspace = true }
 
 thiserror = { workspace = true }
-anyhow = "1.0"
+anyhow = { workspace = true }
