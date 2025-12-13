@@ -48,6 +48,7 @@ pub trait Protocol {
 
     async fn create_global_command(data: Value) -> DiscordApiResult<Command>;
     async fn edit_global_command(cmd_id: CommandId, data: Value) -> DiscordApiResult<Command>;
+    async fn upsert_global_command(data: Value) -> DiscordApiResult<Command>;
 
     async fn create_guild_command(guild_id: GuildId, data: Value) -> DiscordApiResult<Command>;
     async fn edit_guild_command(

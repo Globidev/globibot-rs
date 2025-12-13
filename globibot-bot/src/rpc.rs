@@ -211,6 +211,34 @@ impl Protocol for Server {
             .await?)
     }
 
+    async fn upsert_global_command(
+        self,
+        ctx: Context,
+        cmd_data: serde_json::Value,
+    ) -> DiscordApiResult<Command> {
+        let cmd_name = cmd_data
+            .get("name")
+            .ok_or("Missing command name")?
+            .as_str()
+            .ok_or("Invalid command name")?;
+
+        let existing_commands = self.discord_http.get_global_commands().await?;
+
+        let Some(existing_cmd) = existing_commands
+            .into_iter()
+            .find(|cmd| cmd.name == cmd_name)
+        else {
+            return self.create_global_command(ctx, cmd_data).await;
+        };
+
+        if command_changed(&existing_cmd, &cmd_data)? {
+            self.edit_global_command(ctx, existing_cmd.id, cmd_data)
+                .await
+        } else {
+            Ok(existing_cmd)
+        }
+    }
+
     async fn create_guild_command(
         self,
         _ctx: Context,
@@ -257,28 +285,7 @@ impl Protocol for Server {
             return self.create_guild_command(ctx, guild_id, cmd_data).await;
         };
 
-        let description_changed = {
-            let cmd_description = cmd_data.get("description").and_then(|v| v.as_str());
-            cmd_description.is_some_and(|desc| existing_cmd.description != desc)
-        };
-
-        let opts_changed = 'opts_changed: {
-            let existing_opts = &existing_cmd.options;
-            let Some(cmd_opts) = cmd_data.get("options") else {
-                break 'opts_changed existing_opts.is_empty();
-            };
-            let cmd_opts = Vec::<CommandOption>::deserialize(cmd_opts)
-                .map_err(|e| DiscordApiError(e.to_string()))?;
-
-            cmd_opts.iter().any(|opt| {
-                let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
-                    return true;
-                };
-                serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
-            })
-        };
-
-        if description_changed || opts_changed {
+        if command_changed(&existing_cmd, &cmd_data)? {
             self.edit_guild_command(ctx, existing_cmd.id, guild_id, cmd_data)
                 .await
         } else {
@@ -346,4 +353,32 @@ impl Protocol for Server {
     ) -> DiscordApiResult<DiscordChannel> {
         Ok(self.discord_http.get_channel(channel_id).await?)
     }
+}
+
+fn command_changed(
+    existing_cmd: &Command,
+    cmd_data: &serde_json::Value,
+) -> Result<bool, DiscordApiError> {
+    let description_changed = {
+        let cmd_description = cmd_data.get("description").and_then(|v| v.as_str());
+        cmd_description.is_some_and(|desc| existing_cmd.description != desc)
+    };
+
+    let opts_changed = 'opts_changed: {
+        let existing_opts = &existing_cmd.options;
+        let Some(cmd_opts) = cmd_data.get("options") else {
+            break 'opts_changed existing_opts.is_empty();
+        };
+        let cmd_opts = Vec::<CommandOption>::deserialize(cmd_opts)
+            .map_err(|e| DiscordApiError(e.to_string()))?;
+
+        cmd_opts.iter().any(|opt| {
+            let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
+                return true;
+            };
+            serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
+        })
+    };
+
+    Ok(description_changed || opts_changed)
 }
