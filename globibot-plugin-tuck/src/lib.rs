@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use globibot_plugin_common::{gif, image, imageops::Avatar};
+use common::{gif, image, imageops::Avatar};
 use image::{AnimationDecoder, GenericImageView, ImageResult, Rgba, RgbaImage, imageops};
 use rayon::prelude::*;
 

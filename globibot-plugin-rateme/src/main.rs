@@ -20,7 +20,6 @@ use globibot_core::{
 };
 
 use futures::lock::Mutex;
-use globibot_plugin_common::image;
 use globibot_plugin_rateme::{load_rating_images, paste_rates_on_avatar, rate};
 use rand::{Rng, SeedableRng};
 use rate::Rate;
@@ -107,8 +106,8 @@ fn load_env(key: &str) -> String {
 
 struct RatemePlugin<R: Rng> {
     rng: Mutex<R>,
-    rating_images_small: Vec<image::DynamicImage>,
-    rating_images_medium: Vec<image::DynamicImage>,
+    rating_images_small: Vec<common::image::DynamicImage>,
+    rating_images_medium: Vec<common::image::DynamicImage>,
     command_id: u64,
 }
 
@@ -125,8 +124,7 @@ impl<R: Rng> RatemePlugin<R> {
         rate: Rate,
         avatar_url: &str,
     ) -> Result<Vec<u8>, PluginError> {
-        let avatar =
-            globibot_plugin_common::imageops::load_avatar(avatar_url, (75_u32, 75_u32)).await?;
+        let avatar = common::imageops::load_avatar(avatar_url, (75_u32, 75_u32)).await?;
 
         let t0 = Instant::now();
         let gif = tokio::task::spawn_blocking({

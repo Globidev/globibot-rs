@@ -11,7 +11,7 @@ rand = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3"
 globibot-core = { path = "../globibot-core" }
-globibot-plugin-common = { path = "../globibot-plugin-common" }
+common = { package = "globibot-plugin-common", path = "../globibot-plugin-common" }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

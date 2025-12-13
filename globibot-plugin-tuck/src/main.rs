@@ -1,5 +1,6 @@
 use std::{convert::TryInto, error::Error, path::PathBuf, time::Instant};
 
+use common::image::RgbaImage;
 use globibot_core::{
     events::{Event, EventType},
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
@@ -10,7 +11,6 @@ use globibot_core::{
     },
     transport::Tcp,
 };
-use globibot_plugin_common::image::RgbaImage;
 use globibot_plugin_tuck::{
     AvatarPositions, Dimension, PasteAvatarPositions, load_gif, paste_avatar,
 };
@@ -143,14 +143,8 @@ impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
         let (tuck_desc, tuck_gif) = self.tuck_gifs[idx].clone();
 
         let avatars = futures::try_join!(
-            globibot_plugin_common::imageops::load_avatar(
-                tucker_avatar_url,
-                tuck_desc.avatar_dimensions
-            ),
-            globibot_plugin_common::imageops::load_avatar(
-                tucked_avatar_url,
-                tuck_desc.avatar_dimensions
-            ),
+            common::imageops::load_avatar(tucker_avatar_url, tuck_desc.avatar_dimensions),
+            common::imageops::load_avatar(tucked_avatar_url, tuck_desc.avatar_dimensions),
         )?;
 
         let t0 = Instant::now();

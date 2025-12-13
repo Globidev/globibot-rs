@@ -1,6 +1,6 @@
 use std::{iter::repeat_n, path::Path, time::Instant};
 
-use globibot_plugin_common::{gif, image, imageops::Avatar};
+use common::{gif, image, imageops::Avatar};
 use image::{DynamicImage, GenericImageView, imageops};
 use rand::{Rng, prelude::SliceRandom};
 use rayon::prelude::*;
