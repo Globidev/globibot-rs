@@ -13,7 +13,7 @@ use crate::{
 pub trait Plugin {
     const ID: &'static str;
 
-    type RpcPolicy: RpcContex;
+    type RpcPolicy: RpcContext;
     type EventsPolicy;
 
     fn connect<R, E>(
@@ -55,15 +55,15 @@ pub trait Plugin {
 pub struct HasRpc<const ENABLED: bool>;
 pub struct HasEvents<const ENABLED: bool>;
 
-pub trait RpcContex {
+pub trait RpcContext {
     type Context: Clone;
 }
 
-impl RpcContex for HasRpc<true> {
+impl RpcContext for HasRpc<true> {
     type Context = rpc::ProtocolClient;
 }
 
-impl RpcContex for HasRpc<false> {
+impl RpcContext for HasRpc<false> {
     type Context = ();
 }
 
@@ -72,7 +72,7 @@ pub trait HandleEvents: Plugin {
 
     fn on_event(
         &self,
-        ctx: <Self::RpcPolicy as RpcContex>::Context,
+        ctx: <Self::RpcPolicy as RpcContext>::Context,
         event: Event,
     ) -> impl std::future::Future<Output = Result<(), Self::Err>> + Send;
 }
@@ -83,7 +83,7 @@ pub struct ConnectedPlugin<T, Rpc, Events> {
     events: Events,
 }
 
-impl<T, Events> ConnectedPlugin<T, <T::RpcPolicy as RpcContex>::Context, Events>
+impl<T, Events> ConnectedPlugin<T, <T::RpcPolicy as RpcContext>::Context, Events>
 where
     Events: Stream<Item = io::Result<events::Event>>,
     T: Plugin + HandleEvents,
