@@ -1,5 +1,5 @@
 use rand::{
-    distributions::Standard,
+    distr::StandardUniform,
     prelude::{Distribution, IteratorRandom, Rng},
 };
 
@@ -59,7 +59,7 @@ impl Rate {
     }
 }
 
-impl Distribution<Rate> for Standard {
+impl Distribution<Rate> for StandardUniform {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Rate {
         Rate::all()
             .choose(rng)

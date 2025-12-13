@@ -139,7 +139,7 @@ impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
         tucked_avatar_url: &str,
         gif_idx: Option<usize>,
     ) -> Result<Vec<u8>, PluginError> {
-        let idx = gif_idx.unwrap_or_else(|| rand::thread_rng().gen_range(0..self.tuck_gifs.len()));
+        let idx = gif_idx.unwrap_or_else(|| rand::rng().random_range(0..self.tuck_gifs.len()));
         let (tuck_desc, tuck_gif) = self.tuck_gifs[idx].clone();
 
         let avatars = futures::try_join!(

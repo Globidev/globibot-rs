@@ -2,7 +2,7 @@ use std::{iter::repeat_n, path::Path, time::Instant};
 
 use globibot_plugin_common::{gif, image, imageops::Avatar};
 use image::{DynamicImage, GenericImageView, imageops};
-use rand::{Rng, prelude::SliceRandom, thread_rng};
+use rand::{Rng, prelude::SliceRandom};
 use rayon::prelude::*;
 
 pub type Dimension = (u16, u16);
@@ -39,7 +39,7 @@ pub fn paste_rates_on_avatar(
     let w32: u32 = w.into();
     let h32: u32 = h.into();
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let frame_samples = {
         let mut samples = repeat(small_frames.iter())
@@ -79,8 +79,8 @@ pub fn paste_rates_on_avatar(
         .into_iter()
         .zip(delays)
         .flat_map(|(frame, delay)| {
-            let x = rng.gen_range(0..w32 - frame.width());
-            let y = rng.gen_range(0..h32 - frame.height());
+            let x = rng.random_range(0..w32 - frame.width());
+            let y = rng.random_range(0..h32 - frame.height());
             repeat_n((frame, (x, y)), delay)
         })
         .enumerate()

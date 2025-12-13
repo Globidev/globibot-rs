@@ -87,7 +87,7 @@ async fn main() {
         };
 
         RatemePlugin {
-            rng: Mutex::new(rand::rngs::StdRng::from_entropy()),
+            rng: Mutex::new(rand::rngs::StdRng::from_os_rng()),
             rating_images_small,
             rating_images_medium,
             command_id,
@@ -169,7 +169,7 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
                     _ => (RateTarget::Me, author.clone()),
                 };
 
-                let rate = self.rng.lock().await.r#gen::<Rate>();
+                let rate = self.rng.lock().await.random::<Rate>();
 
                 let whose_face = match target {
                     RateTarget::User(user_id) => format!("{}'s", user_id.mention()),

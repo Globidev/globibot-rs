@@ -84,8 +84,8 @@ impl SlapPlugin {
         descriptor_idx: Option<usize>,
     ) -> Result<Vec<u8>, anyhow::Error> {
         let idx = descriptor_idx
-            .unwrap_or_else(|| rand::thread_rng().gen_range(0..self.slap_descriptors.len()));
         let desc = self.slap_descriptors[idx].clone();
+            .unwrap_or_else(|| rand::rng().random_range(0..self.slap_scenarios.len()));
 
         let (slapper_avatar, slapped_avatar) = futures::try_join!(
             imageops::load_avatar(slapper_avatar_url, desc.avatar_dim),
