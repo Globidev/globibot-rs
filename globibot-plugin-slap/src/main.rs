@@ -7,6 +7,7 @@ use globibot_core::{
     plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
+        all::CommandId,
         model::application::{CommandDataOptionValue, CommandInteraction},
         prelude::Mentionable,
     },
@@ -43,37 +44,42 @@ use scenario::SlapScenario;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let plugin = SlapPlugin {
-        command_id: common::load_env("SLAP_COMMAND_ID").parse()?,
-        slap_descriptors: vec![
-            scenario::animated_slap::load_scenario()?,
-            scenario::static_slap::load_scenario()?,
-        ],
-    };
+    let guild_id = std::env::var("SLAP_INSTALL_COMMAND_GUILD_ID")?.parse()?;
+    let desired_command: serde_json::Value =
+        serde_json::from_str(include_str!("../slap-slash-command.json"))?;
 
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
-
     let endpoints = Endpoints::new()
         .rpc(Tcp::new(common::load_env("RPC_ADDR")))
         .events(Tcp::new(common::load_env("SUBSCRIBER_ADDR")), events);
 
-    let plugin = plugin.connect(endpoints).await?;
-    // plugin
-    //     .rpc
-    //     .create_global_command(
-    //         rpc_context(),
-    //         // self.command_id,
-    //         serde_json::from_str(include_str!("../slap-slash-command.json")).unwrap(),
-    //     )
-    //     .await??;
+    let slap_scenarios = vec![
+        scenario::static_slap::load_scenario()?,
+        scenario::animated_slap::load_scenario()?,
+    ];
+
+    let plugin = SlapPlugin::connect_init(endpoints, async |rpc| {
+        let command = rpc
+            .upsert_guild_command(rpc_context(), guild_id, desired_command)
+            .await
+            .expect("Failed to perform rpc query")
+            .expect("Failed to upsert guild command");
+
+        SlapPlugin {
+            command_id: command.id,
+            slap_scenarios,
+        }
+    })
+    .await?;
+
     plugin.handle_events().await?;
 
     Ok(())
 }
 
 struct SlapPlugin {
-    command_id: u64,
-    slap_descriptors: Vec<SlapScenario>,
+    command_id: CommandId,
+    slap_scenarios: Vec<SlapScenario>,
 }
 
 impl SlapPlugin {
@@ -84,26 +90,26 @@ impl SlapPlugin {
         descriptor_idx: Option<usize>,
     ) -> Result<Vec<u8>, anyhow::Error> {
         let idx = descriptor_idx
-        let desc = self.slap_descriptors[idx].clone();
             .unwrap_or_else(|| rand::rng().random_range(0..self.slap_scenarios.len()));
+        let scenario = self.slap_scenarios[idx].clone();
 
         let (slapper_avatar, slapped_avatar) = futures::try_join!(
-            imageops::load_avatar(slapper_avatar_url, desc.avatar_dim),
-            imageops::load_avatar(slapped_avatar_url, desc.avatar_dim),
+            imageops::load_avatar(slapper_avatar_url, scenario.avatar_dim),
+            imageops::load_avatar(slapped_avatar_url, scenario.avatar_dim),
         )?;
 
         let t0 = Instant::now();
         let gif = tokio::task::spawn_blocking(move || {
-            let mut builder = GifBuilder::from_background_frames(desc.frames, desc.dim);
+            let mut builder = GifBuilder::from_background_frames(scenario.frames, scenario.dim);
 
             match slapper_avatar {
-                Avatar::Animated(frames) => builder.overlay(&frames, &desc.slapper_positions),
-                Avatar::Fixed(frame) => builder.overlay(&[frame], &desc.slapper_positions),
+                Avatar::Animated(frames) => builder.overlay(&frames, &scenario.slapper_positions),
+                Avatar::Fixed(frame) => builder.overlay(&[frame], &scenario.slapper_positions),
             };
 
             match slapped_avatar {
-                Avatar::Animated(frames) => builder.overlay(&frames, &desc.slapped_positions),
-                Avatar::Fixed(frame) => builder.overlay(&[frame], &desc.slapped_positions),
+                Avatar::Animated(frames) => builder.overlay(&frames, &scenario.slapped_positions),
+                Avatar::Fixed(frame) => builder.overlay(&[frame], &scenario.slapped_positions),
             };
 
             builder.finish()
