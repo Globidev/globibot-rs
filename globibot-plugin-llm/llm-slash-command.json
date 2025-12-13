@@ -1,0 +1,74 @@
+{
+  "name": "llm",
+  "description": "Configure LLM settings",
+  "options": [
+    {
+      "name": "model",
+      "description": "Get or set the underlying model used",
+      "type": 2,
+      "options": [
+        {
+          "name": "show",
+          "description": "Display the underlying model used",
+          "type": 1
+        },
+        {
+          "name": "set",
+          "description": "Set the underlying model used",
+          "type": 1,
+          "options": [
+            {
+              "name": "model",
+              "description": "The model to set",
+              "type": 3,
+              "required": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "personality",
+      "description": "Get or set the LLM personality",
+      "type": 2,
+      "options": [
+        {
+          "name": "show",
+          "description": "Display the LLM personality",
+          "type": 1
+        },
+        {
+          "name": "set",
+          "description": "Set the LLM personality",
+          "type": 1,
+          "options": [
+            {
+              "name": "personality",
+              "description": "The personality to set",
+              "type": 3,
+              "required": true,
+              "choices": [
+                {
+                  "name": "Friendly assistant",
+                  "value": "friendly"
+                },
+                {
+                  "name": "French",
+                  "value": "french"
+                },
+                {
+                  "name": "American",
+                  "value": "american"
+                },
+                {
+                  "name": "Zoomer",
+                  "value": "zoomer"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

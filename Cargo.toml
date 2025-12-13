@@ -11,6 +11,7 @@ members = [
     "globibot-plugin-rateme",
     "globibot-plugin-lang-detect",
     "globibot-plugin-slap",
+    "globibot-plugin-llm",
 ]
 
 [workspace.dependencies]
