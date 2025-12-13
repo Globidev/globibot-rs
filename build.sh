@@ -1,22 +1,12 @@
-docker run \
-    --rm \
-    -it \
-    --platform linux/amd64 \
-    -v './Cargo.toml:/usr/src/globibot/Cargo.toml' \
-    -v './Cargo.lock:/usr/src/globibot/Cargo.lock' \
-    -v './globibot-core:/usr/src/globibot/globibot-core' \
-    -v './globibot-bot:/usr/src/globibot/globibot-bot' \
-    -v './globibot-plugin-common:/usr/src/globibot/globibot-plugin-common' \
-    -v './globibot-plugin-ping:/usr/src/globibot/globibot-plugin-ping' \
-    -v './globibot-plugin-rateme:/usr/src/globibot/globibot-plugin-rateme' \
-    -v './globibot-plugin-openai:/usr/src/globibot/globibot-plugin-openai' \
-    -v './globibot-plugin-tuck:/usr/src/globibot/globibot-plugin-tuck' \
-    -v './globibot-plugin-lang-detect:/usr/src/globibot/globibot-plugin-lang-detect' \
-    -v './globibot-plugin-slap:/usr/src/globibot/globibot-plugin-slap' \
-    -v './globibot-plugin-movienight:/usr/src/globibot/globibot-plugin-movienight' \
-    -v './globibot-plugin-llm:/usr/src/globibot/globibot-plugin-llm' \
-    -v 'globibot-target:/usr/src/globibot/target' \
-    -v 'globibot-registry:/usr/local/cargo/registry' \
-    -v './x64-artifacts:/usr/src/globibot/artifacts' \
-    -e RUSTFLAGS='-C target-feature=-crt-static' \
-    globibot-builder sh -c "cargo build --release && cp target/release/globibot-bot target/release/globibot-plugin*[!.d] artifacts/"
+set -e
+
+cargo build --release
+
+cp target/release/globibot-bot artifacts/globibot
+mkdir -p artifacts/plugins
+
+for plugin in target/release/globibot-plugin-*[!.d]; do
+    base_name=$(basename "$plugin")
+    plugin_name=${base_name#globibot-plugin-}
+    cp "$plugin" "artifacts/plugins/$plugin_name"
+done

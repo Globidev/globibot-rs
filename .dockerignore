@@ -1,3 +1,6 @@
 /target
-/target-builder/release/build
-/target-builder/release/deps
+
+/infra
+
+/.env.example
+/*.env
