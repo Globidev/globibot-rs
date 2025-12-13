@@ -9,7 +9,6 @@ members = [
     "globibot-plugin-ping",
     "globibot-plugin-tuck",
     "globibot-plugin-rateme",
-    "globibot-plugin-lang-detect",
     "globibot-plugin-slap",
     "globibot-plugin-llm",
 ]
