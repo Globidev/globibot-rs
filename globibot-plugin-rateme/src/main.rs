@@ -20,6 +20,7 @@ use globibot_core::{
 };
 
 use futures::lock::Mutex;
+use globibot_plugin_common::image;
 use globibot_plugin_rateme::{load_rating_images, paste_rates_on_avatar, rate};
 use rand::{Rng, SeedableRng};
 use rate::Rate;

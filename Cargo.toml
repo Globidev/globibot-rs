@@ -35,5 +35,7 @@ tarpc = { version = "0.37", features = ["serde1", "serde-transport"] }
 
 slotmap = { version = "1.1", features = ["serde"] }
 
+rand = "0.8"
+
 [profile.dev.package."*"]
 opt-level = 3

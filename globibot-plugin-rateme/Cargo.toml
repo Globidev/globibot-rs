@@ -7,13 +7,11 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rand = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3"
 globibot-core = { path = "../globibot-core" }
 globibot-plugin-common = { path = "../globibot-plugin-common" }
-rand = "0.8"
-image = "0.23"
-gif = "0.11"
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
