@@ -92,7 +92,7 @@ async fn main() -> common::anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let tuck_gifs = TUCK_GIF_DESCRIPTORS.map(|d| {
-        let mut img_path = PathBuf::from(load_env("TUCK_IMG_PATH"));
+        let mut img_path = PathBuf::from(common::load_env("TUCK_IMG_PATH"));
         img_path.push(d.file_name);
         let mut gif = load_gif(img_path, d.dimension).expect("Failed to load gif");
         if let Some(range) = &d.frame_range {
@@ -104,8 +104,8 @@ async fn main() -> common::anyhow::Result<()> {
     let events = [EventType::MessageCreate, EventType::InteractionCreate];
 
     let endpoints = Endpoints::new()
-        .rpc(Tcp::new(load_env("RPC_ADDR")))
-        .events(Tcp::new(load_env("SUBSCRIBER_ADDR")), events);
+        .rpc(Tcp::new(common::load_env("RPC_ADDR")))
+        .events(Tcp::new(common::load_env("SUBSCRIBER_ADDR")), events);
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../tuck-slash-command.json"))?;
@@ -113,25 +113,18 @@ async fn main() -> common::anyhow::Result<()> {
     let plugin = TuckPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_global_command(rpc_context(), desired_command)
-            .await
-            .expect("Failed to perform rpc query")
-            .expect("Failed to upsert guild command");
+            .await??;
 
-        TuckPlugin {
+        common::anyhow::Ok(TuckPlugin {
             command_id: command.id,
             tuck_gifs,
-        }
+        })
     })
     .await?;
 
     plugin.handle_events().await?;
 
     Ok(())
-}
-
-fn load_env(key: &str) -> String {
-    std::env::var(key)
-        .unwrap_or_else(|why| panic!("Failed to load environment variable '{}': {}", key, why))
 }
 
 struct TuckPlugin<const GIF_COUNT: usize> {

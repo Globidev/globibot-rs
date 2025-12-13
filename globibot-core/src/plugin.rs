@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::HashSet, io, sync::Arc};
+use std::{borrow::Borrow, collections::HashSet, convert::Infallible, io, sync::Arc};
 
 use futures::{Future, Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -19,29 +19,29 @@ pub trait Plugin {
     fn connect<R, E>(
         self,
         endpoints: Endpoints<R, E>,
-    ) -> impl Future<Output = io::Result<ConnectedPlugin<Self, R::Client, E::Client>>>
+    ) -> impl Future<Output = Result<ConnectedPlugin<Self, R::Client, E::Client>, InitError<Infallible>>>
     where
         Self: Sized,
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
         E: EndpointPolicy<Policy = Self::EventsPolicy>,
     {
-        async move { Self::connect_init(endpoints, async |_| self).await }
+        Self::connect_init(endpoints, async |_| Ok(self))
     }
 
-    fn connect_init<R, E, F>(
+    fn connect_init<R, E, F, Err>(
         endpoints: Endpoints<R, E>,
         init: F,
-    ) -> impl Future<Output = io::Result<ConnectedPlugin<Self, R::Client, E::Client>>>
+    ) -> impl Future<Output = Result<ConnectedPlugin<Self, R::Client, E::Client>, InitError<Err>>>
     where
         Self: Sized,
         R: EndpointPolicy<Policy = Self::RpcPolicy>,
         E: EndpointPolicy<Policy = Self::EventsPolicy>,
-        F: AsyncFnOnce(&R::Client) -> Self,
+        F: AsyncFnOnce(&R::Client) -> Result<Self, Err>,
     {
         async move {
             let rpc = endpoints.rpc.connect(Self::ID.to_owned()).await?;
             let events = endpoints.events.connect(Self::ID.to_owned()).await?;
-            let plugin = init(&rpc).await;
+            let plugin = init(&rpc).await.map_err(InitError::Plugin)?;
 
             Ok(ConnectedPlugin {
                 plugin,
@@ -50,6 +50,15 @@ pub trait Plugin {
             })
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InitError<Err> {
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Plugin initialization error: {0}")]
+    Plugin(Err),
 }
 
 pub struct HasRpc<const ENABLED: bool>;
@@ -74,7 +83,7 @@ pub trait HandleEvents: Plugin {
         &self,
         ctx: <Self::RpcPolicy as RpcContext>::Context,
         event: Event,
-    ) -> impl std::future::Future<Output = Result<(), Self::Err>> + Send;
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
 }
 
 pub struct ConnectedPlugin<T, Rpc, Events> {

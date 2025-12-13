@@ -38,11 +38,9 @@ async fn main() -> anyhow::Result<()> {
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_guild_command(rpc::context::current(), guild_id, desired_command)
-            .await
-            .expect("Failed to perform rpc query")
-            .expect("Failed to upsert guild command");
+            .await??;
 
-        LlmPlugin::from_env(command.id).expect("Failed to create plugin")
+        LlmPlugin::from_env(command.id)
     })
     .await?;
 

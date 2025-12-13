@@ -44,16 +44,14 @@ async fn main() -> common::anyhow::Result<()> {
     let plugin = RatemePlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_global_command(rpc_context(), desired_command)
-            .await
-            .expect("Failed to perform rpc query")
-            .expect("Failed to upsert guild command");
+            .await??;
 
-        RatemePlugin {
+        common::anyhow::Ok(RatemePlugin {
             rng: rand::rngs::StdRng::from_os_rng().into(),
             rating_images_small,
             rating_images_medium,
             command_id: command.id,
-        }
+        })
     })
     .await?;
 

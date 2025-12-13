@@ -61,14 +61,12 @@ async fn main() -> anyhow::Result<()> {
     let plugin = SlapPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_guild_command(rpc_context(), guild_id, desired_command)
-            .await
-            .expect("Failed to perform rpc query")
-            .expect("Failed to upsert guild command");
+            .await??;
 
-        SlapPlugin {
+        anyhow::Ok(SlapPlugin {
             command_id: command.id,
             slap_scenarios,
-        }
+        })
     })
     .await?;
 
