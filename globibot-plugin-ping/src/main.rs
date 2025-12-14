@@ -46,14 +46,12 @@ impl HandleEvents for PingPlugin {
 
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
-            Event::MessageCreate { message } => {
-                if message.content.starts_with("!ping") {
-                    let orig_message_id = message.id;
-                    let message = rpc
-                        .send_message(rpc::context::current(), message.channel_id, "pong!".into())
-                        .await??;
-                    self.message_map.lock().insert(orig_message_id, message);
-                }
+            Event::MessageCreate { message } if message.content.starts_with("!ping") => {
+                let orig_message_id = message.id;
+                let message = rpc
+                    .send_message(rpc::context::current(), message.channel_id, "pong!".into())
+                    .await??;
+                self.message_map.lock().insert(orig_message_id, message);
             }
             Event::MessageDelete {
                 channel_id,

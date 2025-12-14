@@ -56,15 +56,11 @@ pub async fn client(
     publisher: Publisher,
     application_id: u64,
 ) -> serenity::Result<Client> {
-    let event_handler = EventHandler { publisher };
-
-    let discord_client = Client::builder(
+    Client::builder(
         token,
         GatewayIntents::default().union(GatewayIntents::MESSAGE_CONTENT),
     )
-    .event_handler(event_handler)
+    .event_handler(EventHandler { publisher })
     .application_id(application_id.into())
-    .await?;
-
-    Ok(discord_client)
+    .await
 }
