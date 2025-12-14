@@ -2,31 +2,21 @@ use std::{collections::HashMap, error::Error};
 
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
+    plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc, serenity,
-    transport::Tcp,
 };
 use serenity::model::{channel::Message, id::MessageId};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> common::anyhow::Result<()> {
     let plugin = PingPlugin::default();
 
-    let events = [EventType::MessageCreate, EventType::MessageDelete];
+    let endpoints =
+        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::MessageDelete])?;
 
-    let subscriber_addr = std::env::var("SUBSCRIBER_ADDR").expect("msg");
-    let rpc_addr = std::env::var("RPC_ADDR").expect("msg");
+    plugin.connect(endpoints).await?.handle_events().await?;
 
-    let endpoints = Endpoints::new()
-        .rpc(Tcp::new(rpc_addr))
-        .events(Tcp::new(subscriber_addr), events);
-
-    let p = plugin
-        .connect(endpoints)
-        .await
-        .expect("Failed to connect plugin");
-
-    p.handle_events().await.expect("Failed to run plugin");
+    Ok(())
 }
 
 #[derive(Default)]

@@ -7,9 +7,11 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+globibot-core = { path = "../globibot-core" }
+common = { package = "globibot-plugin-common", path = "../globibot-plugin-common" }
+
 tokio = { workspace = true }
 futures = { workspace = true }
-globibot-core = { path = "../globibot-core" }
 
 anyhow = { workspace = true }
 reqwest = { workspace = true }

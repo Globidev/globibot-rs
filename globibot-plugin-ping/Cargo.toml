@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 globibot-core = { path = "../globibot-core" }
+common = { package = "globibot-plugin-common", path = "../globibot-plugin-common" }
 
 tokio = { workspace = true }
 

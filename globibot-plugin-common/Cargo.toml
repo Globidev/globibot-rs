@@ -5,6 +5,8 @@ authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
 edition = "2024"
 
 [dependencies]
+globibot-core = { path = "../globibot-core" }
+
 image = "0.24"
 libwebp-image = "0.3"
 gif = "0.14"

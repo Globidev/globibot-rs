@@ -3,14 +3,13 @@ use std::{convert::TryInto, error::Error, path::PathBuf, time::Instant};
 use common::image::RgbaImage;
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
+    plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
         all::CommandId,
         model::application::{CommandDataOptionValue, CommandInteraction},
         prelude::Mentionable,
     },
-    transport::Tcp,
 };
 use globibot_plugin_tuck::{
     AvatarPositions, Dimension, PasteAvatarPositions, load_gif, paste_avatar,
@@ -101,11 +100,8 @@ async fn main() -> common::anyhow::Result<()> {
         (d, gif)
     });
 
-    let events = [EventType::MessageCreate, EventType::InteractionCreate];
-
-    let endpoints = Endpoints::new()
-        .rpc(Tcp::new(common::load_env("RPC_ADDR")))
-        .events(Tcp::new(common::load_env("SUBSCRIBER_ADDR")), events);
+    let endpoints =
+        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../tuck-slash-command.json"))?;

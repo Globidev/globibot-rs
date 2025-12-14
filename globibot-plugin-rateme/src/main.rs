@@ -5,7 +5,7 @@ use std::{
 
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
+    plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
         all::CommandId,
@@ -16,7 +16,6 @@ use globibot_core::{
         },
         utils::parse_user_mention,
     },
-    transport::Tcp,
 };
 
 use globibot_plugin_rateme::{load_rating_images, paste_rates_on_avatar, rate};
@@ -33,10 +32,8 @@ async fn main() -> common::anyhow::Result<()> {
     let rating_images_small = load_rating_images(&img_path, (25, 25))?;
     let rating_images_medium = load_rating_images(&img_path, (50, 50))?;
 
-    let events = [EventType::MessageCreate, EventType::InteractionCreate];
-    let endpoints = Endpoints::new()
-        .rpc(Tcp::new(load_env("RPC_ADDR")))
-        .events(Tcp::new(load_env("SUBSCRIBER_ADDR")), events);
+    let endpoints =
+        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../rateme-slash-command.json"))?;

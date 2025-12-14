@@ -8,12 +8,11 @@ use std::collections::{HashMap, VecDeque};
 
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
+    plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
     serenity::all::{
         ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, Message, UserId,
     },
-    transport::Tcp,
 };
 use itertools::Itertools;
 
@@ -23,17 +22,12 @@ use crate::personality::Personality;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let subscriber_addr = std::env::var("SUBSCRIBER_ADDR")?;
-    let rpc_addr = std::env::var("RPC_ADDR")?;
-
     let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")?.parse()?;
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../llm-slash-command.json"))?;
 
-    let events = [EventType::MessageCreate, EventType::InteractionCreate];
-    let endpoints = Endpoints::new()
-        .rpc(Tcp::new(rpc_addr))
-        .events(Tcp::new(subscriber_addr), events);
+    let endpoints =
+        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc

@@ -4,14 +4,13 @@ use common::{
 };
 use globibot_core::{
     events::{Event, EventType},
-    plugin::{Endpoints, HandleEvents, HasEvents, HasRpc, Plugin},
+    plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
         all::CommandId,
         model::application::{CommandDataOptionValue, CommandInteraction},
         prelude::Mentionable,
     },
-    transport::Tcp,
 };
 use rand::Rng;
 use std::time::Instant;
@@ -48,10 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../slap-slash-command.json"))?;
 
-    let events = [EventType::MessageCreate, EventType::InteractionCreate];
-    let endpoints = Endpoints::new()
-        .rpc(Tcp::new(common::load_env("RPC_ADDR")))
-        .events(Tcp::new(common::load_env("SUBSCRIBER_ADDR")), events);
+    let endpoints =
+        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let slap_scenarios = vec![
         scenario::static_slap::load_scenario()?,
