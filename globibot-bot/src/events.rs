@@ -98,7 +98,7 @@ impl Publisher {
             receiver: self.sender.subscribe(),
         };
 
-        tokio::spawn(async move { subscriber.run().await });
+        tokio::spawn(subscriber.run());
     }
 
     pub fn broadcast(&self, event: Event) {

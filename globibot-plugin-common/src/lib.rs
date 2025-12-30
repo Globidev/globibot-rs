@@ -19,7 +19,7 @@ pub mod endpoints {
 
     type TcpEndpoints = Endpoints<BoundRpc<Tcp<String>>, BoundEvents<Tcp<String>>>;
 
-    pub fn tpc_from_env(
+    pub fn tcp_from_env(
         events: impl IntoIterator<Item = EventType>,
     ) -> anyhow::Result<TcpEndpoints> {
         let subscriber_addr = std::env::var("SUBSCRIBER_ADDR")

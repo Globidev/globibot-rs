@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(include_str!("../llm-slash-command.json"))?;
 
     let endpoints =
-        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
+        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc

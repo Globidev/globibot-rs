@@ -12,7 +12,7 @@ async fn main() -> common::anyhow::Result<()> {
     let plugin = PingPlugin::default();
 
     let endpoints =
-        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::MessageDelete])?;
+        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::MessageDelete])?;
 
     plugin.connect(endpoints).await?.handle_events().await?;
 

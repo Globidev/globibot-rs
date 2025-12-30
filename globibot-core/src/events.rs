@@ -55,8 +55,10 @@ pub struct HandshakeRequest {
 pub enum AcceptError {
     #[error("IO error: {0}")]
     IO(#[from] io::Error),
+
     #[error("Handshake timed out")]
     HandshakeTimedOut,
+
     #[error("Handshake missing")]
     HandshakeMissing,
 }

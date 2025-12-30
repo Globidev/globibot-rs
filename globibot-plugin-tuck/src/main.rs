@@ -101,7 +101,7 @@ async fn main() -> common::anyhow::Result<()> {
     });
 
     let endpoints =
-        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
+        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../tuck-slash-command.json"))?;

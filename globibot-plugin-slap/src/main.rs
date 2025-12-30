@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(include_str!("../slap-slash-command.json"))?;
 
     let endpoints =
-        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
+        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let slap_scenarios = vec![
         scenario::static_slap::load_scenario()?,

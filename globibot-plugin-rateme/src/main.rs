@@ -33,7 +33,7 @@ async fn main() -> common::anyhow::Result<()> {
     let rating_images_medium = load_rating_images(&img_path, (50, 50))?;
 
     let endpoints =
-        common::endpoints::tpc_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
+        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../rateme-slash-command.json"))?;
