@@ -63,6 +63,14 @@
                 {
                   "name": "Zoomer",
                   "value": "zoomer"
+                },
+                {
+                  "name": "Scottish",
+                  "value": "scottish"
+                },
+                {
+                  "name": "Aussie",
+                  "value": "aussie"
                 }
               ]
             }
