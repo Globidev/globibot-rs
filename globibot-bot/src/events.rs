@@ -8,6 +8,8 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
+use crate::web::WEB_STATE;
+
 pub trait EventSink = Sink<Event, Error: Display> + Send + Unpin + 'static;
 
 pub async fn run_publisher<S, T>(transports: S, publisher: Publisher) -> io::Result<()>
@@ -20,9 +22,20 @@ where
     while let Some(transport) = transports.next().await.transpose()? {
         debug!("About to accept new subscriber");
         match accept(transport).await {
-            Ok((subscription, subscriber)) => {
-                info!("new event subscriber: '{id}'", id = subscription.id);
-                publisher.add_subscriber(subscriber, subscription.events);
+            Ok((request, subscriber)) => {
+                let subscriber = publisher.add_subscriber(subscriber, request.events);
+                tokio::spawn({
+                    let plugin_id = request.id.clone();
+                    async move {
+                        subscriber.run().await;
+                        WEB_STATE.lock().unwrap().remove_plugin(&plugin_id);
+                    }
+                });
+                WEB_STATE
+                    .lock()
+                    .unwrap()
+                    .register_plugin_events(&request.id);
+                info!("New event subscriber spawned: '{id}'", id = request.id);
             }
             Err(AcceptError::IO(err)) => {
                 warn!("IO error while accepting new subscriber: {}", err);
@@ -87,18 +100,16 @@ impl Publisher {
         }
     }
 
-    pub fn add_subscriber(
+    fn add_subscriber<T: EventSink>(
         &self,
-        transport: impl EventSink,
+        transport: T,
         events: impl IntoIterator<Item = EventType>,
-    ) {
-        let subscriber = Subscriber {
+    ) -> Subscriber<T> {
+        Subscriber {
             transport,
             events: events.into_iter().collect(),
             receiver: self.sender.subscribe(),
-        };
-
-        tokio::spawn(subscriber.run());
+        }
     }
 
     pub fn broadcast(&self, event: Event) {

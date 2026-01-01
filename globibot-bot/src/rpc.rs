@@ -25,6 +25,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use rpc::{DiscordApiResult, Protocol, ServerChannel};
 use tracing::{debug, info, warn};
 
+use crate::web::WEB_STATE;
+
 pub async fn run_server<S, T>(
     transports: S,
     cache: Arc<DiscordCache>,
@@ -43,8 +45,17 @@ where
                 let http = Arc::clone(&http);
                 let cache = Arc::clone(&cache);
                 let handle_client = respond_to_rpc_client(client, http, cache);
-                tokio::spawn(handle_client);
-                info!("New RPC client spawned: '{}'", request.id);
+                tokio::spawn({
+                    let plugin_id = request.id.clone();
+                    async move {
+                        if let Err(err) = handle_client.await {
+                            warn!("RPC client error: {err}");
+                        }
+                        WEB_STATE.lock().unwrap().remove_plugin(&plugin_id);
+                    }
+                });
+                WEB_STATE.lock().unwrap().register_plugin_rpc(&request.id);
+                info!("New RPC client spawned: '{id}'", id = request.id);
             }
             Err(AcceptError::IO(err)) => {
                 warn!("IO error while accepting new RPC client : {}", err);

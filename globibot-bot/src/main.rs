@@ -3,6 +3,7 @@
 mod discord;
 mod events;
 mod rpc;
+mod web;
 
 use std::{env, io, num::ParseIntError};
 
@@ -33,13 +34,15 @@ async fn main() -> Result<(), AppError> {
         discord_client.http.clone(),
     );
     let run_discord_client = discord_client.start();
+    let run_web_server = web::run_server();
 
-    tracing::info!("Bot running");
+    tracing::info!("Starting bot...");
 
     futures::try_join!(
         publish_events.err_into::<AppError>(),
         run_rpc_server.err_into(),
         run_discord_client.err_into(),
+        run_web_server.err_into(),
     )?;
 
     Ok(())
