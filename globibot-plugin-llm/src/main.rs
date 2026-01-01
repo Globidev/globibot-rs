@@ -274,7 +274,7 @@ impl LlmPlugin {
 const CONTEXT_WINDOW_SIZE: usize = 200;
 
 impl Plugin for LlmPlugin {
-    const ID: &'static str = "LLM";
+    const ID: &'static str = "llm";
 
     type RpcPolicy = HasRpc<true>;
     type EventsPolicy = HasEvents<true>;

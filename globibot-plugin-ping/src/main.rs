@@ -25,7 +25,7 @@ struct PingPlugin {
 }
 
 impl Plugin for PingPlugin {
-    const ID: &'static str = "Ping";
+    const ID: &'static str = "ping";
 
     type RpcPolicy = HasRpc<true>;
     type EventsPolicy = HasEvents<true>;

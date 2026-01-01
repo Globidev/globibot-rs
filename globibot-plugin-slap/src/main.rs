@@ -117,7 +117,7 @@ impl SlapPlugin {
 }
 
 impl Plugin for SlapPlugin {
-    const ID: &'static str = "Slap";
+    const ID: &'static str = "slap";
 
     type RpcPolicy = HasRpc<true>;
     type EventsPolicy = HasEvents<true>;

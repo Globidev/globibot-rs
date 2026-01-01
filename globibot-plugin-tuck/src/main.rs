@@ -159,7 +159,7 @@ impl<const GIF_COUNT: usize> TuckPlugin<GIF_COUNT> {
 }
 
 impl<const GIF_COUNT: usize> Plugin for TuckPlugin<GIF_COUNT> {
-    const ID: &'static str = "Tuck";
+    const ID: &'static str = "tuck";
 
     type RpcPolicy = HasRpc<true>;
     type EventsPolicy = HasEvents<true>;
