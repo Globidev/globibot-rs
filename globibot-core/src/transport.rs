@@ -1,9 +1,6 @@
 use std::{io, path::Path};
 
-use futures::{
-    Stream, TryFutureExt,
-    future::{self, Future},
-};
+use futures::{Future, Stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -23,9 +20,10 @@ pub type FramedWrite<T, Resp> = FramedStream<T, NoData, Resp>;
 
 pub trait Protocol {
     type Client;
-    type ClientStream: Stream<Item = io::Result<Self::Client>>;
 
-    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>>;
+    fn listen(
+        self,
+    ) -> impl Future<Output = io::Result<impl Stream<Item = io::Result<Self::Client>>>>;
     fn connect(self) -> impl Future<Output = io::Result<Self::Client>>;
 }
 
@@ -66,15 +64,15 @@ where
     P: AsRef<Path>,
 {
     type Client = UnixStream;
-    type ClientStream = UnixListenerStream;
 
-    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>> {
+    async fn listen(self) -> io::Result<impl Stream<Item = io::Result<Self::Client>>> {
         let _ = std::fs::remove_file(&self.path);
-        future::ready(UnixListener::bind(self.path).map(UnixListenerStream::new))
+        let listener = UnixListener::bind(self.path)?;
+        Ok(UnixListenerStream::new(listener))
     }
 
-    fn connect(self) -> impl Future<Output = io::Result<Self::Client>> {
-        UnixStream::connect(self.path)
+    async fn connect(self) -> io::Result<Self::Client> {
+        UnixStream::connect(self.path).await
     }
 }
 
@@ -83,13 +81,13 @@ where
     A: ToSocketAddrs,
 {
     type Client = TcpStream;
-    type ClientStream = TcpListenerStream;
 
-    fn listen(self) -> impl Future<Output = io::Result<Self::ClientStream>> {
-        TcpListener::bind(self.addr).map_ok(TcpListenerStream::new)
+    async fn listen(self) -> io::Result<impl Stream<Item = io::Result<Self::Client>>> {
+        let listener = TcpListener::bind(self.addr).await?;
+        Ok(TcpListenerStream::new(listener))
     }
 
-    fn connect(self) -> impl Future<Output = io::Result<Self::Client>> {
-        TcpStream::connect(self.addr)
+    async fn connect(self) -> io::Result<Self::Client> {
+        TcpStream::connect(self.addr).await
     }
 }
