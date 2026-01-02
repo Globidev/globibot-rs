@@ -11,9 +11,8 @@ Cargo.lock
 
 /assets/
 
-/x64-artifacts/
+/arm64-artifacts/
 
-globibot-plugin-openai/
-globibot-plugin-movienight/
+plugins/movienight/
 
 *.env
