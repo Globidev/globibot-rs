@@ -58,4 +58,16 @@ impl HandleEvents for PingPlugin {
         }
         Ok(())
     }
+
+    // async fn on_new_message(
+    //     &self,
+    //     _ctx: rpc::ProtocolClient,
+    //     event: Event,
+    // ) -> Result<(), Self::Err> {
+    //     if !message.content.starts_with("!ping") {
+    //         return Ok(());
+    //     }
+
+    //     Ok(())
+    // }
 }

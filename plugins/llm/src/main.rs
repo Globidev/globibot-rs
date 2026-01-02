@@ -365,3 +365,36 @@ impl HandleEvents for LlmPlugin {
         Ok(())
     }
 }
+
+// bot_command! {
+//     enum LLMCommand {
+//         #[subcommand]
+//         Model(ModelCommand),
+
+//         #[subcommand]
+//         Personality(PersonalityCommand),
+//     }
+
+// }
+// enum ModelCommand {
+//     Show,
+//     Set { model: String },
+// }
+
+// enum PersonalityCommand {
+//     Show,
+//     Set { personality: String },
+// }
+
+// macro_rules! bot_command {
+//     (enum $name: ident { $( $tt:tt )* }) => {
+//         bot_command!(@gen_enum $name $( $tt )* );
+//     };
+
+//     (@gen_enum $enum_name: ident $(#[$meta: meta])? $variant_name: ident ( $($ty: ty),* ) $( $tt: tt )*) => {
+//         enum $enum_name {
+
+//         }
+//     }
+// }
+// use bot_command;

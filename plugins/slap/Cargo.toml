@@ -1,5 +1,5 @@
 [package]
-name = "globibot-plugin-tuck"
+name = "globibot-plugin-slap"
 version = "0.1.0"
 authors = ["Guillaume Depardon <guillaume.depardon@gmail.com>"]
 edition = "2024"
@@ -7,14 +7,15 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rand = { workspace = true }
+globibot-core = { path = "../../globibot-core" }
+common = { package = "globibot-plugin-common", path = "../common" }
+
 tokio = { workspace = true }
 futures = { workspace = true }
-globibot-core = { path = "../globibot-core" }
-common = { package = "globibot-plugin-common", path = "../globibot-plugin-common" }
-reqwest = { workspace = true }
-rayon = "1.5"
+
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror = { workspace = true }
+
 serde_json = { workspace = true }
+
+rand = { workspace = true }

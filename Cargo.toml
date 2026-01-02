@@ -3,14 +3,8 @@ resolver = "3"
 members = [
     "globibot-core",
     "globibot-bot",
-
-    "globibot-plugin-common",
-
-    "globibot-plugin-ping",
-    "globibot-plugin-tuck",
-    "globibot-plugin-rateme",
-    "globibot-plugin-slap",
-    "globibot-plugin-llm",
+    #
+    "plugins/*",
 ]
 
 [workspace.dependencies]
