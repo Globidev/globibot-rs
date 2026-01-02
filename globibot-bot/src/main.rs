@@ -18,6 +18,7 @@ async fn main() -> Result<(), AppError> {
 
     let subscriber_addr = env::var("SUBSCRIBER_ADDR")?;
     let rpc_addr = env::var("RPC_ADDR")?;
+    let web_addr = env::var("WEB_ADDR")?;
 
     let raw_event_subscribers = Tcp::new(subscriber_addr).listen().await?;
     let raw_rpc_clients = Tcp::new(rpc_addr).listen().await?;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), AppError> {
         discord_client.http.clone(),
     );
     let run_discord_client = discord_client.start();
-    let run_web_server = web::run_server();
+    let run_web_server = web::run_server(web_addr);
 
     tracing::info!("Starting bot...");
 

@@ -10,9 +10,9 @@ use axum::{
     routing::get,
 };
 use futures::{Stream, TryStreamExt};
-use tokio::sync::broadcast::Receiver;
+use tokio::{net::ToSocketAddrs, sync::broadcast::Receiver};
 
-pub async fn run_server() -> std::io::Result<()> {
+pub async fn run_server(addr: impl ToSocketAddrs) -> std::io::Result<()> {
     let app = Router::new() //
         .route("/", get(async || "Globibot Web Server"))
         .route("/plugins", get(list_plugins))
@@ -21,7 +21,7 @@ pub async fn run_server() -> std::io::Result<()> {
             rx: WEB_STATE.lock().unwrap().tx.subscribe(),
         });
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8001").await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
