@@ -115,10 +115,31 @@ impl WebServerState {
             })
     }
 
-    pub fn remove_plugin(&mut self, name: &str) {
-        self.plugins.remove(name);
-        self.tx
-            .send(SseMessage::RemovedPlugin(name.to_string()))
-            .ok();
+    pub fn unregister_plugin_rpc(&mut self, name: &str) {
+        let Some(plugin) = self.plugins.get_mut(name) else {
+            return;
+        };
+        let message = if !plugin.has_events {
+            self.plugins.remove(name);
+            SseMessage::RemovedPlugin(name.to_string())
+        } else {
+            plugin.has_rpc = false;
+            SseMessage::UpsertedPlugin(plugin.clone())
+        };
+        self.tx.send(message).ok();
+    }
+
+    pub fn unregister_plugin_events(&mut self, name: &str) {
+        let Some(plugin) = self.plugins.get_mut(name) else {
+            return;
+        };
+        let message = if !plugin.has_rpc {
+            self.plugins.remove(name);
+            SseMessage::RemovedPlugin(name.to_string())
+        } else {
+            plugin.has_events = false;
+            SseMessage::UpsertedPlugin(plugin.clone())
+        };
+        self.tx.send(message).ok();
     }
 }

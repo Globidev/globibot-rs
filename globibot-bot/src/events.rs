@@ -28,7 +28,11 @@ where
                     let plugin_id = request.id.clone();
                     async move {
                         subscriber.run().await;
-                        WEB_STATE.lock().unwrap().remove_plugin(&plugin_id);
+                        info!("Ended connection with event subscriber: '{plugin_id}'");
+                        WEB_STATE
+                            .lock()
+                            .unwrap()
+                            .unregister_plugin_events(&plugin_id);
                     }
                 });
                 WEB_STATE

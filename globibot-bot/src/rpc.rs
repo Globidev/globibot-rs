@@ -51,7 +51,8 @@ where
                         if let Err(err) = handle_client.await {
                             warn!("RPC client error: {err}");
                         }
-                        WEB_STATE.lock().unwrap().remove_plugin(&plugin_id);
+                        info!("Ended connection with RPC client: '{plugin_id}'");
+                        WEB_STATE.lock().unwrap().unregister_plugin_rpc(&plugin_id);
                     }
                 });
                 WEB_STATE.lock().unwrap().register_plugin_rpc(&request.id);
@@ -93,8 +94,6 @@ where
         let request = request_result?;
         request.execute(serve.clone()).await;
     }
-
-    info!("Ended connection with RPC client");
 
     Ok(())
 }

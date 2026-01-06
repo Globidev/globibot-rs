@@ -33,8 +33,8 @@ impl serenity::client::EventHandler for EventHandler {
         });
     }
 
-    async fn cache_ready(&self, _ctx: Context, _guilds: Vec<GuildId>) {
-        tracing::info!("CACHE READY!");
+    async fn cache_ready(&self, _ctx: Context, guilds: Vec<GuildId>) {
+        tracing::info!("discord cache ready: {} guilds", guilds.len());
     }
 
     async fn message_delete(
@@ -53,8 +53,8 @@ impl serenity::client::EventHandler for EventHandler {
 
 pub async fn client(
     token: &str,
-    publisher: Publisher,
     application_id: u64,
+    publisher: Publisher,
 ) -> serenity::Result<Client> {
     Client::builder(
         token,

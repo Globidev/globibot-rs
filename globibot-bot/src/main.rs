@@ -26,7 +26,7 @@ async fn main() -> Result<(), AppError> {
     let discord_token = env::var("DISCORD_TOKEN")?;
     let application_id = env::var("APPLICATION_ID")?.parse()?;
     let mut discord_client =
-        discord::client(&discord_token, publisher.clone(), application_id).await?;
+        discord::client(&discord_token, application_id, publisher.clone()).await?;
 
     let publish_events = events::run_publisher(raw_event_subscribers, publisher);
     let run_rpc_server = rpc::run_server(
