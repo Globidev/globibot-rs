@@ -22,6 +22,8 @@ tarpc = { workspace = true }
 
 slotmap = { workspace = true }
 
+redis = { workspace = true }
+
 [dependencies.serenity]
 default-features = false
 features = [
