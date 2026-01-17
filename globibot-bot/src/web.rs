@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::{FromRef, State},
     http::{Response, StatusCode},
-    response::{self, IntoResponse, Sse, sse::Event},
+    response::{self, IntoResponse, Redirect, Sse, sse::Event},
     routing::{get, post},
 };
 use axum_extra::extract::{
@@ -12,7 +12,7 @@ use axum_extra::extract::{
 };
 use futures::{Stream, TryStreamExt};
 use globibot_core::{
-    serenity,
+    serenity::{self, Error, all::GuildId},
     storage::{DiscordSession, RedisStorage},
 };
 use std::{
@@ -25,8 +25,15 @@ use tokio::{net::ToSocketAddrs, sync::broadcast::Receiver};
 pub struct WebServer {
     storage: RedisStorage,
     cookie_key: Key,
+
+    #[from_ref(skip)]
     discord_app_id: u64,
+    #[from_ref(skip)]
     discord_app_secret: String,
+    #[from_ref(skip)]
+    discord_oauth_authorize_link: String,
+    #[from_ref(skip)]
+    discord_guild_id: GuildId,
 }
 
 impl WebServer {
@@ -35,12 +42,16 @@ impl WebServer {
         cookie_secret: &str,
         discord_app_id: u64,
         discord_app_secret: String,
+        discord_oauth_authorize_link: String,
+        discord_guild_id: GuildId,
     ) -> Self {
         Self {
             storage,
             cookie_key: Key::from(cookie_secret.as_bytes()),
             discord_app_id,
             discord_app_secret,
+            discord_oauth_authorize_link,
+            discord_guild_id,
         }
     }
 
@@ -52,6 +63,7 @@ impl WebServer {
             .with_state(SseMessageReceiver {
                 rx: WEB_STATE.lock().unwrap().tx.subscribe(),
             })
+            .route("/discord/authorize", get(discord_authorize))
             .route("/discord/login", post(discord_login))
             .route("/discord/logout", post(discord_logout))
             .route("/discord/profile", get(discord_profile))
@@ -86,6 +98,10 @@ async fn stream_events(
     Sse::new(event_stream)
 }
 
+async fn discord_authorize(State(web_server): State<WebServer>) -> impl IntoResponse {
+    Redirect::temporary(&web_server.discord_oauth_authorize_link)
+}
+
 #[derive(serde::Deserialize)]
 struct OAuthCallbackParams {
     code: String,
@@ -115,10 +131,18 @@ async fn discord_login(
     let now = time::OffsetDateTime::now_utc();
 
     let client = reqwest::Client::new();
+
+    let authorize_url = url::Url::parse(&web_server.discord_oauth_authorize_link)
+        .expect("Invalid Discord OAuth authorize link");
+    let redirect_uri = authorize_url
+        .query_pairs()
+        .find_map(|(k, v)| (k == "redirect_uri").then_some(v))
+        .expect("redirect_uri not found in Discord OAuth authorize link");
+
     let params = [
         ("grant_type", "authorization_code"),
         ("code", &params.code),
-        ("redirect_uri", "http://localhost:5173/oauth"), // TODO: make configurable
+        ("redirect_uri", &redirect_uri),
     ];
 
     #[derive(serde::Deserialize)]
@@ -174,7 +198,7 @@ async fn discord_login(
             .expires(expiry_date), // 🔶 Might not be needed when supporting automatic token refreshes
     );
 
-    Ok(discord_profile(State(web_server.storage), jar).await)
+    Ok(discord_profile(State(web_server), jar).await)
 }
 
 async fn discord_logout(
@@ -213,7 +237,7 @@ struct DiscordProfile {
 }
 
 async fn discord_profile(
-    State(mut storage): State<RedisStorage>,
+    State(mut server): State<WebServer>,
     jar: PrivateCookieJar,
 ) -> Response<Body> {
     tracing::info!("Fetching Discord profile...");
@@ -223,16 +247,27 @@ async fn discord_profile(
 
     tracing::info!("Found session cookie, retrieving session from storage...");
 
-    let session = match storage.get::<DiscordSession>(cookie.value()).await {
+    macro_rules! bad_request {
+        ($text:expr) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                jar.remove(
+                    Cookie::build("discord_session")
+                        .path("/")
+                        .http_only(true)
+                        .secure(true),
+                ),
+                $text,
+            )
+                .into_response()
+        };
+    }
+
+    let session = match server.storage.get::<DiscordSession>(cookie.value()).await {
         Ok(session) => session,
         Err(err) => {
             tracing::warn!("Failed to get Discord session from storage: {err}");
-            return (
-                StatusCode::BAD_REQUEST,
-                jar.remove(cookie),
-                "Invalid session",
-            )
-                .into_response();
+            bad_request!("Invalid session");
         }
     };
 
@@ -240,15 +275,20 @@ async fn discord_profile(
 
     let http = serenity::http::Http::new(&format!("Bearer {}", session.access_token));
 
-    let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")
-        .unwrap()
-        .parse()
-        .unwrap(); // 🔴
-
-    let member = match http.get_current_user_guild_member(guild_id).await {
+    let member = match http
+        .get_current_user_guild_member(server.discord_guild_id)
+        .await
+    {
         Ok(user) => user,
+        Err(Error::Http(err))
+            if err
+                .status_code()
+                .is_some_and(|status| status.as_u16() == 404) =>
+        {
+            bad_request!("You are not a member of the required Discord guild");
+        }
         Err(err) => {
-            return format!("Failed to get user: {err}").into_response();
+            bad_request!(format!("Failed to get user: {err}"));
         }
     };
 

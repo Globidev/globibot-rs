@@ -29,7 +29,7 @@ class AuthStore {
         body: JSON.stringify({ code })
       });
       if (!response.ok) {
-        throw new Error('Failed to log in: ' + (await response.text()));
+        throw new Error(await response.text());
       }
       const member: DiscordMember = await response.json();
       this.user = member;

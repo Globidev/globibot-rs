@@ -17,7 +17,7 @@
         </div>
       {:else}
         <a
-          href="https://discord.com/oauth2/authorize?client_id=464239709745577985&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A5173%2Foauth&scope=guilds.members.read+identify"
+          href="/api/discord/authorize"
           class="bg-primary hover:bg-primary-hover rounded-md px-4 py-2 text-sm"
           >Log in with Discord</a
         >

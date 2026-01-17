@@ -20,7 +20,9 @@ async fn main() -> Result<(), AppError> {
     let discord_token = env::var("DISCORD_TOKEN")?;
     let application_id = env::var("APPLICATION_ID")?.parse()?;
     let application_secret = env::var("APPLICATION_SECRET")?;
+    let discord_oauth_authorize_link = env::var("DISCORD_OAUTH_AUTHORIZE_LINK")?;
     let cookie_secret = env::var("COOKIE_SECRET")?;
+    let discord_oauth_guild_id = env::var("DISCORD_OAUTH_GUILD_ID")?.parse()?;
 
     let ev_publisher = events::Publisher::new();
     let raw_ev_subscribers = Tcp::new(subscriber_addr).listen().await?;
@@ -37,8 +39,14 @@ async fn main() -> Result<(), AppError> {
     );
     let run_discord_client = discord_client.start();
     let storage = globibot_core::storage::RedisStorage::from_env().await?;
-    let web_server =
-        web::WebServer::new(storage, &cookie_secret, application_id, application_secret);
+    let web_server = web::WebServer::new(
+        storage,
+        &cookie_secret,
+        application_id,
+        application_secret,
+        discord_oauth_authorize_link,
+        discord_oauth_guild_id,
+    );
     let run_web_server = web_server.serve(web_addr);
 
     tracing::info!("Starting bot...");

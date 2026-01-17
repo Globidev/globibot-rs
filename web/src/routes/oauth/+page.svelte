@@ -18,9 +18,10 @@
       <span>Successfully logged in as</span>
       <span class="font-semibold">{authStore.user.username}</span>
       <img class="h-24 w-24 rounded-lg" src={authStore.user.avatar_url} alt="User Avatar" />
+      <a href="/" class="mt-4 text-blue-500 underline">Go to Home</a>
     </div>
   {:else if authStore.logginError != null}
-    <span> Error during Logging flow</span>
+    <span> Error during Logging flow: {authStore.logginError}</span>
   {:else}
     <span>Not logged in.</span>
   {/if}
