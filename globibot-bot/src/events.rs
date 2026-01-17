@@ -29,10 +29,6 @@ where
                     async move {
                         subscriber.run().await;
                         info!("Ended connection with event subscriber: '{plugin_id}'");
-                        WEB_STATE
-                            .lock()
-                            .unwrap()
-                            .unregister_plugin_events(&plugin_id);
                     }
                 });
                 WEB_STATE
