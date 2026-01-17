@@ -2,12 +2,17 @@
   import { clickOutside } from '../actions/clickOutside';
   import { authStore } from '$lib/stores/auth.svelte';
 
+  import discordIcon from '$lib/assets/discord-icon.svg';
+
   let open = $state(false);
 </script>
 
 <div class="relative" use:clickOutside={() => (open = false)}>
   {#if authStore.initialized}
-    <button class="flex cursor-pointer items-center gap-1" onclick={() => (open = !open)}>
+    <button
+      class="flex cursor-pointer items-center gap-1 rounded-md"
+      onclick={() => (open = !open)}
+    >
       {#if authStore.user != null}
         <div class="flex items-center gap-3">
           {#if authStore.user.avatar_url}
@@ -18,9 +23,12 @@
       {:else}
         <a
           href="/api/discord/authorize"
-          class="bg-primary hover:bg-primary-hover rounded-md px-4 py-2 text-sm"
-          >Log in with Discord</a
+          class="bg-primary hover:bg-primary-hover rounded-md border border-gray-300 px-4 py-2 text-sm hover:bg-gray-100 hover:text-black"
         >
+          <div class="flex flex-row items-center gap-2">
+            Log in with <img src={discordIcon} alt="Discord Icon" class="inline h-4 w-4" />
+          </div>
+        </a>
       {/if}
     </button>
   {/if}
