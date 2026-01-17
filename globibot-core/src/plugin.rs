@@ -88,7 +88,7 @@ pub trait HandleEvents: Plugin {
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
     plugin: T,
-    rpc: Rpc,
+    pub rpc: Rpc,
     events: Events,
 }
 
