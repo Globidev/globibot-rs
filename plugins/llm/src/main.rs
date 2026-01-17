@@ -1,8 +1,17 @@
 mod openrouter;
 mod personality;
 
+use axum::{
+    extract::{FromRef, Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
+use axum_extra::extract::{PrivateCookieJar, cookie::Key};
+use futures::TryFutureExt;
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::Mutex;
+use tokio::net::ToSocketAddrs;
 
 use std::collections::{HashMap, VecDeque};
 
@@ -13,6 +22,7 @@ use globibot_core::{
     serenity::all::{
         ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, Message, UserId,
     },
+    storage::{DiscordSession, RedisStorage},
 };
 use itertools::Itertools;
 
@@ -21,6 +31,13 @@ use crate::personality::Personality;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
+    let web_addr_listen = std::env::var("LLM_WEB_ADDR_LISTEN")?;
+    let web_addr_advertise = std::env::var("LLM_WEB_ADDR_ADVERTISE")?.parse()?;
+    let cookie_secret = std::env::var("COOKIE_SECRET")?;
+
+    let storage = RedisStorage::from_env().await?;
+    let web_server = WebServer::new(storage, &cookie_secret);
 
     let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")?.parse()?;
     let desired_command: serde_json::Value =
@@ -34,13 +51,76 @@ async fn main() -> anyhow::Result<()> {
             .upsert_guild_command(rpc::context::current(), guild_id, desired_command)
             .await??;
 
+        rpc.register_web_api(rpc::context::current(), web_addr_advertise)
+            .await??;
+
         LlmPlugin::from_env(command.id)
     })
     .await?;
 
-    plugin.handle_events().await?;
+    tokio::try_join!(
+        web_server
+            .serve(web_addr_listen)
+            .err_into::<anyhow::Error>(),
+        plugin.handle_events().err_into()
+    )?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, FromRef)]
+struct WebServer {
+    storage: RedisStorage,
+    cookie_key: Key,
+}
+
+impl WebServer {
+    pub fn new(storage: RedisStorage, cookie_secret: &str) -> Self {
+        Self {
+            storage,
+            cookie_key: Key::from(cookie_secret.as_bytes()),
+        }
+    }
+
+    pub async fn serve(self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
+        let app = axum::Router::new() //
+            .route("/", axum::routing::get(handler))
+            .layer(middleware::from_fn_with_state(self, discord_auth));
+
+        async fn handler() -> String {
+            "Hello, LLM Plugin Web Server!".to_string()
+        }
+
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+
+        Ok(())
+    }
+}
+
+async fn discord_auth(
+    State(mut storage): State<RedisStorage>,
+    jar: PrivateCookieJar,
+    /* mut */ req: Request,
+    next: Next,
+) -> Response {
+    let Some(cookie) = jar.get("discord_session") else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "You need to be logged in to access this resource",
+        )
+            .into_response();
+    };
+    let session_id = cookie.value();
+    let session = match storage.get::<DiscordSession>(session_id).await {
+        Ok(session) => session,
+        Err(err) => {
+            tracing::error!("Failed to get Discord session from storage: {err:?}");
+            return (StatusCode::UNAUTHORIZED, "Invalid session").into_response();
+        }
+    };
+
+    next.run(req).await
 }
 
 struct LlmPlugin {
