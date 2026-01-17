@@ -1,0 +1,5 @@
+:7777
+
+handle / {
+	respond "Plugin API Gateway"
+}

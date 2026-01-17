@@ -1,6 +1,5 @@
-// import type { Plugin } from '$lib/types';
-// import type { PageLoad } from './$types';
+import type { PageLoad } from './$types';
 
-// export const load: PageLoad<void> = async () => {
-//   return;
-// };
+export const load: PageLoad<void> = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+};

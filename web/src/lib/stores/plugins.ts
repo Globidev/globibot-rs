@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { derived, writable, type Readable } from 'svelte/store';
 import type { Plugin } from '../types';
 
 class PluginStore {
@@ -8,6 +8,10 @@ class PluginStore {
     const res = await fetch('/api/plugins');
     const plugins: Plugin[] = await res.json();
     this.plugins.set(plugins);
+  }
+
+  pluginBySlug(slug: string): Readable<Plugin | null> {
+    return derived(this.plugins, ($plugins) => $plugins.find((p) => p.name === slug) ?? null);
   }
 
   #handleEvent(event: MessageEvent) {
