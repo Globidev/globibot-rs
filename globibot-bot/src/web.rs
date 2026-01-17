@@ -61,6 +61,8 @@ struct ConnectedPlugin {
     name: String,
     has_rpc: bool,
     has_events: bool,
+    has_web_api: bool,
+    startup_ts: u64,
 }
 
 struct SseMessageReceiver {
@@ -105,6 +107,14 @@ impl WebServerState {
         self.tx.send(SseMessage::UpsertedPlugin(plugin)).ok();
     }
 
+    pub fn register_plugin_web_api(&mut self, name: &str) {
+        let existing_plugin = self.get_or_create_plugin(name);
+        existing_plugin.has_web_api = true;
+
+        let plugin = existing_plugin.clone();
+        self.tx.send(SseMessage::UpsertedPlugin(plugin)).ok();
+    }
+
     fn get_or_create_plugin(&mut self, name: &str) -> &mut ConnectedPlugin {
         self.plugins
             .entry(name.to_string())
@@ -112,6 +122,11 @@ impl WebServerState {
                 name: name.to_string(),
                 has_rpc: false,
                 has_events: false,
+                has_web_api: false,
+                startup_ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
             })
     }
 

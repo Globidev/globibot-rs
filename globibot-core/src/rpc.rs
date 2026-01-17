@@ -12,7 +12,7 @@ use serenity::{
         prelude::{Channel, CurrentUser, User},
     },
 };
-use std::{error::Error, io, time::Duration};
+use std::{error::Error, io, net::SocketAddr, time::Duration};
 use tarpc::{
     ClientMessage, Response, client,
     server::{self, BaseChannel},
@@ -26,6 +26,8 @@ pub use tarpc::context;
 
 #[tarpc::service]
 pub trait Protocol {
+    async fn register_web_api(addr: SocketAddr) -> Result<(), RegisterWebApiError>;
+
     async fn current_user() -> CurrentUser;
 
     async fn send_message(chan_id: ChannelId, content: String) -> DiscordApiResult<Message>;
@@ -118,6 +120,12 @@ pub enum AcceptError {
 
     #[error("Handshake missing")]
     HandshakeMissing,
+}
+
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+pub enum RegisterWebApiError {
+    #[error("Control plane error: {0}")]
+    ControlPlaneError(String),
 }
 
 pub async fn connect<T>(

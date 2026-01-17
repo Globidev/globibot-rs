@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
-use globibot_core::rpc::{self, AcceptError, DiscordApiError, TypingKey};
+use globibot_core::rpc::{self, AcceptError, DiscordApiError, RegisterWebApiError, TypingKey};
 use globibot_core::serenity::all::{
     CommandId, CommandOption, CreateAttachment, CreateMessage, EditMessage, InteractionId, Typing,
     UserId,
@@ -44,9 +44,10 @@ where
             Ok((request, client)) => {
                 let http = Arc::clone(&http);
                 let cache = Arc::clone(&cache);
-                let handle_client = respond_to_rpc_client(client, http, cache);
+                let plugin_id = request.id;
+                let handle_client = respond_to_rpc_client(client, plugin_id.clone(), http, cache);
                 tokio::spawn({
-                    let plugin_id = request.id.clone();
+                    let plugin_id = plugin_id.clone();
                     async move {
                         if let Err(err) = handle_client.await {
                             warn!("RPC client error: {err}");
@@ -55,8 +56,8 @@ where
                         WEB_STATE.lock().unwrap().unregister_plugin_rpc(&plugin_id);
                     }
                 });
-                WEB_STATE.lock().unwrap().register_plugin_rpc(&request.id);
-                info!("New RPC client spawned: '{id}'", id = request.id);
+                WEB_STATE.lock().unwrap().register_plugin_rpc(&plugin_id);
+                info!("New RPC client spawned: '{id}'", id = plugin_id);
             }
             Err(AcceptError::IO(err)) => {
                 warn!("IO error while accepting new RPC client : {}", err);
@@ -73,6 +74,7 @@ where
 
 async fn respond_to_rpc_client<Transport>(
     client: ServerChannel<Transport>,
+    plugin_id: String,
     http: Arc<DiscordHttp>,
     cache: Arc<DiscordCache>,
 ) -> Result<(), ChannelError<io::Error>>
@@ -80,6 +82,8 @@ where
     Transport: AsyncRead + AsyncWrite,
 {
     let server = Server {
+        plugin_id,
+
         discord_http: http,
         discord_cache: cache,
 
@@ -100,6 +104,8 @@ where
 
 #[derive(Clone)]
 struct Server {
+    plugin_id: String,
+
     discord_http: Arc<DiscordHttp>,
     discord_cache: Arc<DiscordCache>,
 
@@ -107,6 +113,64 @@ struct Server {
 }
 
 impl Protocol for Server {
+    async fn register_web_api(
+        self,
+        _ctx: Context,
+        addr: std::net::SocketAddr,
+    ) -> Result<(), RegisterWebApiError> {
+        let caddy_addr = std::env::var("CADDY_ADDR").expect("Missing Caddy address");
+        let client = reqwest::Client::new();
+
+        client
+            .delete(format!("http://{caddy_addr}/id/route_{}", self.plugin_id))
+            .send()
+            .await
+            .map_err(|err| RegisterWebApiError::ControlPlaneError(err.to_string()))?;
+
+        let payload = serde_json::json!({
+            "@id": format!("route_{}", self.plugin_id),
+            "match": [{"path": [format!("/{}/*", self.plugin_id)]}],
+            "handle": [{
+                "handler": "subroute",
+                "routes": [
+                    {
+                        "handle": [
+                            {
+                                "handler": "rewrite",
+                                "strip_path_prefix": format!("/{}/", self.plugin_id)
+                            }
+                        ]
+                    },
+                    {
+                        "handle": [
+                            {
+                                "handler": "reverse_proxy",
+                                "upstreams": [{"dial": addr}]
+                            }
+                        ]
+                    }
+                ]
+            }],
+        });
+
+        client
+            .post(format!(
+                "http://{caddy_addr}/config/apps/http/servers/srv0/routes"
+            ))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| RegisterWebApiError::ControlPlaneError(err.to_string()))?
+            .error_for_status()
+            .map_err(|err| RegisterWebApiError::ControlPlaneError(err.to_string()))?;
+
+        WEB_STATE
+            .lock()
+            .unwrap()
+            .register_plugin_web_api(&self.plugin_id);
+        Ok(())
+    }
+
     async fn current_user(self, _ctx: Context) -> CurrentUser {
         self.discord_cache.current_user().clone()
     }
