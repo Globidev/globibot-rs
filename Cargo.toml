@@ -17,6 +17,9 @@ tokio-util = "0.7"
 
 reqwest = { version = "0.11", features = ["json"] }
 
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie-private"] }
+
 futures = "0.3"
 
 thiserror = "2.0"
@@ -34,6 +37,8 @@ redis = { version = "1.0", features = ["tokio-comp"] }
 rand = "0.9"
 
 parking_lot = "0.12"
+
+uuid = { version = "1.19", features = ["v4", "serde", "fast-rng"] }
 
 [profile.dev.package."*"]
 opt-level = 3

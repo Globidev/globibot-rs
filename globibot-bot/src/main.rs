@@ -14,28 +14,32 @@ use globibot_core::transport::{Protocol, Tcp};
 async fn main() -> Result<(), AppError> {
     tracing_subscriber::fmt::init();
 
-    let publisher = events::Publisher::new();
-
     let subscriber_addr = env::var("SUBSCRIBER_ADDR")?;
     let rpc_addr = env::var("RPC_ADDR")?;
     let web_addr = env::var("WEB_ADDR")?;
-
-    let raw_event_subscribers = Tcp::new(subscriber_addr).listen().await?;
-    let raw_rpc_clients = Tcp::new(rpc_addr).listen().await?;
-
     let discord_token = env::var("DISCORD_TOKEN")?;
     let application_id = env::var("APPLICATION_ID")?.parse()?;
-    let mut discord_client =
-        discord::client(&discord_token, application_id, publisher.clone()).await?;
+    let application_secret = env::var("APPLICATION_SECRET")?;
+    let cookie_secret = env::var("COOKIE_SECRET")?;
 
-    let publish_events = events::run_publisher(raw_event_subscribers, publisher);
+    let ev_publisher = events::Publisher::new();
+    let raw_ev_subscribers = Tcp::new(subscriber_addr).listen().await?;
+    let raw_rpc_clients = Tcp::new(rpc_addr).listen().await?;
+
+    let mut discord_client =
+        discord::client(&discord_token, application_id, ev_publisher.clone()).await?;
+
+    let publish_events = events::run_publisher(raw_ev_subscribers, ev_publisher);
     let run_rpc_server = rpc::run_server(
         raw_rpc_clients,
         discord_client.cache.clone(),
         discord_client.http.clone(),
     );
     let run_discord_client = discord_client.start();
-    let run_web_server = web::run_server(web_addr);
+    let storage = globibot_core::storage::RedisStorage::from_env().await?;
+    let web_server =
+        web::WebServer::new(storage, &cookie_secret, application_id, application_secret);
+    let run_web_server = web_server.serve(web_addr);
 
     tracing::info!("Starting bot...");
 
@@ -48,6 +52,7 @@ async fn main() -> Result<(), AppError> {
 
     Ok(())
 }
+
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("IO error: {0}")]
@@ -61,6 +66,9 @@ enum AppError {
 
     #[error("Malformed application ID: {0}")]
     MalformedApplicationId(#[from] ParseIntError),
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] globibot_core::storage::InitError),
 }
 
 impl From<globibot_core::serenity::Error> for AppError {

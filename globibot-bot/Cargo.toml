@@ -27,4 +27,12 @@ slotmap = { workspace = true }
 
 parking_lot = { workspace = true }
 
-axum = { version = "0.8", features = ["macros"] }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+
+reqwest = { workspace = true }
+
+uuid = { workspace = true }
+time = "0.3"
+
+cookie = "0.18"

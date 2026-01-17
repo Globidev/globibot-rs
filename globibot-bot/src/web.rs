@@ -1,30 +1,67 @@
+use axum::{
+    BoxError, Json, Router,
+    body::Body,
+    extract::{FromRef, State},
+    http::{Response, StatusCode},
+    response::{self, IntoResponse, Sse, sse::Event},
+    routing::{get, post},
+};
+use axum_extra::extract::{
+    PrivateCookieJar,
+    cookie::{Cookie, Key},
+};
+use futures::{Stream, TryStreamExt};
+use globibot_core::{
+    serenity,
+    storage::{DiscordSession, RedisStorage},
+};
 use std::{
     collections::HashMap,
     sync::{LazyLock, Mutex},
 };
-
-use axum::{
-    BoxError, Json, Router,
-    extract::State,
-    response::{Sse, sse::Event},
-    routing::get,
-};
-use futures::{Stream, TryStreamExt};
 use tokio::{net::ToSocketAddrs, sync::broadcast::Receiver};
 
-pub async fn run_server(addr: impl ToSocketAddrs) -> std::io::Result<()> {
-    let app = Router::new() //
-        .route("/", get(async || "Globibot Web Server"))
-        .route("/plugins", get(list_plugins))
-        .route("/sse", get(stream_events))
-        .with_state(SseMessageReceiver {
-            rx: WEB_STATE.lock().unwrap().tx.subscribe(),
-        });
+#[derive(Debug, Clone, FromRef)]
+pub struct WebServer {
+    storage: RedisStorage,
+    cookie_key: Key,
+    discord_app_id: u64,
+    discord_app_secret: String,
+}
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+impl WebServer {
+    pub fn new(
+        storage: RedisStorage,
+        cookie_secret: &str,
+        discord_app_id: u64,
+        discord_app_secret: String,
+    ) -> Self {
+        Self {
+            storage,
+            cookie_key: Key::from(cookie_secret.as_bytes()),
+            discord_app_id,
+            discord_app_secret,
+        }
+    }
 
-    Ok(())
+    pub async fn serve(self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
+        let app = Router::new()
+            .route("/", get(async || "Globibot Web Server"))
+            .route("/plugins", get(list_plugins))
+            .route("/sse", get(stream_events))
+            .with_state(SseMessageReceiver {
+                rx: WEB_STATE.lock().unwrap().tx.subscribe(),
+            })
+            .route("/discord/login", post(discord_login))
+            .route("/discord/logout", post(discord_logout))
+            .route("/discord/profile", get(discord_profile))
+            .with_state(self);
+
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+
+        Ok(())
+    }
 }
 
 async fn list_plugins() -> Json<Vec<ConnectedPlugin>> {
@@ -38,7 +75,6 @@ async fn list_plugins() -> Json<Vec<ConnectedPlugin>> {
     Json(plugins)
 }
 
-#[axum::debug_handler]
 async fn stream_events(
     State(SseMessageReceiver { rx }): State<SseMessageReceiver>,
 ) -> Sse<impl Stream<Item = Result<Event, BoxError>>> {
@@ -48,6 +84,182 @@ async fn stream_events(
         .err_into()
         .and_then(|msg| async { Ok(Event::default().json_data(msg)?) });
     Sse::new(event_stream)
+}
+
+#[derive(serde::Deserialize)]
+struct OAuthCallbackParams {
+    code: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OauthCallbackError {
+    #[error("HTTP request error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] globibot_core::storage::StorageError),
+}
+
+impl IntoResponse for OauthCallbackError {
+    fn into_response(self) -> response::Response {
+        let error_msg = format!("OAuth callback error: {self}");
+        (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response()
+    }
+}
+
+async fn discord_login(
+    State(mut web_server): State<WebServer>,
+    jar: PrivateCookieJar,
+    Json(params): Json<OAuthCallbackParams>,
+) -> Result<impl IntoResponse, OauthCallbackError> {
+    let now = time::OffsetDateTime::now_utc();
+
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", &params.code),
+        ("redirect_uri", "http://localhost:5173/oauth"), // TODO: make configurable
+    ];
+
+    #[derive(serde::Deserialize)]
+    struct DiscordToken {
+        access_token: String,
+        expires_in: i64,
+        refresh_token: String,
+    }
+
+    tracing::info!("Exchanging OAuth code for token...");
+
+    let DiscordToken {
+        access_token,
+        expires_in,
+        refresh_token,
+    } = client
+        .post("https://discord.com/api/v10/oauth2/token")
+        .basic_auth(
+            web_server.discord_app_id,
+            Some(&web_server.discord_app_secret),
+        )
+        .form(&params)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    tracing::info!("OAuth token received, storing session...");
+
+    let session_id = uuid::Uuid::new_v4();
+
+    let expiry_date = now + time::Duration::seconds(expires_in);
+    let expires_at_ts = expiry_date.unix_timestamp();
+
+    let discord_session = DiscordSession {
+        access_token,
+        refresh_token,
+        expires_at_ts,
+    };
+    web_server
+        .storage
+        .set(&session_id, &discord_session)
+        .await?;
+
+    tracing::info!("Session stored, setting cookie...");
+
+    let jar = jar.add(
+        Cookie::build(("discord_session", session_id.to_string()))
+            .path("/")
+            .http_only(true)
+            .secure(true)
+            .expires(expiry_date), // 🔶 Might not be needed when supporting automatic token refreshes
+    );
+
+    Ok(discord_profile(State(web_server.storage), jar).await)
+}
+
+async fn discord_logout(
+    State(mut web_server): State<WebServer>,
+    jar: PrivateCookieJar,
+) -> impl IntoResponse {
+    let Some(cookie) = jar.get("discord_session") else {
+        return (StatusCode::BAD_REQUEST, "No session").into_response();
+    };
+
+    match web_server
+        .storage
+        .del::<DiscordSession>(cookie.value())
+        .await
+    {
+        Ok(_) => {
+            let jar = jar.remove(
+                Cookie::build("discord_session")
+                    .path("/")
+                    .http_only(true)
+                    .secure(true),
+            );
+            (jar, "Logged out").into_response()
+        }
+        Err(err) => {
+            tracing::warn!("Failed to delete Discord session from storage: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to log out").into_response()
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DiscordProfile {
+    username: String,
+    avatar_url: Option<String>,
+}
+
+async fn discord_profile(
+    State(mut storage): State<RedisStorage>,
+    jar: PrivateCookieJar,
+) -> Response<Body> {
+    tracing::info!("Fetching Discord profile...");
+    let Some(cookie) = jar.get("discord_session") else {
+        return (StatusCode::BAD_REQUEST, "No session").into_response();
+    };
+
+    tracing::info!("Found session cookie, retrieving session from storage...");
+
+    let session = match storage.get::<DiscordSession>(cookie.value()).await {
+        Ok(session) => session,
+        Err(err) => {
+            tracing::warn!("Failed to get Discord session from storage: {err}");
+            return (
+                StatusCode::BAD_REQUEST,
+                jar.remove(cookie),
+                "Invalid session",
+            )
+                .into_response();
+        }
+    };
+
+    tracing::info!("Session retrieved, fetching user profile from Discord...");
+
+    let http = serenity::http::Http::new(&format!("Bearer {}", session.access_token));
+
+    let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")
+        .unwrap()
+        .parse()
+        .unwrap(); // 🔴
+
+    let member = match http.get_current_user_guild_member(guild_id).await {
+        Ok(user) => user,
+        Err(err) => {
+            return format!("Failed to get user: {err}").into_response();
+        }
+    };
+
+    tracing::info!("User profile fetched successfully.");
+
+    let profile = DiscordProfile {
+        username: member.display_name().to_string(),
+        avatar_url: member.avatar_url().or(member.user.avatar_url()),
+    };
+
+    (jar, Json(profile)).into_response()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
