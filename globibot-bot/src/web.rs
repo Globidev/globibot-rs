@@ -1,9 +1,8 @@
 use axum::{
     BoxError, Json, Router,
-    body::Body,
     extract::{FromRef, State},
-    http::{Response, StatusCode},
-    response::{self, IntoResponse, Redirect, Sse, sse::Event},
+    http::StatusCode,
+    response::{self, IntoResponse, Redirect, Response, Sse, sse::Event},
     routing::{get, post},
 };
 use axum_extra::extract::{
@@ -13,7 +12,7 @@ use axum_extra::extract::{
 use futures::{Stream, TryStreamExt};
 use globibot_core::{
     serenity::{self, Error, all::GuildId},
-    storage::{DiscordSession, RedisStorage},
+    storage::{DiscordSession, RedisStorage, StorageValue},
 };
 use std::{
     collections::HashMap,
@@ -230,22 +229,24 @@ async fn discord_logout(
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct DiscordProfile {
     username: String,
     avatar_url: Option<String>,
 }
 
-async fn discord_profile(
-    State(mut server): State<WebServer>,
-    jar: PrivateCookieJar,
-) -> Response<Body> {
+impl StorageValue for DiscordProfile {
+    const REDIS_NS: &'static str = "discord_profile";
+}
+
+async fn discord_profile(State(mut server): State<WebServer>, jar: PrivateCookieJar) -> Response {
     tracing::info!("Fetching Discord profile...");
+
     let Some(cookie) = jar.get("discord_session") else {
         return (StatusCode::BAD_REQUEST, "No session").into_response();
     };
 
-    tracing::info!("Found session cookie, retrieving session from storage...");
+    let session_id = cookie.value();
 
     macro_rules! bad_request {
         ($text:expr) => {
@@ -263,7 +264,18 @@ async fn discord_profile(
         };
     }
 
-    let session = match server.storage.get::<DiscordSession>(cookie.value()).await {
+    tracing::info!("Retrieving profile from cache...");
+
+    match server.storage.get::<DiscordProfile>(session_id).await {
+        Ok(profile) => return (jar, Json(profile)).into_response(),
+        Err(_) => {
+            tracing::info!("No cached profile found, fetching from Discord API...");
+        }
+    };
+
+    tracing::info!("Retrieving session from storage...");
+
+    let session = match server.storage.get::<DiscordSession>(session_id).await {
         Ok(session) => session,
         Err(err) => {
             tracing::warn!("Failed to get Discord session from storage: {err}");
@@ -298,6 +310,17 @@ async fn discord_profile(
         username: member.display_name().to_string(),
         avatar_url: member.avatar_url().or(member.user.avatar_url()),
     };
+
+    if let Err(err) = server.storage.set(session_id, &profile).await {
+        tracing::warn!("Failed to cache Discord profile: {err}");
+    }
+    if let Err(err) = server
+        .storage
+        .expire::<DiscordProfile>(session_id, 3_600)
+        .await
+    {
+        tracing::warn!("Failed to set expiration for Discord profile: {err}");
+    }
 
     (jar, Json(profile)).into_response()
 }
