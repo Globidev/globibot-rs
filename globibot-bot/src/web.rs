@@ -307,7 +307,7 @@ async fn discord_profile(State(mut server): State<WebServer>, jar: PrivateCookie
     }
     if let Err(err) = server
         .storage
-        .expire::<DiscordProfile>(session_id, 3_600)
+        .expire::<DiscordProfile>(session_id, 24 * 3_600)
         .await
     {
         tracing::warn!("Failed to set expiration for Discord profile: {err}");
