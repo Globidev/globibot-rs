@@ -345,9 +345,6 @@ impl LlmPlugin {
             };
 
             *self.personality.write() = new_personality;
-            self.contexts_by_channel
-                .lock()
-                .remove(&interaction.channel_id);
 
             rpc.create_interaction_response(
                 rpc::context::current(),
@@ -356,7 +353,7 @@ impl LlmPlugin {
                 serde_json::json!({
                     "type": 4,
                     "data": {
-                        "content": format!("Personality changed to `{new_personality}` (+ memory wiped)")
+                        "content": format!("Personality changed to `{new_personality}`")
                     }
                 }),
             )
