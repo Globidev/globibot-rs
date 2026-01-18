@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Key};
-use futures::TryFutureExt;
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::Mutex;
 use tokio::net::ToSocketAddrs;
@@ -58,12 +57,14 @@ async fn main() -> anyhow::Result<()> {
     })
     .await?;
 
-    tokio::try_join!(
-        web_server
-            .serve(web_addr_listen)
-            .err_into::<anyhow::Error>(),
-        plugin.handle_events().err_into()
-    )?;
+    tokio::select! {
+        _ = web_server.serve(web_addr_listen) => {
+            tracing::info!("Web server has shut down");
+        },
+        _ = plugin.handle_events() => {
+            tracing::info!("Event handler has shut down");
+        }
+    }
 
     Ok(())
 }
