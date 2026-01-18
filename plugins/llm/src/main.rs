@@ -12,7 +12,10 @@ use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, Tex
 use parking_lot::Mutex;
 use tokio::net::ToSocketAddrs;
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use globibot_core::{
     events::{Event, EventType},
@@ -35,9 +38,6 @@ async fn main() -> anyhow::Result<()> {
     let web_addr_advertise = std::env::var("LLM_WEB_ADDR_ADVERTISE")?.parse()?;
     let cookie_secret = std::env::var("COOKIE_SECRET")?;
 
-    let storage = RedisStorage::from_env().await?;
-    let web_server = WebServer::new(storage, &cookie_secret);
-
     let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")?.parse()?;
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../llm-slash-command.json"))?;
@@ -57,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
     })
     .await?;
 
+    let llm_plugin = Arc::clone(&plugin.inner);
+    let storage = RedisStorage::from_env().await?;
+    let web_server = WebServer::new(storage, &cookie_secret, llm_plugin);
+
     tokio::select! {
         _ = web_server.serve(web_addr_listen) => {
             tracing::info!("Web server has shut down");
@@ -73,13 +77,15 @@ async fn main() -> anyhow::Result<()> {
 struct WebServer {
     storage: RedisStorage,
     cookie_key: Key,
+    llm_plugin: Arc<LlmPlugin>,
 }
 
 impl WebServer {
-    pub fn new(storage: RedisStorage, cookie_secret: &str) -> Self {
+    pub fn new(storage: RedisStorage, cookie_secret: &str, llm_plugin: Arc<LlmPlugin>) -> Self {
         Self {
             storage,
             cookie_key: Key::from(cookie_secret.as_bytes()),
+            llm_plugin,
         }
     }
 
@@ -124,6 +130,7 @@ async fn discord_auth(
     next.run(req).await
 }
 
+#[derive(Debug)]
 struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::personality::Personality;
 
+#[derive(Debug)]
 pub struct Client {
     api_key: String,
     pub model: String,
