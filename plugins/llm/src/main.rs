@@ -14,7 +14,10 @@ use tokio::net::ToSocketAddrs;
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use globibot_core::{
@@ -134,17 +137,21 @@ async fn discord_auth(
 struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
+    command_id: CommandId,
 
     llm_client: openrouter::Client,
-    llm_model: RwLock<String>,
 
+    llm_model: RwLock<String>,
     personality: RwLock<Personality>,
     contexts_by_channel: Mutex<HashMap<ChannelId, VecDeque<openrouter::Message>>>,
-    command_id: CommandId,
+
+    context_window_size: AtomicUsize,
 }
 
 impl LlmPlugin {
     fn from_env(command_id: CommandId) -> anyhow::Result<Self> {
+        const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
+
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
         let admin_id = std::env::var("LLM_ADMIN_USER_ID")?.parse()?;
         let model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
@@ -158,6 +165,7 @@ impl LlmPlugin {
             personality: <_>::default(),
             contexts_by_channel: <_>::default(),
             command_id,
+            context_window_size: AtomicUsize::new(DEFAULT_CONTEXT_WINDOW_SIZE),
         })
     }
 
@@ -210,7 +218,7 @@ impl LlmPlugin {
         let context = contexts_by_channel.entry(message.channel_id).or_default();
 
         context.push_back(llm_message);
-        if context.len() > CONTEXT_WINDOW_SIZE {
+        if context.len() > self.context_window_size.load(Ordering::Relaxed) {
             context.pop_front();
         }
     }
@@ -363,8 +371,6 @@ impl LlmPlugin {
         Ok(())
     }
 }
-
-const CONTEXT_WINDOW_SIZE: usize = 200;
 
 impl Plugin for LlmPlugin {
     const ID: &'static str = "llm";
