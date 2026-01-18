@@ -4,7 +4,7 @@ use futures::{Future, SinkExt, StreamExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serenity::{
-    all::{CommandId, InteractionId, UserId},
+    all::{CommandId, InteractionId, Member, UserId},
     model::{
         application::Command,
         channel::{Message, ReactionType},
@@ -79,6 +79,8 @@ pub trait Protocol {
 
     async fn get_user(user_id: UserId) -> DiscordApiResult<User>;
     async fn get_channel(channel_id: ChannelId) -> DiscordApiResult<Channel>;
+
+    async fn list_guild_members(guild_id: GuildId) -> DiscordApiResult<Vec<Member>>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]

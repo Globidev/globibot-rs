@@ -58,7 +58,8 @@ pub async fn client(
 ) -> serenity::Result<Client> {
     Client::builder(
         token,
-        GatewayIntents::default().union(GatewayIntents::MESSAGE_CONTENT),
+        GatewayIntents::default()
+            .union(GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILD_MEMBERS),
     )
     .event_handler(EventHandler { publisher })
     .application_id(application_id.into())

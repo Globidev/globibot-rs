@@ -3,8 +3,8 @@ use std::{io, sync::Arc, time::Duration};
 use futures::{Stream, StreamExt};
 use globibot_core::rpc::{self, AcceptError, DiscordApiError, RegisterWebApiError, TypingKey};
 use globibot_core::serenity::all::{
-    CommandId, CommandOption, CreateAttachment, CreateMessage, EditMessage, InteractionId, Typing,
-    UserId,
+    CommandId, CommandOption, CreateAttachment, CreateMessage, EditMessage, InteractionId, Member,
+    Typing, UserId,
 };
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
@@ -425,6 +425,17 @@ impl Protocol for Server {
         channel_id: ChannelId,
     ) -> DiscordApiResult<DiscordChannel> {
         Ok(self.discord_http.get_channel(channel_id).await?)
+    }
+
+    async fn list_guild_members(
+        self,
+        _ctx: Context,
+        guild_id: GuildId,
+    ) -> DiscordApiResult<Vec<Member>> {
+        Ok(self
+            .discord_http
+            .get_guild_members(guild_id, None, None)
+            .await?)
     }
 }
 
