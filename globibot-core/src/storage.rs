@@ -1,5 +1,6 @@
 use redis::{AsyncCommands, RedisWrite, ToRedisArgs, ToSingleRedisArg};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serenity::all::UserId;
 
 #[derive(Debug, Clone)]
 pub struct RedisStorage {
@@ -132,4 +133,15 @@ pub struct DiscordSession {
 
 impl StorageValue for DiscordSession {
     const REDIS_NS: &'static str = "discord_session";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiscordProfile {
+    pub user_id: UserId,
+    pub username: String,
+    pub avatar_url: Option<String>,
+}
+
+impl StorageValue for DiscordProfile {
+    const REDIS_NS: &'static str = "discord_profile";
 }

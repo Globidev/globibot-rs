@@ -12,7 +12,7 @@ use axum_extra::extract::{
 use futures::{Stream, TryStreamExt};
 use globibot_core::{
     serenity::{self, Error, all::GuildId},
-    storage::{DiscordSession, RedisStorage, StorageValue},
+    storage::{DiscordProfile, DiscordSession, RedisStorage},
 };
 use std::{
     collections::HashMap,
@@ -229,16 +229,6 @@ async fn discord_logout(
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DiscordProfile {
-    username: String,
-    avatar_url: Option<String>,
-}
-
-impl StorageValue for DiscordProfile {
-    const REDIS_NS: &'static str = "discord_profile";
-}
-
 async fn discord_profile(State(mut server): State<WebServer>, jar: PrivateCookieJar) -> Response {
     tracing::info!("Fetching Discord profile...");
 
@@ -307,6 +297,7 @@ async fn discord_profile(State(mut server): State<WebServer>, jar: PrivateCookie
     tracing::info!("User profile fetched successfully.");
 
     let profile = DiscordProfile {
+        user_id: member.user.id,
         username: member.display_name().to_string(),
         avatar_url: member.avatar_url().or(member.user.avatar_url()),
     };
