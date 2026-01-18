@@ -27,12 +27,9 @@ use globibot_core::{
     events::{Event, EventType},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::{
-        all::{
-            Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId,
-            Member, Message, UserId,
-        },
-        model::user,
+    serenity::all::{
+        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId, Member,
+        Message, UserId,
     },
     storage::{DiscordProfile, RedisStorage, StorageValue},
 };
@@ -133,6 +130,7 @@ impl WebServer {
             .route("/lore", axum::routing::get(llm_lore))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
+            .route("/lore/accept", axum::routing::post(llm_lore_accept))
             .with_state(self.clone())
             .layer(middleware::from_fn_with_state(self, discord_auth));
 
@@ -385,6 +383,64 @@ async fn llm_lore_vote(
     llm_lore(State(llm_plugin)).await.into_response()
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct LoreAcceptRequest {
+    for_user_id: UserId,
+    by_user_id: UserId,
+}
+
+async fn llm_lore_accept(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(accept_req): Json<LoreAcceptRequest>,
+) -> impl IntoResponse {
+    if llm_plugin.admin_id != profile.user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            "You do not have permission to accept lore suggestions",
+        )
+            .into_response();
+    }
+
+    let mut lore_book = llm_plugin.lore_book.write();
+    let suggestions = match lore_book
+        .suggestions_by_user
+        .get_mut(&accept_req.for_user_id)
+    {
+        Some(suggestions) => suggestions,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "No suggestions found for the specified user",
+            )
+                .into_response();
+        }
+    };
+
+    let suggestion_index = match suggestions
+        .iter()
+        .position(|s| s.suggestion_by.user_id == accept_req.by_user_id)
+    {
+        Some(index) => index,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "No suggestion found from the specified user",
+            )
+                .into_response();
+        }
+    };
+
+    let suggestion = suggestions.remove(suggestion_index);
+    if let Some(user_lore) = lore_book.lore_by_user.get_mut(&accept_req.for_user_id) {
+        user_lore.lore = suggestion.suggestion;
+    }
+
+    drop(lore_book);
+
+    llm_lore(State(llm_plugin)).await.into_response()
+}
+
 async fn discord_auth(
     State(mut storage): State<RedisStorage>,
     jar: PrivateCookieJar,
@@ -459,7 +515,7 @@ Don't feel obligated to reference them in every response though.
             }
             let username = &user_lore.member.username;
             let user_id = user_lore.member.user_id;
-            writeln!(prompt, "{username} (<@{user_id}>) {lore}").ok();
+            writeln!(prompt, "{username} (<@{user_id}>): {lore}").ok();
         }
 
         prompt

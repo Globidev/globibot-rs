@@ -39,6 +39,7 @@
 
   let initPromise = $state(loadData());
   let currentUserId = $derived(authStore.user?.user_id ?? '');
+  let isAllowedToAccept = $derived(currentUserId === '89108411861467136'); // 🔶 Make configurable
   let searchQuery = $state('');
 
   async function handleSuggest(userId: string) {
@@ -67,6 +68,21 @@
     });
     if (!resp.ok) {
       alert('Failed to submit vote: ' + (await resp.text()));
+      return;
+    }
+    const data = await resp.json();
+    initPromise = Promise.resolve(data);
+    init(data);
+  }
+
+  async function acceptSuggestion(for_user_id: string, by_user_id: string) {
+    const resp = await fetch('/plugin-api/llm/lore/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ for_user_id, by_user_id })
+    });
+    if (!resp.ok) {
+      alert('Failed to accept suggestion: ' + (await resp.text()));
       return;
     }
     const data = await resp.json();
@@ -187,6 +203,14 @@
                   {totalVotes(sug, 'Omegalul')}
                 </span>
               </button>
+              {#if isAllowedToAccept}
+                <button
+                  onclick={() => acceptSuggestion(userId, sug.suggestion_by.user_id)}
+                  class="btn-vote bg-green-600 text-white hover:bg-green-500"
+                >
+                  Accept
+                </button>
+              {/if}
             </div>
           </div>
         {/each}
