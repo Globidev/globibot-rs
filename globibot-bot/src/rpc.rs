@@ -137,7 +137,7 @@ impl Protocol for Server {
                         "handle": [
                             {
                                 "handler": "rewrite",
-                                "strip_path_prefix": format!("/{}/", self.plugin_id)
+                                "strip_path_prefix": format!("/{}", self.plugin_id)
                             }
                         ]
                     },
