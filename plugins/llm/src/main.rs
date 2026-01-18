@@ -1,3 +1,5 @@
+#![feature(vec_deque_truncate_front)]
+
 mod openrouter;
 mod personality;
 
@@ -289,6 +291,7 @@ impl LlmPlugin {
         Ok(())
     }
 
+    #[expect(clippy::await_holding_lock)] // 🔶 Fetch channel after releasing the lock
     async fn register_message(
         &self,
         rpc: rpc::ProtocolClient,
@@ -311,8 +314,9 @@ impl LlmPlugin {
 
         let messages = &mut context.messages;
         messages.push_back(llm_message);
-        if messages.len() > self.context_window_size.load(Ordering::Relaxed) {
-            messages.pop_front();
+        let max_size = self.context_window_size.load(Ordering::Relaxed);
+        if messages.len() > max_size {
+            messages.truncate_front(max_size);
         }
 
         Ok(())
