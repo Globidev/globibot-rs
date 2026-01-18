@@ -44,7 +44,7 @@ pub trait Plugin {
             let plugin = init(&rpc).await.map_err(InitError::Plugin)?;
 
             Ok(ConnectedPlugin {
-                plugin,
+                inner: Arc::new(plugin),
                 rpc,
                 events,
             })
@@ -96,7 +96,7 @@ pub trait HandleEvents: Plugin {
 }
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
-    plugin: T,
+    pub inner: Arc<T>,
     pub rpc: Rpc,
     events: Events,
 }
@@ -109,16 +109,15 @@ where
 {
     pub async fn handle_events(self) -> Result<(), io::Error> {
         let Self {
-            plugin,
+            inner: plugin,
             rpc,
             events,
         } = self;
-        let shared_plugin = Arc::new(plugin);
 
         events
             .for_each_concurrent(10, move |event_res| {
                 let rpc = rpc.clone();
-                let plugin = Arc::clone(&shared_plugin);
+                let plugin = Arc::clone(&plugin);
 
                 async move {
                     match event_res {
