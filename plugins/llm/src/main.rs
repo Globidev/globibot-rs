@@ -409,7 +409,11 @@ impl HandleEvents for LlmPlugin {
             }
 
             Event::MessageCreate { message } if !message.author.bot => {
-                let user_name = &message.author.name;
+                let user_name = message
+                    .member
+                    .as_ref()
+                    .and_then(|m| m.nick.as_deref())
+                    .unwrap_or_else(|| &message.author.name);
                 let user_id = message.author.id.get();
 
                 let content_safe = rpc
