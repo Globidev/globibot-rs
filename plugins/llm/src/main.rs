@@ -2,6 +2,7 @@ mod openrouter;
 mod personality;
 
 use axum::{
+    Extension, Json,
     extract::{FromRef, Request, State},
     http::StatusCode,
     middleware::{self, Next},
@@ -13,7 +14,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::net::ToSocketAddrs;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -25,9 +26,9 @@ use globibot_core::{
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
     serenity::all::{
-        ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, Message, UserId,
+        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, Message, UserId,
     },
-    storage::{DiscordSession, RedisStorage},
+    storage::{DiscordProfile, DiscordSession, RedisStorage},
 };
 use itertools::Itertools;
 
@@ -94,12 +95,10 @@ impl WebServer {
 
     pub async fn serve(self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
         let app = axum::Router::new() //
-            .route("/", axum::routing::get(handler))
+            .route("/settings", axum::routing::get(llm_settings))
+            .route("/settings", axum::routing::post(update_llm_settings))
+            .with_state(self.clone())
             .layer(middleware::from_fn_with_state(self, discord_auth));
-
-        async fn handler() -> String {
-            "Hello, LLM Plugin Web Server!".to_string()
-        }
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
@@ -108,10 +107,78 @@ impl WebServer {
     }
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct WebLLMSettings {
+    model: String,
+    context_window_size: usize,
+
+    #[serde(skip_deserializing)]
+    context_windows_by_channel: Vec<ChannelContextWindow>,
+
+    #[serde(skip_deserializing)]
+    allowed_to_edit: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ChannelContextWindow {
+    channel: Channel,
+    size: usize,
+}
+
+async fn llm_settings(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+) -> impl IntoResponse {
+    let model = llm_plugin.llm_model.read().clone();
+    let context_window_size = llm_plugin.context_window_size.load(Ordering::Relaxed);
+    let context_windows_by_channel = {
+        let contexts_by_channel = llm_plugin.contexts_by_channel.lock();
+        contexts_by_channel
+            .values()
+            .map(|ctx| ChannelContextWindow {
+                channel: ctx.channel.clone(),
+                size: ctx.messages.len(),
+            })
+            .collect()
+    };
+
+    let settings = WebLLMSettings {
+        model,
+        context_window_size,
+        context_windows_by_channel,
+        allowed_to_edit: Some(llm_plugin.admin_id == profile.user_id),
+    };
+
+    Json(settings)
+}
+
+async fn update_llm_settings(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(settings): Json<WebLLMSettings>,
+) -> impl IntoResponse {
+    if llm_plugin.admin_id != profile.user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            "You do not have permission to update LLM settings",
+        )
+            .into_response();
+    }
+
+    *llm_plugin.llm_model.write() = settings.model;
+    llm_plugin
+        .context_window_size
+        .store(settings.context_window_size, Ordering::Relaxed);
+
+    llm_settings(State(llm_plugin), Extension(profile))
+        .await
+        .into_response()
+}
+
 async fn discord_auth(
     State(mut storage): State<RedisStorage>,
     jar: PrivateCookieJar,
-    /* mut */ req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let Some(cookie) = jar.get("discord_session") else {
@@ -122,13 +189,15 @@ async fn discord_auth(
             .into_response();
     };
     let session_id = cookie.value();
-    let session = match storage.get::<DiscordSession>(session_id).await {
-        Ok(session) => session,
+    let profile = match storage.get::<DiscordProfile>(session_id).await {
+        Ok(profile) => profile,
         Err(err) => {
             tracing::error!("Failed to get Discord session from storage: {err:?}");
             return (StatusCode::UNAUTHORIZED, "Invalid session").into_response();
         }
     };
+
+    req.extensions_mut().insert(profile);
 
     next.run(req).await
 }
@@ -143,9 +212,15 @@ struct LlmPlugin {
 
     llm_model: RwLock<String>,
     personality: RwLock<Personality>,
-    contexts_by_channel: Mutex<HashMap<ChannelId, VecDeque<openrouter::Message>>>,
+    contexts_by_channel: Mutex<HashMap<ChannelId, ChannelContext>>,
 
     context_window_size: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct ChannelContext {
+    channel: Channel,
+    messages: VecDeque<openrouter::Message>,
 }
 
 impl LlmPlugin {
@@ -186,7 +261,8 @@ impl LlmPlugin {
                 .complete(&self.llm_model.read(), *self.personality.read(), parts);
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
-        self.register_message(message, user_llm_message);
+        self.register_message(rpc.clone(), message, user_llm_message)
+            .await?;
         if let Ok(answer) = completion_res {
             rpc.send_reply(ctx, message.channel_id, answer.clone(), message.id)
                 .await??;
@@ -198,7 +274,7 @@ impl LlmPlugin {
                     text: answer,
                 })],
             };
-            self.register_message(message, bot_llm_message);
+            self.register_message(rpc, message, bot_llm_message).await?;
         } else {
             tracing::error!("Failed to get LLM completion: {:?}", completion_res.err());
             rpc.send_reply(
@@ -213,14 +289,33 @@ impl LlmPlugin {
         Ok(())
     }
 
-    fn register_message(&self, message: &Message, llm_message: LlmMessage) {
+    async fn register_message(
+        &self,
+        rpc: rpc::ProtocolClient,
+        message: &Message,
+        llm_message: LlmMessage,
+    ) -> anyhow::Result<()> {
         let mut contexts_by_channel = self.contexts_by_channel.lock();
-        let context = contexts_by_channel.entry(message.channel_id).or_default();
+        let context = match contexts_by_channel.entry(message.channel_id) {
+            Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+            Entry::Vacant(vacant_entry) => {
+                let channel = rpc
+                    .get_channel(rpc::context::current(), message.channel_id)
+                    .await??;
+                vacant_entry.insert(ChannelContext {
+                    channel,
+                    messages: VecDeque::new(),
+                })
+            }
+        };
 
-        context.push_back(llm_message);
-        if context.len() > self.context_window_size.load(Ordering::Relaxed) {
-            context.pop_front();
+        let messages = &mut context.messages;
+        messages.push_back(llm_message);
+        if messages.len() > self.context_window_size.load(Ordering::Relaxed) {
+            messages.pop_front();
         }
+
+        Ok(())
     }
 
     fn context_for_channel(&self, chan_id: ChannelId) -> Vec<openrouter::Message> {
@@ -228,7 +323,7 @@ impl LlmPlugin {
         let context = contexts_by_channel.get(&chan_id);
 
         if let Some(context) = context {
-            context.iter().cloned().collect_vec()
+            context.messages.iter().cloned().collect_vec()
         } else {
             vec![]
         }
@@ -458,7 +553,8 @@ impl HandleEvents for LlmPlugin {
                 if message.mentions_user_id(self.bot_id) {
                     self.answer_message(rpc, &message, user_llm_message).await?;
                 } else {
-                    self.register_message(&message, user_llm_message);
+                    self.register_message(rpc, &message, user_llm_message)
+                        .await?;
                 }
             }
 

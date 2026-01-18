@@ -135,7 +135,7 @@ impl StorageValue for DiscordSession {
     const REDIS_NS: &'static str = "discord_session";
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordProfile {
     pub user_id: UserId,
     pub username: String,
