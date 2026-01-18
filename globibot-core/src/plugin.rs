@@ -84,6 +84,15 @@ pub trait HandleEvents: Plugin {
         ctx: <Self::RpcPolicy as RpcContext>::Context,
         event: Event,
     ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    // // 🔶 dedicated handlers for ease of use
+    // fn on_new_message(
+    //     &self,
+    //     _ctx: <Self::RpcPolicy as RpcContext>::Context,
+    //     // _message: &events,
+    // ) -> impl Future<Output = Result<(), Self::Err>> + Send {
+    //     async { Ok(()) }
+    // }
 }
 
 pub struct ConnectedPlugin<T, Rpc, Events> {
