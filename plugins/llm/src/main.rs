@@ -31,7 +31,7 @@ use globibot_core::{
         Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId,
         Message, UserId,
     },
-    storage::{DiscordProfile, DiscordSession, RedisStorage},
+    storage::{DiscordProfile, RedisStorage},
 };
 use itertools::Itertools;
 
@@ -100,6 +100,8 @@ impl WebServer {
         let app = axum::Router::new() //
             .route("/settings", axum::routing::get(llm_settings))
             .route("/settings", axum::routing::post(update_llm_settings))
+            .route("/personality", axum::routing::get(llm_personality))
+            .route("/personality", axum::routing::post(update_llm_personality))
             .with_state(self.clone())
             .layer(middleware::from_fn_with_state(self, discord_auth));
 
@@ -124,7 +126,7 @@ struct WebLLMSettings {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ChannelContextWindow {
-    channel: Channel,
+    channel_name: String,
     size: usize,
 }
 
@@ -139,7 +141,12 @@ async fn llm_settings(
         contexts_by_channel
             .values()
             .map(|ctx| ChannelContextWindow {
-                channel: ctx.channel.clone(),
+                channel_name: ctx
+                    .channel
+                    .clone()
+                    .guild()
+                    .map(|g| g.name.clone())
+                    .unwrap_or_default(),
                 size: ctx.messages.len(),
             })
             .collect()
@@ -176,6 +183,49 @@ async fn update_llm_settings(
     llm_settings(State(llm_plugin), Extension(profile))
         .await
         .into_response()
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LlmPersonality {
+    personality: String,
+
+    #[serde(skip_deserializing)]
+    available_personalities: Vec<String>,
+
+    #[serde(skip_deserializing)]
+    prompt: String,
+}
+
+async fn llm_personality(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    let personality = *llm_plugin.personality.read();
+
+    Json(LlmPersonality {
+        personality: personality.to_string(),
+        available_personalities: Personality::all_personalities()
+            .map(|p| p.to_string())
+            .collect(),
+        prompt: personality.system_prompt(),
+    })
+}
+
+async fn update_llm_personality(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Json(personality_req): Json<LlmPersonality>,
+) -> impl IntoResponse {
+    let new_personality = match personality_req.personality.as_str().try_into() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Unknown personality `{}`", personality_req.personality),
+            )
+                .into_response();
+        }
+    };
+
+    *llm_plugin.personality.write() = new_personality;
+
+    llm_personality(State(llm_plugin)).await.into_response()
 }
 
 async fn discord_auth(

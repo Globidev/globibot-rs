@@ -7,7 +7,7 @@
   };
 
   type ChannelContextWindow = {
-    channel: { id: string; name: string };
+    channel_name: string;
     size: number;
   };
 
@@ -95,11 +95,11 @@
       </span>
       <div class="flex flex-col gap-2">
         {#if formData.context_windows_by_channel.length === 0}
-          <span class="text-sm text-gray-400">No channel-specific context windows set.</span>
+          <span class="text-sm text-gray-400">No context windows available.</span>
         {:else}
           {#each formData.context_windows_by_channel as entry}
             <div class="flex items-center gap-2">
-              <span class="font-mono text-sm text-gray-300">#{entry.channel.name}</span>
+              <span class="font-mono text-sm text-gray-300">#{entry.channel_name}</span>
               <span class="text-sm text-gray-400">- {entry.size}</span>
             </div>
           {/each}
