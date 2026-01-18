@@ -6,42 +6,36 @@ use crate::personality::Personality;
 #[derive(Debug)]
 pub struct Client {
     api_key: String,
-    pub model: String,
-    pub personality: Personality,
     http_client: reqwest::Client,
 }
 
 impl Client {
     pub fn from_env() -> anyhow::Result<Self> {
         let api_key = std::env::var("LLM_OPENROUTER_API_KEY")?;
-        let model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
 
         Ok(Self {
             api_key,
-            model,
-            personality: <_>::default(),
             http_client: reqwest::Client::new(),
         })
     }
 
     pub fn complete<Parts: IntoIterator<Item = Message> + Send>(
         &self,
+        model: &str,
+        personality: Personality,
         parts: Parts,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts> {
         let mut messages = vec![Message {
             role: Role::System,
             content: vec![ContentPart::Text(TextContentPart {
                 kind: "text",
-                text: self.personality.system_prompt(),
+                text: personality.system_prompt(),
             })],
         }];
 
         messages.extend(parts);
 
-        let req = Request {
-            model: &self.model,
-            messages,
-        };
+        let req = Request { model, messages };
 
         let request = self
             .http_client

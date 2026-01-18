@@ -9,7 +9,7 @@ use axum::{
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Key};
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::net::ToSocketAddrs;
 
 use std::{
@@ -134,8 +134,11 @@ async fn discord_auth(
 struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
-    llm_client: Mutex<openrouter::Client>,
 
+    llm_client: openrouter::Client,
+    llm_model: RwLock<String>,
+
+    personality: RwLock<Personality>,
     contexts_by_channel: Mutex<HashMap<ChannelId, VecDeque<openrouter::Message>>>,
     command_id: CommandId,
 }
@@ -144,12 +147,15 @@ impl LlmPlugin {
     fn from_env(command_id: CommandId) -> anyhow::Result<Self> {
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
         let admin_id = std::env::var("LLM_ADMIN_USER_ID")?.parse()?;
-        let llm_client = Mutex::new(openrouter::Client::from_env()?);
+        let model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
+        let llm_client = openrouter::Client::from_env()?;
 
         Ok(LlmPlugin {
             bot_id,
             admin_id,
             llm_client,
+            llm_model: RwLock::new(model),
+            personality: <_>::default(),
             contexts_by_channel: <_>::default(),
             command_id,
         })
@@ -167,7 +173,9 @@ impl LlmPlugin {
         parts.push(user_llm_message.clone());
 
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
-        let completion = self.llm_client.lock().complete(parts);
+        let completion =
+            self.llm_client
+                .complete(&self.llm_model.read(), *self.personality.read(), parts);
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
         self.register_message(message, user_llm_message);
@@ -232,7 +240,7 @@ impl LlmPlugin {
                 "data": {
                     "content": format!(
                         "Current model is set to `{}`",
-                        self.llm_client.lock().model
+                        self.llm_model.read()
                     )
                 }
             }),
@@ -268,7 +276,7 @@ impl LlmPlugin {
             && opt.name == "model"
             && let Some(new_model) = opt.value.as_str()
         {
-            self.llm_client.lock().model = new_model.trim().to_string();
+            *self.llm_model.write() = new_model.trim().to_string();
             rpc.create_interaction_response(
                 rpc::context::current(),
                 interaction.id,
@@ -300,7 +308,7 @@ impl LlmPlugin {
                 "data": {
                     "content": format!(
                         "Current personality is set to `{}`",
-                        self.llm_client.lock().personality
+                        self.personality.read()
                     )
                 }
             }),
@@ -336,7 +344,7 @@ impl LlmPlugin {
                 return Ok(());
             };
 
-            self.llm_client.lock().personality = new_personality;
+            *self.personality.write() = new_personality;
             self.contexts_by_channel
                 .lock()
                 .remove(&interaction.channel_id);
