@@ -51,6 +51,7 @@ class AuthStore {
 export const authStore = new AuthStore();
 
 export interface DiscordMember {
+  user_id: string;
   username: string;
   avatar_url: string | null;
 }

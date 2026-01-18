@@ -27,11 +27,14 @@ use globibot_core::{
     events::{Event, EventType},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::all::{
-        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId,
-        Message, UserId,
+    serenity::{
+        all::{
+            Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId,
+            Member, Message, UserId,
+        },
+        model::user,
     },
-    storage::{DiscordProfile, RedisStorage},
+    storage::{DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
 
@@ -52,6 +55,8 @@ async fn main() -> anyhow::Result<()> {
     let endpoints =
         common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
+    let mut storage = RedisStorage::from_env().await?;
+
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_guild_command(rpc::context::current(), guild_id, desired_command)
@@ -60,12 +65,32 @@ async fn main() -> anyhow::Result<()> {
         rpc.register_web_api(rpc::context::current(), web_addr_advertise)
             .await??;
 
-        LlmPlugin::from_env(guild_id, command.id)
+        let members = rpc
+            .list_guild_members(rpc::context::current(), guild_id)
+            .await??;
+
+        let lore_book = storage.get::<LoreBook>("latest").await.unwrap_or_default();
+
+        LlmPlugin::from_env(guild_id, command.id, members, lore_book)
     })
     .await?;
 
     let llm_plugin = Arc::clone(&plugin.inner);
-    let storage = RedisStorage::from_env().await?;
+
+    let save_lore_regularly = {
+        let plugin = Arc::clone(&plugin.inner);
+        let mut storage = storage.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let lore_book = plugin.lore_book.read().clone();
+                if let Err(err) = storage.set("latest", &lore_book).await {
+                    tracing::error!("Failed to save LLM lore book: {err:?}");
+                }
+            }
+        }
+    };
+
     let web_server = WebServer::new(storage, &cookie_secret, llm_plugin);
 
     tokio::select! {
@@ -74,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
         },
         _ = plugin.handle_events() => {
             tracing::info!("Event handler has shut down");
+        },
+        _ = save_lore_regularly => {
+            tracing::info!("Lore saving task has shut down");
         }
     }
 
@@ -102,6 +130,9 @@ impl WebServer {
             .route("/settings", axum::routing::post(update_llm_settings))
             .route("/personality", axum::routing::get(llm_personality))
             .route("/personality", axum::routing::post(update_llm_personality))
+            .route("/lore", axum::routing::get(llm_lore))
+            .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
+            .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .with_state(self.clone())
             .layer(middleware::from_fn_with_state(self, discord_auth));
 
@@ -116,6 +147,9 @@ impl WebServer {
 struct WebLLMSettings {
     model: String,
     context_window_size: usize,
+
+    #[serde(skip_deserializing)]
+    prompt: String,
 
     #[serde(skip_deserializing)]
     context_windows_by_channel: Vec<ChannelContextWindow>,
@@ -154,6 +188,7 @@ async fn llm_settings(
 
     let settings = WebLLMSettings {
         model,
+        prompt: llm_plugin.system_prompt(),
         context_window_size,
         context_windows_by_channel,
         allowed_to_edit: Some(llm_plugin.admin_id == profile.user_id),
@@ -228,6 +263,128 @@ async fn update_llm_personality(
     llm_personality(State(llm_plugin)).await.into_response()
 }
 
+async fn llm_lore(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    let lore_book = llm_plugin.lore_book.read().clone();
+    Json(lore_book)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LlmLoreSuggestionRequest {
+    for_user_id: UserId,
+    suggestion: String,
+}
+
+async fn llm_lore_suggest(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(suggestion_req): Json<LlmLoreSuggestionRequest>,
+) -> impl IntoResponse {
+    if profile.user_id == suggestion_req.for_user_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            "You cannot suggest lore changes for yourself",
+        )
+            .into_response();
+    }
+
+    let suggestion_text = suggestion_req.suggestion.trim();
+    if suggestion_text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Suggestion cannot be empty").into_response();
+    }
+
+    let mut lore_book = llm_plugin.lore_book.write();
+    let user_lore = match lore_book.lore_by_user.get(&suggestion_req.for_user_id) {
+        Some(lore) => lore,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "You must have lore to suggest changes to it",
+            )
+                .into_response();
+        }
+    };
+
+    let suggestion = UserLoreSuggestion {
+        member: user_lore.member.clone(),
+        suggestion: suggestion_text.to_string(),
+        suggestion_by: profile.clone(),
+        votes_by_user_id: HashMap::new(),
+    };
+
+    let suggestions = lore_book
+        .suggestions_by_user
+        .entry(suggestion_req.for_user_id)
+        .or_default();
+
+    if let Some(existing_suggestion) = suggestions
+        .iter_mut()
+        .find(|s| s.suggestion_by.user_id == profile.user_id)
+    {
+        existing_suggestion.suggestion = suggestion_text.to_string();
+    } else {
+        suggestions.push(suggestion);
+    }
+
+    drop(lore_book);
+
+    llm_lore(State(llm_plugin)).await.into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LlmLoreVoteRequest {
+    for_user_id: UserId,
+    by_user_id: UserId,
+    vote: SuggestionVote,
+}
+
+async fn llm_lore_vote(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(vote_req): Json<LlmLoreVoteRequest>,
+) -> impl IntoResponse {
+    if profile.user_id == vote_req.by_user_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            "You cannot vote on your own suggestions",
+        )
+            .into_response();
+    }
+
+    let mut lore_book = llm_plugin.lore_book.write();
+    let suggestions = match lore_book.suggestions_by_user.get_mut(&vote_req.for_user_id) {
+        Some(suggestions) => suggestions,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "No suggestions found for the specified user",
+            )
+                .into_response();
+        }
+    };
+
+    let suggestion = match suggestions
+        .iter_mut()
+        .find(|s| s.suggestion_by.user_id == vote_req.by_user_id)
+    {
+        Some(suggestion) => suggestion,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "No suggestion found from the specified user",
+            )
+                .into_response();
+        }
+    };
+
+    suggestion
+        .votes_by_user_id
+        .insert(profile.user_id, vote_req.vote);
+
+    drop(lore_book);
+
+    llm_lore(State(llm_plugin)).await.into_response()
+}
+
 async fn discord_auth(
     State(mut storage): State<RedisStorage>,
     jar: PrivateCookieJar,
@@ -269,6 +426,65 @@ struct LlmPlugin {
     contexts_by_channel: Mutex<HashMap<ChannelId, ChannelContext>>,
 
     context_window_size: AtomicUsize,
+
+    lore_book: RwLock<LoreBook>,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct LoreBook {
+    lore_by_user: HashMap<UserId, UserLore>,
+    suggestions_by_user: HashMap<UserId, Vec<UserLoreSuggestion>>,
+}
+
+impl StorageValue for LoreBook {
+    const REDIS_NS: &'static str = "lore_book";
+}
+
+impl LoreBook {
+    fn to_prompt(&self) -> String {
+        use std::fmt::Write;
+        const PREMISE: &str = r#"
+# "Facts" about people in the chat
+Those are not necessarily true, but they are the "lore" of the chat that you should embrace
+Use those facts sparingly to add flavor to your responses if appropriate.
+Don't feel obligated to reference them in every response though.
+"#;
+
+        let mut prompt = format!("{PREMISE}\n");
+
+        for user_lore in self.lore_by_user.values() {
+            let lore = &user_lore.lore;
+            if lore.is_empty() {
+                continue;
+            }
+            let username = &user_lore.member.username;
+            let user_id = user_lore.member.user_id;
+            writeln!(prompt, "{username} (<@{user_id}>) {lore}").ok();
+        }
+
+        prompt
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct UserLore {
+    member: DiscordProfile,
+    lore: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct UserLoreSuggestion {
+    member: DiscordProfile,
+    suggestion: String,
+    suggestion_by: DiscordProfile,
+    votes_by_user_id: HashMap<UserId, SuggestionVote>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SuggestionVote {
+    Omegalul,
+    Up,
+    Down,
 }
 
 #[derive(Debug)]
@@ -278,13 +494,40 @@ struct ChannelContext {
 }
 
 impl LlmPlugin {
-    fn from_env(guild_id: GuildId, command_id: CommandId) -> anyhow::Result<Self> {
+    fn from_env(
+        guild_id: GuildId,
+        command_id: CommandId,
+        members: Vec<Member>,
+        mut lore_book: LoreBook,
+    ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
 
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
         let admin_id = std::env::var("LLM_ADMIN_USER_ID")?.parse()?;
         let model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
         let llm_client = openrouter::Client::from_env()?;
+
+        for member in members {
+            let profile = DiscordProfile {
+                user_id: member.user.id,
+                username: member.display_name().to_string(),
+                avatar_url: Some(
+                    member
+                        .avatar_url()
+                        .or(member.user.avatar_url())
+                        .unwrap_or(member.user.default_avatar_url()),
+                ),
+            };
+
+            lore_book
+                .lore_by_user
+                .entry(member.user.id)
+                .and_modify(|lore| lore.member = profile.clone())
+                .or_insert_with(|| UserLore {
+                    member: profile,
+                    lore: String::new(),
+                });
+        }
 
         Ok(LlmPlugin {
             bot_id,
@@ -296,7 +539,18 @@ impl LlmPlugin {
             contexts_by_channel: <_>::default(),
             command_id,
             context_window_size: AtomicUsize::new(DEFAULT_CONTEXT_WINDOW_SIZE),
+            lore_book: RwLock::new(lore_book),
         })
+    }
+
+    fn system_prompt(&self) -> String {
+        use std::fmt::Write;
+
+        let personality = *self.personality.read();
+        let mut system_prompt = personality.system_prompt();
+        write!(system_prompt, "\n{}", self.lore_book.read().to_prompt()).ok();
+
+        system_prompt
     }
 
     async fn answer_message(
@@ -313,7 +567,7 @@ impl LlmPlugin {
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
         let completion =
             self.llm_client
-                .complete(&self.llm_model.read(), *self.personality.read(), parts);
+                .complete(&self.llm_model.read(), self.system_prompt(), parts);
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
         self.register_message(rpc.clone(), message, user_llm_message)

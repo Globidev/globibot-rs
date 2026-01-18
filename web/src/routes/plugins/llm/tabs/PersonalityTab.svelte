@@ -45,7 +45,7 @@
 
 {#await initPromise then _}
   {#if formData}
-    <div class="grid w-full grid-cols-[auto_1fr] items-center gap-x-8 gap-y-4">
+    <div class="settings-grid">
       <label for="personality" class="font-medium whitespace-nowrap text-gray-400">
         Personality
       </label>
@@ -60,7 +60,7 @@
         {/each}
       </select>
 
-      <span class="font-medium whitespace-nowrap text-gray-400"> Current prompt </span>
+      <span class="font-medium whitespace-nowrap text-gray-400"> Personality prompt </span>
       <div class="flex flex-col gap-2">
         <textarea
           readonly
@@ -71,7 +71,7 @@
         ></textarea>
       </div>
 
-      <div class="col-start-2 h-6 text-sm">
+      <div class="status-row col-start-2 h-6 text-sm">
         {#if status === 'saving'}
           <span class="animate-pulse text-indigo-400">Saving changes...</span>
         {:else if status === 'saved'}
@@ -82,11 +82,50 @@
       </div>
     </div>
   {/if}
+{:catch err}
+  <div class="text-red-500">Error loading data: {err.message}</div>
 {/await}
 
 <style>
-  /* Optional: make labels right-aligned for a tighter look */
+  @reference "../../../layout.css";
+
+  .settings-grid {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 1fr; /* Single column stack */
+    gap: 0.5rem;
+  }
+
   label {
-    text-align: right;
+    text-align: left;
+    margin-top: 1rem; /* Space above a new section */
+  }
+
+  select {
+    width: 100%; /* Ensure it hits the edges */
+    margin-bottom: 0.5rem;
+  }
+
+  /* Ensure the status row doesn't look for a 2nd column on mobile */
+  .status-row {
+    grid-column: 1;
+    text-align: left;
+  }
+
+  @media (min-width: 640px) {
+    .settings-grid {
+      grid-template-columns: auto 1fr;
+      gap: 1.5rem;
+      align-items: center;
+    }
+
+    label {
+      text-align: right;
+      margin-top: 0;
+    }
+
+    select {
+      margin-bottom: 0;
+    }
   }
 </style>

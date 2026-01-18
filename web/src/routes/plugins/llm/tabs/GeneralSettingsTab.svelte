@@ -1,6 +1,7 @@
 <script lang="ts">
   type Data = {
     model: string;
+    prompt: string;
     context_window_size: number;
     context_windows_by_channel: ChannelContextWindow[];
     allowed_to_edit: boolean;
@@ -67,7 +68,7 @@
 
 {#await initPromise then _}
   {#if formData}
-    <div class="grid w-full grid-cols-[auto_1fr] items-center gap-x-8 gap-y-4">
+    <div class="settings-grid">
       <label for="model" class="font-medium whitespace-nowrap text-gray-400"> Model name </label>
       <input
         disabled={!formData.allowed_to_edit}
@@ -106,7 +107,7 @@
         {/if}
       </div>
 
-      <div class="col-start-2 h-6 text-sm">
+      <div class="status-row col-start-2 h-6 text-sm">
         {#if status === 'saving'}
           <span class="animate-pulse text-indigo-400">Saving changes...</span>
         {:else if status === 'saved'}
@@ -116,12 +117,67 @@
         {/if}
       </div>
     </div>
+
+    <label for="prompt" class="text-center! font-medium whitespace-nowrap text-gray-400">
+      Full prompt
+    </label>
+    <textarea
+      id="prompt"
+      readonly
+      disabled
+      value={formData.prompt}
+      rows="10"
+      class="mt-6 w-full resize-y rounded border border-gray-700 bg-gray-900 p-2 text-white transition-colors outline-none focus:border-indigo-500 disabled:cursor-not-allowed"
+    ></textarea>
   {/if}
+{:catch err}
+  <div class="text-red-500">Error loading data: {err.message}</div>
 {/await}
 
 <style>
-  /* Optional: make labels right-aligned for a tighter look */
+  @reference "../../../layout.css";
+
+  .settings-grid {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 1fr; /* Single column stack */
+    gap: 0.5rem;
+  }
+
   label {
-    text-align: right;
+    text-align: left;
+    margin-top: 1rem; /* Space above a new section */
+  }
+
+  input {
+    width: 100%; /* Ensure it hits the edges */
+    margin-bottom: 0.5rem;
+  }
+
+  /* Ensure the status row doesn't look for a 2nd column on mobile */
+  .status-row {
+    grid-column: 1;
+    text-align: left;
+  }
+
+  @media (min-width: 640px) {
+    .settings-grid {
+      grid-template-columns: auto 1fr;
+      gap: 1.5rem;
+      align-items: center;
+    }
+
+    label {
+      text-align: right;
+      margin-top: 0;
+    }
+
+    input {
+      margin-bottom: 0;
+    }
+
+    .status-row {
+      grid-column: 2; /* Put it back under the input on desktop */
+    }
   }
 </style>

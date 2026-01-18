@@ -1,8 +1,6 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::personality::Personality;
-
 #[derive(Debug)]
 pub struct Client {
     api_key: String,
@@ -22,14 +20,14 @@ impl Client {
     pub fn complete<Parts: IntoIterator<Item = Message> + Send>(
         &self,
         model: &str,
-        personality: Personality,
+        system_prompt: String,
         parts: Parts,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts> {
         let mut messages = vec![Message {
             role: Role::System,
             content: vec![ContentPart::Text(TextContentPart {
                 kind: "text",
-                text: personality.system_prompt(),
+                text: system_prompt,
             })],
         }];
 
