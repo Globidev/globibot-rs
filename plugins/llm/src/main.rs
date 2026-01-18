@@ -28,7 +28,8 @@ use globibot_core::{
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
     serenity::all::{
-        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, Message, UserId,
+        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId,
+        Message, UserId,
     },
     storage::{DiscordProfile, DiscordSession, RedisStorage},
 };
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         rpc.register_web_api(rpc::context::current(), web_addr_advertise)
             .await??;
 
-        LlmPlugin::from_env(command.id)
+        LlmPlugin::from_env(guild_id, command.id)
     })
     .await?;
 
@@ -208,6 +209,7 @@ async fn discord_auth(
 struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
+    guild_id: GuildId,
     command_id: CommandId,
 
     llm_client: openrouter::Client,
@@ -226,7 +228,7 @@ struct ChannelContext {
 }
 
 impl LlmPlugin {
-    fn from_env(command_id: CommandId) -> anyhow::Result<Self> {
+    fn from_env(guild_id: GuildId, command_id: CommandId) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
 
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
@@ -237,6 +239,7 @@ impl LlmPlugin {
         Ok(LlmPlugin {
             bot_id,
             admin_id,
+            guild_id,
             llm_client,
             llm_model: RwLock::new(model),
             personality: <_>::default(),
@@ -514,6 +517,11 @@ impl HandleEvents for LlmPlugin {
             }
 
             Event::MessageCreate { message } if !message.author.bot => {
+                if message.guild_id.is_none_or(|gid| gid != self.guild_id) {
+                    // Ignore messages outside of the configured guild
+                    return Ok(());
+                }
+
                 let user_name = message
                     .member
                     .as_ref()
