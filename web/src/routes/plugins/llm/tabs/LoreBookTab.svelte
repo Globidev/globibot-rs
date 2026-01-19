@@ -41,6 +41,7 @@
   let currentUserId = $derived(authStore.user?.user_id ?? '');
   let isAllowedToAccept = $derived(currentUserId === '89108411861467136'); // 🔶 Make configurable
   let searchQuery = $state('');
+  let loreFilter = $state<'all' | 'lore_only' | 'no_lore_only'>('all');
 
   async function handleSuggest(userId: string) {
     const suggestion = loreForms[userId];
@@ -108,34 +109,63 @@
   </div>
 {/snippet}
 
-<div class="mb-6 flex items-center gap-2">
-  <div class="relative w-full max-w-sm">
-    <span class="absolute inset-y-0 left-3 flex items-center text-gray-500"> 🔍 </span>
-    <input
-      type="text"
-      bind:value={searchQuery}
-      placeholder="Search users..."
-      class="w-full rounded-lg border border-gray-700 bg-gray-900 py-2 pr-4 pl-10 text-sm text-white outline-none focus:border-indigo-500"
-    />
-  </div>
-
-  {#if searchQuery}
+<div class="mb-6 flex flex-col gap-2 md:flex-row md:items-center">
+  <div class="flex w-full max-w-sm gap-2">
+    <div class="relative w-full">
+      <span class="absolute inset-y-0 left-3 flex items-center text-gray-500"> 🔍 </span>
+      <input
+        type="text"
+        bind:value={searchQuery}
+        placeholder="Search users..."
+        class="w-full rounded-lg border border-gray-700 bg-gray-900 py-2 pr-4 pl-10 text-sm text-white outline-none focus:border-indigo-500"
+      />
+    </div>
     <button
       onclick={() => (searchQuery = '')}
-      class="cursor-pointer text-xs text-gray-500 hover:text-white"
+      class={[
+        'cursor-pointer text-xs text-gray-500 hover:text-white',
+        searchQuery === '' ? 'invisible' : ''
+      ]}
     >
       Clear
     </button>
-  {/if}
+  </div>
+
+  <div class="flex items-center gap-2 md:ml-auto">
+    <span class="icon-[mdi--filter-cog-outline]"></span>
+    <select
+      bind:value={loreFilter}
+      class="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+    >
+      <option value="all">All Users</option>
+      <option value="lore_only">With Lore only</option>
+      <option value="no_lore_only">Without Lore only</option>
+    </select>
+  </div>
 </div>
 
 {#await initPromise}
   <div class="animate-pulse text-gray-400">Reading the archives...</div>
 {:then data}
   <div class="grid-container">
-    {#each Object.entries(data.lore_by_user).filter(([_, val]) => val.member.username
-        .toLowerCase()
-        .includes(searchQuery.toLowerCase())) as [userId, userLore]}
+    {#each Object.entries(data.lore_by_user)
+      .filter(([_, val]) => val.member.username.toLowerCase().includes(searchQuery.toLowerCase()))
+      .filter(([_, val]) => {
+        if (loreFilter === 'lore_only') return val.lore.trim().length > 0;
+        if (loreFilter === 'no_lore_only') return val.lore.trim().length === 0;
+        return true;
+      })
+      .toSorted(([aId, aLore], [bId, bLore]) => {
+        const aSuggestionLen = data.suggestions_by_user[aId]?.length ?? 0;
+        const bSuggestionLen = data.suggestions_by_user[bId]?.length ?? 0;
+        if (aSuggestionLen !== bSuggestionLen) {
+          return bSuggestionLen - aSuggestionLen; // More suggestions first
+        }
+        if (aLore.lore.length === 0 && bLore.lore.length === 0) return 0;
+        if (aLore.lore.length === 0) return 1;
+        if (bLore.lore.length === 0) return -1;
+        return aLore.member.username.localeCompare(bLore.member.username);
+      }) as [userId, userLore]}
       <div class="contents">
         {@render memberInfo(userLore.member)}
 
