@@ -564,6 +564,11 @@ impl LlmPlugin {
         let llm_client = openrouter::Client::from_env()?;
 
         for member in members {
+            if member.user.bot {
+                lore_book.lore_by_user.remove(&member.user.id);
+                continue;
+            }
+
             let profile = DiscordProfile {
                 user_id: member.user.id,
                 username: member.display_name().to_string(),
