@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "🌭 Web dev server",
+      "type": "shell",
+      "options": {
+        "cwd": "./web"
+      },
+      "command": "bun run dev",
+      "isBackground": true,
+      "runOptions": { "instanceLimit": 1 },
+      "group": "build"
+    },
+    {
+      "label": "🤖 Globibot",
+      "type": "shell",
+      "command": "set -a && . ./local.env&& set +a && cargo run --bin globibot-bot",
+      "isBackground": true,
+      "runOptions": { "instanceLimit": 1 },
+      "group": "build"
+    },
+    {
+      "label": "🗣️ Plugin LLM",
+      "type": "shell",
+      "command": "set -a && . ./local.env&& set +a && cargo run --bin globibot-plugin-llm",
+      "isBackground": true,
+      "runOptions": { "instanceLimit": 1 },
+      "group": "build"
+    }
+  ]
+}
