@@ -5,13 +5,13 @@ mod events;
 mod rpc;
 mod web;
 
-use std::{env, io, num::ParseIntError};
+use std::env;
 
 use futures::TryFutureExt;
 use globibot_core::transport::{Protocol, Tcp};
 
 #[tokio::main]
-async fn main() -> Result<(), AppError> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let subscriber_addr = env::var("SUBSCRIBER_ADDR")?;
@@ -52,35 +52,11 @@ async fn main() -> Result<(), AppError> {
     tracing::info!("Starting bot...");
 
     futures::try_join!(
-        publish_events.err_into::<AppError>(),
+        publish_events.err_into::<anyhow::Error>(),
         run_rpc_server.err_into(),
         run_discord_client.err_into(),
         run_web_server.err_into(),
     )?;
 
     Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-enum AppError {
-    #[error("IO error: {0}")]
-    IO(#[from] io::Error),
-
-    #[error("Discord error: {0}")]
-    Discord(Box<globibot_core::serenity::Error>),
-
-    #[error("Missing environment variable: {0}")]
-    MissingEnvVar(#[from] env::VarError),
-
-    #[error("Malformed application ID: {0}")]
-    MalformedApplicationId(#[from] ParseIntError),
-
-    #[error("Storage error: {0}")]
-    Storage(#[from] globibot_core::storage::InitError),
-}
-
-impl From<globibot_core::serenity::Error> for AppError {
-    fn from(err: globibot_core::serenity::Error) -> Self {
-        AppError::Discord(Box::new(err))
-    }
 }

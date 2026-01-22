@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use rpc::{DiscordApiResult, Protocol, ServerChannel};
 use tracing::{debug, info, warn};
 
-use crate::web::WEB_STATE;
+use crate::web::plugins::REGISTRY;
 
 pub async fn run_server<S, T>(
     transports: S,
@@ -53,10 +53,10 @@ where
                             warn!("RPC client error: {err}");
                         }
                         info!("Ended connection with RPC client: '{plugin_id}'");
-                        WEB_STATE.lock().unwrap().unregister_plugin_rpc(&plugin_id);
+                        REGISTRY.lock().unwrap().unregister_rpc(&plugin_id);
                     }
                 });
-                WEB_STATE.lock().unwrap().register_plugin_rpc(&plugin_id);
+                REGISTRY.lock().unwrap().register_rpc(&plugin_id);
                 info!("New RPC client spawned: '{id}'", id = plugin_id);
             }
             Err(AcceptError::IO(err)) => {
@@ -164,10 +164,7 @@ impl Protocol for Server {
             .error_for_status()
             .map_err(|err| RegisterWebApiError::ControlPlaneError(err.to_string()))?;
 
-        WEB_STATE
-            .lock()
-            .unwrap()
-            .register_plugin_web_api(&self.plugin_id);
+        REGISTRY.lock().unwrap().register_web_api(&self.plugin_id);
         Ok(())
     }
 

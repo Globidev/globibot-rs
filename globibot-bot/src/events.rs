@@ -8,7 +8,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::web::WEB_STATE;
+use crate::web::plugins::REGISTRY;
 
 pub trait EventSink = Sink<Event, Error: Display> + Send + Unpin + 'static;
 
@@ -31,10 +31,7 @@ where
                         info!("Ended connection with event subscriber: '{plugin_id}'");
                     }
                 });
-                WEB_STATE
-                    .lock()
-                    .unwrap()
-                    .register_plugin_events(&request.id);
+                REGISTRY.lock().unwrap().register_events(&request.id);
                 info!("New event subscriber spawned: '{id}'", id = request.id);
             }
             Err(AcceptError::IO(err)) => {

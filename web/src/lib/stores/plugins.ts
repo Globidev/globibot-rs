@@ -35,7 +35,7 @@ class PluginStore {
 
   #eventSource: EventSource | null = null;
   listenForUpdates() {
-    const eventSource = new EventSource('/api/sse');
+    const eventSource = new EventSource('/api/plugins/sse');
 
     eventSource.onmessage = (event) => this.#handleEvent(event);
     eventSource.onerror = (error) => console.log('👀', 'SSE ERROR', error);
