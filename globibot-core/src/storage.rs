@@ -1,4 +1,6 @@
-use redis::{AsyncCommands, RedisWrite, ToRedisArgs, ToSingleRedisArg};
+use std::fmt::Display;
+
+use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs, ToSingleRedisArg};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serenity::all::UserId;
 
@@ -27,8 +29,8 @@ impl RedisStorage {
             ns: T::REDIS_NS,
             key,
         };
-        let value = JsonStorageValue(value);
-        Ok(self.conn.set(ns_key, value).await?)
+        let value = T::Format::to_single_redis_arg(value);
+        self.conn.set(ns_key, value).await
     }
 
     pub async fn get<T: StorageValue>(
@@ -39,9 +41,30 @@ impl RedisStorage {
             ns: T::REDIS_NS,
             key,
         };
-        let raw_value: String = self.conn.get(ns_key).await?;
-        let value = serde_json::from_str(&raw_value)?;
-        Ok(value)
+        let extracted = self.conn.get(ns_key).await?;
+        Ok(T::Format::from_extracted(extracted))
+    }
+
+    pub async fn list_keys<Ns: StorageValue>(
+        &mut self,
+        pattern: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let ns_key = StorageKey {
+            ns: Ns::REDIS_NS,
+            key: pattern,
+        };
+        let keys: Vec<String> = self.conn.keys(ns_key).await?;
+        let prefix = format!("{}:", Ns::REDIS_NS);
+        let stripped_keys = keys
+            .into_iter()
+            .map(|full_key| {
+                full_key
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&full_key)
+                    .to_string()
+            })
+            .collect();
+        Ok(stripped_keys)
     }
 
     pub async fn del<Ns: StorageValue>(
@@ -52,7 +75,7 @@ impl RedisStorage {
             ns: Ns::REDIS_NS,
             key,
         };
-        Ok(self.conn.del(ns_key).await?)
+        self.conn.del(ns_key).await
     }
 
     pub async fn expire<Ns: StorageValue>(
@@ -64,20 +87,7 @@ impl RedisStorage {
             ns: Ns::REDIS_NS,
             key,
         };
-        Ok(self.conn.expire(ns_key, seconds).await?)
-    }
-}
-
-struct JsonStorageValue<T>(T);
-
-impl<T: Serialize> ToSingleRedisArg for JsonStorageValue<T> {}
-impl<T: Serialize> ToRedisArgs for JsonStorageValue<T> {
-    fn write_redis_args<W>(&self, out: &mut W)
-    where
-        W: ?Sized + RedisWrite,
-    {
-        serde_json::to_writer(out.writer_for_next_arg(), &self.0)
-            .expect("Failed to serialize to JSON");
+        self.conn.expire(ns_key, seconds).await
     }
 }
 
@@ -86,24 +96,92 @@ struct StorageKey<K> {
     key: K,
 }
 
-pub trait StorageSubkey: std::fmt::Display + Send + Sync {}
-impl<T: std::fmt::Display + Send + Sync> StorageSubkey for T {}
+pub trait StorageSubkey: Display + Send + Sync {}
+impl<T: Display + Send + Sync> StorageSubkey for T {}
 
-impl<K: std::fmt::Display> ToSingleRedisArg for StorageKey<K> {}
-impl<K: std::fmt::Display> ToRedisArgs for StorageKey<K> {
+impl<K: Display> ToSingleRedisArg for StorageKey<K> {}
+impl<K: Display> ToRedisArgs for StorageKey<K> {
     fn write_redis_args<W>(&self, out: &mut W)
     where
         W: ?Sized + RedisWrite,
     {
         use std::io::Write;
 
-        write!(out.writer_for_next_arg(), "{}:{}", self.ns, self.key)
-            .expect("Failed to write redis args");
+        let Self { ns, key } = self;
+        write!(out.writer_for_next_arg(), "{ns}:{key}").expect("Failed to write redis args");
     }
 }
 
-pub trait StorageValue: Send + Sync + Serialize + DeserializeOwned {
+pub trait StorageValue: Sized + Send + Sync {
+    type Format: StorageValueFormat<Self>;
+
     const REDIS_NS: &'static str;
+}
+
+pub trait StorageValueFormat<T> {
+    type Extract: FromRedisValue;
+
+    fn from_extracted(extracted: Self::Extract) -> T;
+    fn to_single_redis_arg(value: &T) -> impl ToSingleRedisArg + Send + Sync;
+}
+
+pub enum JsonFormat {}
+
+impl<T: Serialize + DeserializeOwned + Send + Sync> StorageValueFormat<T> for JsonFormat {
+    type Extract = ExtractJsonValue<T>;
+
+    fn from_extracted(ExtractJsonValue(inner): Self::Extract) -> T {
+        inner
+    }
+
+    fn to_single_redis_arg(value: &T) -> impl ToSingleRedisArg + Send + Sync {
+        struct JsonStorageValue<T>(T);
+
+        impl<T: Serialize> ToSingleRedisArg for JsonStorageValue<T> {}
+        impl<T: Serialize> ToRedisArgs for JsonStorageValue<T> {
+            fn write_redis_args<W>(&self, out: &mut W)
+            where
+                W: ?Sized + RedisWrite,
+            {
+                serde_json::to_writer(out.writer_for_next_arg(), &self.0)
+                    .expect("Failed to serialize to JSON");
+            }
+        }
+
+        JsonStorageValue(value)
+    }
+}
+
+pub enum StringFormat {}
+impl<T: AsRef<str> + From<String>> StorageValueFormat<T> for StringFormat {
+    type Extract = ExtractStringValue<T>;
+
+    fn from_extracted(ExtractStringValue(inner): Self::Extract) -> T {
+        inner
+    }
+
+    fn to_single_redis_arg(value: &T) -> impl ToSingleRedisArg + Send + Sync {
+        value.as_ref()
+    }
+}
+
+pub struct ExtractJsonValue<T>(T);
+
+impl<T: DeserializeOwned> FromRedisValue for ExtractJsonValue<T> {
+    fn from_redis_value(v: redis::Value) -> Result<Self, redis::ParsingError> {
+        let extracted: String = FromRedisValue::from_redis_value(v)?;
+        let value = serde_json::from_str(&extracted).map_err(|err| err.to_string())?;
+        Ok(Self(value))
+    }
+}
+
+pub struct ExtractStringValue<T>(T);
+
+impl<T: From<String>> FromRedisValue for ExtractStringValue<T> {
+    fn from_redis_value(v: redis::Value) -> Result<Self, redis::ParsingError> {
+        let extracted: String = FromRedisValue::from_redis_value(v)?;
+        Ok(Self(extracted.into()))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,14 +193,7 @@ pub enum InitError {
     Env(#[from] std::env::VarError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum StorageError {
-    #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
-
-    #[error("Deserialization error: {0}")]
-    Deserialize(#[from] serde_json::Error),
-}
+pub type StorageError = redis::RedisError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordSession {
@@ -132,6 +203,8 @@ pub struct DiscordSession {
 }
 
 impl StorageValue for DiscordSession {
+    type Format = JsonFormat;
+
     const REDIS_NS: &'static str = "discord_session";
 }
 
@@ -143,5 +216,7 @@ pub struct DiscordProfile {
 }
 
 impl StorageValue for DiscordProfile {
+    type Format = JsonFormat;
+
     const REDIS_NS: &'static str = "discord_profile";
 }
