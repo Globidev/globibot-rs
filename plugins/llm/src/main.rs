@@ -1,8 +1,8 @@
 #![feature(vec_deque_truncate_front)]
 
 mod openrouter;
-mod personality;
 
+use anyhow::Context;
 use axum::{
     Extension, Json,
     extract::{FromRef, Request, State},
@@ -31,11 +31,9 @@ use globibot_core::{
         Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId, Member,
         Message, UserId,
     },
-    storage::{DiscordProfile, RedisStorage, StorageValue},
+    storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
-
-use crate::personality::Personality;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,8 +65,15 @@ async fn main() -> anyhow::Result<()> {
             .await??;
 
         let lore_book = storage.get::<LoreBook>("latest").await.unwrap_or_default();
+        let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
 
-        LlmPlugin::from_env(guild_id, command.id, members, lore_book)
+        LlmPlugin::from_env(
+            guild_id,
+            command.id,
+            members,
+            lore_book,
+            personality_registry,
+        )
     })
     .await?;
 
@@ -223,21 +228,25 @@ struct LlmPersonality {
     personality: String,
 
     #[serde(skip_deserializing)]
-    available_personalities: Vec<String>,
+    prompt: String,
 
     #[serde(skip_deserializing)]
-    prompt: String,
+    available_personalities: Vec<String>,
 }
 
 async fn llm_personality(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
-    let personality = *llm_plugin.personality.read();
+    let personality = llm_plugin.personality.read();
 
     Json(LlmPersonality {
-        personality: personality.to_string(),
-        available_personalities: Personality::all_personalities()
-            .map(|p| p.to_string())
+        personality: personality.name.clone(),
+        prompt: personality.prompt.clone(),
+        available_personalities: llm_plugin
+            .personality_registry
+            .read()
+            .personalities_by_name
+            .keys()
+            .cloned()
             .collect(),
-        prompt: personality.system_prompt(),
     })
 }
 
@@ -245,9 +254,14 @@ async fn update_llm_personality(
     State(llm_plugin): State<Arc<LlmPlugin>>,
     Json(personality_req): Json<LlmPersonality>,
 ) -> impl IntoResponse {
-    let new_personality = match personality_req.personality.as_str().try_into() {
-        Ok(p) => p,
-        Err(_) => {
+    let new_personality = match llm_plugin
+        .personality_registry
+        .read()
+        .personalities_by_name
+        .get(&personality_req.personality)
+    {
+        Some(p) => p.clone(),
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Unknown personality `{}`", personality_req.personality),
@@ -479,11 +493,66 @@ struct LlmPlugin {
 
     llm_model: RwLock<String>,
     personality: RwLock<Personality>,
+    personality_registry: RwLock<PersonalityRegistry>,
     contexts_by_channel: Mutex<HashMap<ChannelId, ChannelContext>>,
 
     context_window_size: AtomicUsize,
 
     lore_book: RwLock<LoreBook>,
+}
+
+#[derive(Debug, Clone)]
+struct Personality {
+    name: String,
+    prompt: String,
+}
+
+#[derive(Debug)]
+struct PersonalityRegistry {
+    personalities_by_name: HashMap<String, Personality>,
+    storage: storage::RedisStorage,
+}
+
+impl PersonalityRegistry {
+    async fn load_from_storage(
+        mut storage: storage::RedisStorage,
+    ) -> Result<Self, storage::StorageError> {
+        struct PersonalityPrompt {
+            prompt: String,
+        }
+        impl storage::StorageValue for PersonalityPrompt {
+            type Format = storage::StringFormat;
+
+            const REDIS_NS: &'static str = "llm_personality";
+        }
+
+        impl From<String> for PersonalityPrompt {
+            fn from(prompt: String) -> Self {
+                Self { prompt }
+            }
+        }
+
+        impl AsRef<str> for PersonalityPrompt {
+            fn as_ref(&self) -> &str {
+                &self.prompt
+            }
+        }
+
+        let mut personalities_by_name = HashMap::new();
+        for key in storage.list_keys::<PersonalityPrompt>("*").await? {
+            let PersonalityPrompt { prompt } = storage.get(&key).await?;
+            personalities_by_name.insert(key.clone(), Personality { name: key, prompt });
+        }
+
+        Ok(Self {
+            personalities_by_name,
+            storage,
+        })
+    }
+
+    fn default_personality(&self) -> Option<Personality> {
+        self.personalities_by_name.values().next().cloned()
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -493,8 +562,26 @@ struct LoreBook {
 }
 
 impl StorageValue for LoreBook {
+    type Format = storage::JsonFormat;
+
     const REDIS_NS: &'static str = "lore_book";
 }
+
+const CHAT_STRUCTURE: &str = r#"
+# Chat structure
+You will be given context from the current conversation in the form of user messages in the following format:
+user_name (<@user_id>): message content
+
+In your output, you can produce mentions if needed, by using discord syntax: <@user_id>, e.g. <@123456789012345678>.
+For example, given the input:
+alice (<@1234567890>): Hello, @globibot!
+
+If you deem appropriate to mention the user, you could respond with:
+Ah, <@1234567890>, your greeting is as warm as a Parisian winter! <3
+
+You can respond to or comment on earlier messages but keep your responses relatively short, as to not clutter the chat.
+Max 1 or 2 paragraphs.
+"#;
 
 impl LoreBook {
     fn to_prompt(&self) -> String {
@@ -555,6 +642,7 @@ impl LlmPlugin {
         command_id: CommandId,
         members: Vec<Member>,
         mut lore_book: LoreBook,
+        registry: PersonalityRegistry,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
 
@@ -590,13 +678,18 @@ impl LlmPlugin {
                 });
         }
 
+        let default_personality = registry
+            .default_personality()
+            .context("Default personality not found in registry")?;
+
         Ok(LlmPlugin {
             bot_id,
             admin_id,
             guild_id,
             llm_client,
             llm_model: RwLock::new(model),
-            personality: <_>::default(),
+            personality: RwLock::new(default_personality),
+            personality_registry: RwLock::new(registry),
             contexts_by_channel: <_>::default(),
             command_id,
             context_window_size: AtomicUsize::new(DEFAULT_CONTEXT_WINDOW_SIZE),
@@ -607,9 +700,15 @@ impl LlmPlugin {
     fn system_prompt(&self) -> String {
         use std::fmt::Write;
 
-        let personality = *self.personality.read();
-        let mut system_prompt = personality.system_prompt();
-        write!(system_prompt, "\n{}", self.lore_book.read().to_prompt()).ok();
+        let personality = self.personality.read();
+        let mut system_prompt = personality.prompt.clone();
+        write!(
+            system_prompt,
+            "\n{lore}\n{structure}",
+            lore = self.lore_book.read().to_prompt(),
+            structure = CHAT_STRUCTURE
+        )
+        .ok();
 
         system_prompt
     }
@@ -783,7 +882,7 @@ impl LlmPlugin {
                 "data": {
                     "content": format!(
                         "Current personality is set to `{}`",
-                        self.personality.read()
+                        self.personality.read().name
                     )
                 }
             }),
@@ -801,9 +900,15 @@ impl LlmPlugin {
         if let CommandDataOptionValue::SubCommand(opts) = value
             && let Some(opt) = opts.first()
             && opt.name == "personality"
-            && let Some(new_personality) = opt.value.as_str()
+            && let Some(new_personality_name) = opt.value.as_str()
         {
-            let Ok(new_personality) = Personality::try_from(new_personality) else {
+            let Some(new_personality) = self
+                .personality_registry
+                .read()
+                .personalities_by_name
+                .get(new_personality_name)
+                .cloned()
+            else {
                 rpc.create_interaction_response(
                     rpc::context::current(),
                     interaction.id,
@@ -811,7 +916,7 @@ impl LlmPlugin {
                     serde_json::json!({
                         "type": 4,
                         "data": {
-                            "content": format!("Unknown personality `{new_personality}`")
+                            "content": format!("Unknown personality `{new_personality_name}`")
                         }
                     }),
                 )
@@ -828,7 +933,7 @@ impl LlmPlugin {
                 serde_json::json!({
                     "type": 4,
                     "data": {
-                        "content": format!("Personality changed to `{new_personality}`")
+                        "content": format!("Personality changed to `{new_personality_name}`")
                     }
                 }),
             )
