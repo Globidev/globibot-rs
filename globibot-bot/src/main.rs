@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     let mut discord_client =
         discord::client(&discord_token, application_id, ev_publisher.clone()).await?;
 
-    let publish_events = events::run_publisher(raw_ev_subscribers, ev_publisher);
+    let publish_events = ev_publisher.run(raw_ev_subscribers);
     let run_rpc_server = rpc::run_server(
         raw_rpc_clients,
         discord_client.cache.clone(),

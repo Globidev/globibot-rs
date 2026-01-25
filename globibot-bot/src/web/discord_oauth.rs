@@ -8,7 +8,7 @@ use axum::{
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Cookie};
 use globibot_core::{
-    serenity::{self, Error},
+    serenity,
     storage::{DiscordProfile, DiscordSession},
 };
 
@@ -210,7 +210,7 @@ async fn profile(State(mut server): State<WebServer>, jar: PrivateCookieJar) -> 
         .await
     {
         Ok(user) => user,
-        Err(Error::Http(err))
+        Err(serenity::Error::Http(err))
             if err
                 .status_code()
                 .is_some_and(|status| status.as_u16() == 404) =>
