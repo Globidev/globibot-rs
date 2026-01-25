@@ -170,7 +170,7 @@
         {@render memberInfo(userLore.member)}
 
         <textarea
-          rows="2"
+          rows={4}
           placeholder="No lore yet"
           disabled={userId === currentUserId}
           bind:value={loreForms[userId]}
@@ -261,6 +261,12 @@
   /* Helper to treat wrappers as transparent for the grid */
   .contents {
     display: contents;
+  }
+
+  textarea {
+    field-sizing: content;
+    min-height: 40px;
+    width: 100%;
   }
 
   .grid-container {
