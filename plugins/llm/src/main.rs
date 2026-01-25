@@ -290,40 +290,40 @@ async fn llm_lore_suggest(
         return (StatusCode::BAD_REQUEST, "Suggestion cannot be empty").into_response();
     }
 
-    let mut lore_book = llm_plugin.lore_book.write();
-    let user_lore = match lore_book.lore_by_user.get(&suggestion_req.for_user_id) {
-        Some(lore) => lore,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "You must have lore to suggest changes to it",
-            )
-                .into_response();
-        }
-    };
-
-    let suggestion = UserLoreSuggestion {
-        member: user_lore.member.clone(),
-        suggestion: suggestion_text.to_string(),
-        suggestion_by: profile.clone(),
-        votes_by_user_id: HashMap::new(),
-    };
-
-    let suggestions = lore_book
-        .suggestions_by_user
-        .entry(suggestion_req.for_user_id)
-        .or_default();
-
-    if let Some(existing_suggestion) = suggestions
-        .iter_mut()
-        .find(|s| s.suggestion_by.user_id == profile.user_id)
     {
-        existing_suggestion.suggestion = suggestion_text.to_string();
-    } else {
-        suggestions.push(suggestion);
-    }
+        let mut lore_book = llm_plugin.lore_book.write();
+        let user_lore = match lore_book.lore_by_user.get(&suggestion_req.for_user_id) {
+            Some(lore) => lore,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "You must have lore to suggest changes to it",
+                )
+                    .into_response();
+            }
+        };
 
-    drop(lore_book);
+        let suggestion = UserLoreSuggestion {
+            member: user_lore.member.clone(),
+            suggestion: suggestion_text.to_string(),
+            suggestion_by: profile.clone(),
+            votes_by_user_id: HashMap::new(),
+        };
+
+        let suggestions = lore_book
+            .suggestions_by_user
+            .entry(suggestion_req.for_user_id)
+            .or_default();
+
+        if let Some(existing_suggestion) = suggestions
+            .iter_mut()
+            .find(|s| s.suggestion_by.user_id == profile.user_id)
+        {
+            existing_suggestion.suggestion = suggestion_text.to_string();
+        } else {
+            suggestions.push(suggestion);
+        }
+    }
 
     llm_lore(State(llm_plugin)).await.into_response()
 }
@@ -348,37 +348,37 @@ async fn llm_lore_vote(
             .into_response();
     }
 
-    let mut lore_book = llm_plugin.lore_book.write();
-    let suggestions = match lore_book.suggestions_by_user.get_mut(&vote_req.for_user_id) {
-        Some(suggestions) => suggestions,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "No suggestions found for the specified user",
-            )
-                .into_response();
-        }
-    };
-
-    let suggestion = match suggestions
-        .iter_mut()
-        .find(|s| s.suggestion_by.user_id == vote_req.by_user_id)
     {
-        Some(suggestion) => suggestion,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "No suggestion found from the specified user",
-            )
-                .into_response();
-        }
-    };
+        let mut lore_book = llm_plugin.lore_book.write();
+        let suggestions = match lore_book.suggestions_by_user.get_mut(&vote_req.for_user_id) {
+            Some(suggestions) => suggestions,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "No suggestions found for the specified user",
+                )
+                    .into_response();
+            }
+        };
 
-    suggestion
-        .votes_by_user_id
-        .insert(profile.user_id, vote_req.vote);
+        let suggestion = match suggestions
+            .iter_mut()
+            .find(|s| s.suggestion_by.user_id == vote_req.by_user_id)
+        {
+            Some(suggestion) => suggestion,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "No suggestion found from the specified user",
+                )
+                    .into_response();
+            }
+        };
 
-    drop(lore_book);
+        suggestion
+            .votes_by_user_id
+            .insert(profile.user_id, vote_req.vote);
+    }
 
     llm_lore(State(llm_plugin)).await.into_response()
 }
@@ -402,41 +402,41 @@ async fn llm_lore_accept(
             .into_response();
     }
 
-    let mut lore_book = llm_plugin.lore_book.write();
-    let suggestions = match lore_book
-        .suggestions_by_user
-        .get_mut(&accept_req.for_user_id)
     {
-        Some(suggestions) => suggestions,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "No suggestions found for the specified user",
-            )
-                .into_response();
-        }
-    };
+        let mut lore_book = llm_plugin.lore_book.write();
+        let suggestions = match lore_book
+            .suggestions_by_user
+            .get_mut(&accept_req.for_user_id)
+        {
+            Some(suggestions) => suggestions,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "No suggestions found for the specified user",
+                )
+                    .into_response();
+            }
+        };
 
-    let suggestion_index = match suggestions
-        .iter()
-        .position(|s| s.suggestion_by.user_id == accept_req.by_user_id)
-    {
-        Some(index) => index,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "No suggestion found from the specified user",
-            )
-                .into_response();
-        }
-    };
+        let suggestion_index = match suggestions
+            .iter()
+            .position(|s| s.suggestion_by.user_id == accept_req.by_user_id)
+        {
+            Some(index) => index,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "No suggestion found from the specified user",
+                )
+                    .into_response();
+            }
+        };
 
-    let suggestion = suggestions.remove(suggestion_index);
-    if let Some(user_lore) = lore_book.lore_by_user.get_mut(&accept_req.for_user_id) {
-        user_lore.lore = suggestion.suggestion;
+        let suggestion = suggestions.remove(suggestion_index);
+        if let Some(user_lore) = lore_book.lore_by_user.get_mut(&accept_req.for_user_id) {
+            user_lore.lore = suggestion.suggestion;
+        }
     }
-
-    drop(lore_book);
 
     llm_lore(State(llm_plugin)).await.into_response()
 }
