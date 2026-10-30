@@ -1,4 +1,8 @@
+mod cooldown;
+mod fun;
 mod openrouter;
+mod settings;
+mod trivia;
 
 use anyhow::Context;
 use axum::{
@@ -9,16 +13,22 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Key};
+use cooldown::Cooldowns;
+use fun::{Vibe, sanitize_llm_output};
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
+use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
+use trivia::TriviaRounds;
 
 use std::{
     collections::{HashMap, VecDeque, hash_map::Entry},
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use globibot_core::{
@@ -27,7 +37,7 @@ use globibot_core::{
     rpc,
     serenity::all::{
         Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId, Member,
-        Message, UserId,
+        Message, ReactionType, ResolvedTarget, UserId,
     },
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
@@ -42,8 +52,6 @@ async fn main() -> anyhow::Result<()> {
     let cookie_secret = std::env::var("COOKIE_SECRET")?;
 
     let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")?.parse()?;
-    let desired_command: serde_json::Value =
-        serde_json::from_str(include_str!("../llm-slash-command.json"))?;
 
     let endpoints =
         common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
@@ -51,9 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let mut storage = RedisStorage::from_env().await?;
 
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
-        let command = rpc
-            .upsert_guild_command(rpc::context::current(), guild_id, desired_command)
-            .await??;
+        let commands = CommandIds::upsert_all(rpc, guild_id).await?;
 
         rpc.register_web_api(rpc::context::current(), web_addr_advertise)
             .await??;
@@ -70,13 +76,19 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to load LLM lore book")?
             .unwrap_or_default();
         let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
+        let settings = storage
+            .get_opt::<LlmSettings>(SETTINGS_KEY)
+            .await
+            .context("Failed to load LLM settings")?;
 
         LlmPlugin::from_env(
             guild_id,
-            command.id,
+            commands,
             members,
             lore_book,
             personality_registry,
+            settings,
+            storage.clone(),
         )
     })
     .await?;
@@ -221,6 +233,7 @@ async fn update_llm_settings(
     llm_plugin
         .context_window_size
         .store(settings.context_window_size, Ordering::Relaxed);
+    llm_plugin.save_settings().await;
 
     llm_settings(State(llm_plugin), Extension(profile))
         .await
@@ -275,6 +288,7 @@ async fn update_llm_personality(
     };
 
     *llm_plugin.personality.write() = new_personality;
+    llm_plugin.save_settings().await;
 
     llm_personality(State(llm_plugin)).await.into_response()
 }
@@ -295,52 +309,13 @@ async fn llm_lore_suggest(
     Extension(profile): Extension<DiscordProfile>,
     Json(suggestion_req): Json<LlmLoreSuggestionRequest>,
 ) -> impl IntoResponse {
-    if profile.user_id == suggestion_req.for_user_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            "You cannot suggest lore changes for yourself",
-        )
-            .into_response();
-    }
-
-    let suggestion_text = suggestion_req.suggestion.trim();
-    if suggestion_text.is_empty() {
-        return (StatusCode::BAD_REQUEST, "Suggestion cannot be empty").into_response();
-    }
-
-    {
-        let mut lore_book = llm_plugin.lore_book.write();
-        let user_lore = match lore_book.lore_by_user.get(&suggestion_req.for_user_id) {
-            Some(lore) => lore,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "You must have lore to suggest changes to it",
-                )
-                    .into_response();
-            }
-        };
-
-        let suggestion = UserLoreSuggestion {
-            member: user_lore.member.clone(),
-            suggestion: suggestion_text.to_string(),
-            suggestion_by: profile.clone(),
-            votes_by_user_id: HashMap::new(),
-        };
-
-        let suggestions = lore_book
-            .suggestions_by_user
-            .entry(suggestion_req.for_user_id)
-            .or_default();
-
-        if let Some(existing_suggestion) = suggestions
-            .iter_mut()
-            .find(|s| s.suggestion_by.user_id == profile.user_id)
-        {
-            existing_suggestion.suggestion = suggestion_text.to_string();
-        } else {
-            suggestions.push(suggestion);
-        }
+    let suggest_result = llm_plugin.lore_book.write().suggest(
+        suggestion_req.for_user_id,
+        profile,
+        &suggestion_req.suggestion,
+    );
+    if let Err(why) = suggest_result {
+        return (StatusCode::BAD_REQUEST, why).into_response();
     }
 
     llm_lore(State(llm_plugin)).await.into_response()
@@ -452,7 +427,7 @@ async fn llm_lore_accept(
 
         let suggestion = suggestions.remove(suggestion_index);
         if let Some(user_lore) = lore_book.lore_by_user.get_mut(&accept_req.for_user_id) {
-            user_lore.lore = suggestion.suggestion;
+            user_lore.lore = suggestion.applied_to(&user_lore.lore);
         }
     }
 
@@ -491,9 +466,11 @@ struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
     guild_id: GuildId,
-    command_id: CommandId,
+    commands: CommandIds,
+    starboard_channel_id: Option<ChannelId>,
 
     llm_client: openrouter::Client,
+    storage: RedisStorage,
 
     llm_model: RwLock<String>,
     personality: RwLock<Personality>,
@@ -501,8 +478,81 @@ struct LlmPlugin {
     contexts_by_channel: Mutex<HashMap<ChannelId, ChannelContext>>,
 
     context_window_size: AtomicUsize,
+    cooldowns: Cooldowns,
 
     lore_book: RwLock<LoreBook>,
+    trivia: TriviaRounds,
+}
+
+/// IDs of the commands the plugin registers in its guild
+#[derive(Debug)]
+struct CommandIds {
+    llm: CommandId,
+    add_user_context: CommandId,
+    add_to_lore: CommandId,
+    roast: CommandId,
+    hype: CommandId,
+    tldr: CommandId,
+    lore_trivia: CommandId,
+}
+
+impl CommandIds {
+    async fn upsert_all(rpc: &rpc::ProtocolClient, guild_id: GuildId) -> anyhow::Result<Self> {
+        async fn upsert(
+            rpc: &rpc::ProtocolClient,
+            guild_id: GuildId,
+            definition: &str,
+        ) -> anyhow::Result<CommandId> {
+            let data = serde_json::from_str(definition)?;
+            let command = rpc
+                .upsert_guild_command(rpc::context::current(), guild_id, data)
+                .await??;
+            Ok(command.id)
+        }
+
+        Ok(Self {
+            llm: upsert(rpc, guild_id, include_str!("../llm-slash-command.json")).await?,
+            add_user_context: upsert(
+                rpc,
+                guild_id,
+                include_str!("../add-user-context-slash-command.json"),
+            )
+            .await?,
+            add_to_lore: upsert(
+                rpc,
+                guild_id,
+                include_str!("../add-to-lore-message-command.json"),
+            )
+            .await?,
+            roast: upsert(rpc, guild_id, include_str!("../roast-slash-command.json")).await?,
+            hype: upsert(rpc, guild_id, include_str!("../hype-slash-command.json")).await?,
+            tldr: upsert(rpc, guild_id, include_str!("../tldr-slash-command.json")).await?,
+            lore_trivia: upsert(
+                rpc,
+                guild_id,
+                include_str!("../lore-trivia-slash-command.json"),
+            )
+            .await?,
+        })
+    }
+}
+
+/// Reads an optional environment variable, treating an empty value as unset
+fn optional_env<T>(key: &str) -> anyhow::Result<Option<T>>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(
+            value
+                .trim()
+                .parse()
+                .with_context(|| format!("Invalid value for {key}"))?,
+        )),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -514,7 +564,6 @@ struct Personality {
 #[derive(Debug)]
 struct PersonalityRegistry {
     personalities_by_name: HashMap<String, Personality>,
-    storage: storage::RedisStorage,
 }
 
 impl PersonalityRegistry {
@@ -550,12 +599,15 @@ impl PersonalityRegistry {
 
         Ok(Self {
             personalities_by_name,
-            storage,
         })
     }
 
+    /// The alphabetically first personality, so the fallback is the same on every restart
     fn default_personality(&self) -> Option<Personality> {
-        self.personalities_by_name.values().next().cloned()
+        self.personalities_by_name
+            .values()
+            .min_by(|a, b| a.name.cmp(&b.name))
+            .cloned()
     }
 }
 
@@ -611,6 +663,112 @@ Don't feel obligated to reference them in every response though.
 
         prompt
     }
+
+    /// Creates or replaces `suggestion_by`'s suggestion for `for_user_id`'s lore with a complete
+    /// new lore
+    fn suggest(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_by: DiscordProfile,
+        suggestion: &str,
+    ) -> Result<(), &'static str> {
+        let suggestion = self.check_suggestion(for_user_id, &suggestion_by, suggestion)?;
+
+        match self.pending_suggestion_mut(for_user_id, suggestion_by.user_id) {
+            Some(existing_suggestion) => {
+                existing_suggestion.suggestion = suggestion.to_string();
+                existing_suggestion.kind = SuggestionKind::Replace;
+            }
+            None => self.push_suggestion(
+                for_user_id,
+                suggestion_by,
+                suggestion,
+                SuggestionKind::Replace,
+            ),
+        }
+
+        Ok(())
+    }
+
+    /// Suggests adding `addition` to `for_user_id`'s lore, without replacing what's already there.
+    /// If `suggestion_by` already has a pending suggestion for that user, `addition` is added to it
+    fn suggest_addition(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_by: DiscordProfile,
+        addition: &str,
+    ) -> Result<(), &'static str> {
+        let addition = self.check_suggestion(for_user_id, &suggestion_by, addition)?;
+
+        match self.pending_suggestion_mut(for_user_id, suggestion_by.user_id) {
+            Some(existing_suggestion) => {
+                existing_suggestion.suggestion =
+                    append_lore(&existing_suggestion.suggestion, addition);
+            }
+            None => {
+                self.push_suggestion(for_user_id, suggestion_by, addition, SuggestionKind::Append)
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates a suggestion, returning its trimmed text
+    fn check_suggestion<'s>(
+        &self,
+        for_user_id: UserId,
+        suggestion_by: &DiscordProfile,
+        suggestion: &'s str,
+    ) -> Result<&'s str, &'static str> {
+        if suggestion_by.user_id == for_user_id {
+            return Err("You cannot suggest lore changes for yourself");
+        }
+
+        let suggestion = suggestion.trim();
+        if suggestion.is_empty() {
+            return Err("Suggestion cannot be empty");
+        }
+
+        if !self.lore_by_user.contains_key(&for_user_id) {
+            return Err("You must have lore to suggest changes to it");
+        }
+
+        Ok(suggestion)
+    }
+
+    fn pending_suggestion_mut(
+        &mut self,
+        for_user_id: UserId,
+        by_user_id: UserId,
+    ) -> Option<&mut UserLoreSuggestion> {
+        self.suggestions_by_user
+            .get_mut(&for_user_id)?
+            .iter_mut()
+            .find(|s| s.suggestion_by.user_id == by_user_id)
+    }
+
+    fn push_suggestion(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_by: DiscordProfile,
+        suggestion: &str,
+        kind: SuggestionKind,
+    ) {
+        let Some(user_lore) = self.lore_by_user.get(&for_user_id) else {
+            return;
+        };
+
+        self.suggestions_by_user
+            .entry(for_user_id)
+            .or_default()
+            .push(UserLoreSuggestion {
+                member: user_lore.member.clone(),
+                suggestion: suggestion.to_string(),
+                suggestion_by,
+                votes_by_user_id: HashMap::new(),
+                kind,
+            });
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -625,6 +783,44 @@ struct UserLoreSuggestion {
     suggestion: String,
     suggestion_by: DiscordProfile,
     votes_by_user_id: HashMap<UserId, SuggestionVote>,
+
+    // Defaulted so that lore books stored before this field existed still load
+    #[serde(default)]
+    kind: SuggestionKind,
+}
+
+impl UserLoreSuggestion {
+    /// The lore that results from accepting this suggestion on top of `lore`
+    fn applied_to(self, lore: &str) -> String {
+        match self.kind {
+            SuggestionKind::Replace => self.suggestion,
+            SuggestionKind::Append => append_lore(lore, &self.suggestion),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SuggestionKind {
+    /// The suggestion is the complete new lore
+    #[default]
+    Replace,
+    /// The suggestion is added to whatever the lore is when it gets accepted
+    Append,
+}
+
+fn append_lore(lore: &str, addition: &str) -> String {
+    let lore = lore.trim();
+    if lore.is_empty() {
+        return addition.to_string();
+    }
+
+    // Lore is rendered as a single line per user in the prompt, so join with a space
+    let separator = if lore.ends_with(['.', '!', '?']) {
+        " "
+    } else {
+        ". "
+    };
+    format!("{lore}{separator}{addition}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -640,20 +836,69 @@ struct ChannelContext {
     messages: VecDeque<openrouter::Message>,
 }
 
+fn suggested_addition_reply(for_user_id: UserId) -> String {
+    format!(
+        "Suggested an addition to <@{for_user_id}>'s lore. \
+        It can be voted on and accepted in the lore book: \
+        <https://globibot.com/plugins/llm#lore_book>"
+    )
+}
+
+async fn respond_ephemeral(
+    rpc: &rpc::ProtocolClient,
+    interaction: &CommandInteraction,
+    content: String,
+) -> anyhow::Result<()> {
+    rpc.create_interaction_response(
+        rpc::context::current(),
+        interaction.id,
+        interaction.token.clone(),
+        serde_json::json!({
+            "type": 4,
+            "data": {
+                "content": content,
+                // Ephemeral: only visible to the user who ran the command
+                "flags": 64
+            }
+        }),
+    )
+    .await??;
+    Ok(())
+}
+
+fn profile_from_member(member: &Member) -> DiscordProfile {
+    DiscordProfile {
+        user_id: member.user.id,
+        username: member.display_name().to_string(),
+        avatar_url: Some(
+            member
+                .avatar_url()
+                .or(member.user.avatar_url())
+                .unwrap_or(member.user.default_avatar_url()),
+        ),
+    }
+}
+
 impl LlmPlugin {
     fn from_env(
         guild_id: GuildId,
-        command_id: CommandId,
+        commands: CommandIds,
         members: Vec<Member>,
         mut lore_book: LoreBook,
         registry: PersonalityRegistry,
+        saved_settings: Option<LlmSettings>,
+        storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
+        const DEFAULT_USER_COOLDOWN_SECS: u64 = 10;
 
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
         let admin_id = std::env::var("LLM_ADMIN_USER_ID")?.parse()?;
-        let model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
+        let default_model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
         let llm_client = openrouter::Client::from_env()?;
+        let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
+        let user_cooldown_secs =
+            optional_env("LLM_USER_COOLDOWN_SECS")?.unwrap_or(DEFAULT_USER_COOLDOWN_SECS);
 
         for member in members {
             if member.user.bot {
@@ -661,16 +906,7 @@ impl LlmPlugin {
                 continue;
             }
 
-            let profile = DiscordProfile {
-                user_id: member.user.id,
-                username: member.display_name().to_string(),
-                avatar_url: Some(
-                    member
-                        .avatar_url()
-                        .or(member.user.avatar_url())
-                        .unwrap_or(member.user.default_avatar_url()),
-                ),
-            };
+            let profile = profile_from_member(&member);
 
             lore_book
                 .lore_by_user
@@ -682,22 +918,44 @@ impl LlmPlugin {
                 });
         }
 
-        let default_personality = registry
-            .default_personality()
-            .context("Default personality not found in registry")?;
+        // Saved settings win over the defaults, except for a personality that no longer exists
+        let saved_personality = saved_settings.as_ref().and_then(|settings| {
+            registry
+                .personalities_by_name
+                .get(&settings.personality)
+                .cloned()
+        });
+        let personality = match saved_personality {
+            Some(personality) => personality,
+            None => registry
+                .default_personality()
+                .context("Default personality not found in registry")?,
+        };
+        let model = saved_settings
+            .as_ref()
+            .map_or(default_model, |settings| settings.model.clone());
+        let context_window_size = saved_settings
+            .as_ref()
+            .map_or(DEFAULT_CONTEXT_WINDOW_SIZE, |settings| {
+                settings.context_window_size
+            });
 
         Ok(LlmPlugin {
             bot_id,
             admin_id,
             guild_id,
+            commands,
+            starboard_channel_id,
             llm_client,
+            storage,
             llm_model: RwLock::new(model),
-            personality: RwLock::new(default_personality),
+            personality: RwLock::new(personality),
             personality_registry: RwLock::new(registry),
             contexts_by_channel: <_>::default(),
-            command_id,
-            context_window_size: AtomicUsize::new(DEFAULT_CONTEXT_WINDOW_SIZE),
+            context_window_size: AtomicUsize::new(context_window_size),
+            cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
             lore_book: RwLock::new(lore_book),
+            trivia: TriviaRounds::default(),
         })
     }
 
@@ -737,6 +995,7 @@ impl LlmPlugin {
         self.register_message(rpc.clone(), message, user_llm_message)
             .await?;
         if let Ok(answer) = completion_res {
+            let answer = sanitize_llm_output(&answer);
             rpc.send_reply(ctx, message.channel_id, answer.clone(), message.id)
                 .await??;
 
@@ -818,6 +1077,86 @@ impl LlmPlugin {
         }
     }
 
+    async fn add_user_context(
+        &self,
+        rpc: rpc::ProtocolClient,
+        interaction: &CommandInteraction,
+    ) -> anyhow::Result<()> {
+        let options = &interaction.data.options;
+        let target_id = options
+            .iter()
+            .find(|opt| opt.name == "user")
+            .and_then(|opt| opt.value.as_user_id());
+        let context = options
+            .iter()
+            .find(|opt| opt.name == "context")
+            .and_then(|opt| opt.value.as_str());
+        let (Some(target_id), Some(context)) = (target_id, context) else {
+            return Ok(());
+        };
+
+        let suggestion_by = interaction
+            .member
+            .as_deref()
+            .map(profile_from_member)
+            .context("add-user-context was used outside of a guild")?;
+
+        let suggest_result =
+            self.lore_book
+                .write()
+                .suggest_addition(target_id, suggestion_by, context);
+        let content = match suggest_result {
+            Ok(()) => suggested_addition_reply(target_id),
+            Err(why) => why.to_string(),
+        };
+
+        respond_ephemeral(&rpc, interaction, content).await
+    }
+
+    async fn add_message_to_lore(
+        &self,
+        rpc: rpc::ProtocolClient,
+        interaction: &CommandInteraction,
+    ) -> anyhow::Result<()> {
+        const MAX_QUOTE_CHARS: usize = 300;
+
+        let Some(ResolvedTarget::Message(message)) = interaction.data.target() else {
+            return Ok(());
+        };
+
+        let author_id = message.author.id;
+        let quote = message.content.trim();
+
+        let content = if message.author.bot {
+            "Bots don't have lore".to_string()
+        } else if quote.is_empty() {
+            "That message has no text to add".to_string()
+        } else {
+            let mut quote = quote.chars().take(MAX_QUOTE_CHARS).collect::<String>();
+            if message.content.trim().chars().count() > MAX_QUOTE_CHARS {
+                quote.push('…');
+            }
+
+            let suggestion_by = interaction
+                .member
+                .as_deref()
+                .map(profile_from_member)
+                .context("Add to lore was used outside of a guild")?;
+
+            let suggest_result = self.lore_book.write().suggest_addition(
+                author_id,
+                suggestion_by,
+                &format!("Once said: \"{quote}\""),
+            );
+            match suggest_result {
+                Ok(()) => suggested_addition_reply(author_id),
+                Err(why) => why.to_string(),
+            }
+        };
+
+        respond_ephemeral(&rpc, interaction, content).await
+    }
+
     async fn show_model(
         &self,
         rpc: rpc::ProtocolClient,
@@ -869,6 +1208,7 @@ impl LlmPlugin {
             && let Some(new_model) = opt.value.as_str()
         {
             *self.llm_model.write() = new_model.trim().to_string();
+            self.save_settings().await;
             rpc.create_interaction_response(
                 rpc::context::current(),
                 interaction.id,
@@ -943,6 +1283,7 @@ impl LlmPlugin {
             };
 
             *self.personality.write() = new_personality;
+            self.save_settings().await;
 
             rpc.create_interaction_response(
                 rpc::context::current(),
@@ -973,8 +1314,48 @@ impl HandleEvents for LlmPlugin {
     type Err = anyhow::Error;
 
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
+        let commands = &self.commands;
+
         match event {
-            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+            Event::InteractionCreate { interaction }
+                if interaction.data.id == commands.add_user_context =>
+            {
+                self.add_user_context(rpc, &interaction).await?
+            }
+
+            Event::InteractionCreate { interaction }
+                if interaction.data.id == commands.add_to_lore =>
+            {
+                self.add_message_to_lore(rpc, &interaction).await?
+            }
+
+            Event::InteractionCreate { interaction } if interaction.data.id == commands.roast => {
+                self.vibe_check(rpc, &interaction, Vibe::Roast).await?
+            }
+
+            Event::InteractionCreate { interaction } if interaction.data.id == commands.hype => {
+                self.vibe_check(rpc, &interaction, Vibe::Hype).await?
+            }
+
+            Event::InteractionCreate { interaction } if interaction.data.id == commands.tldr => {
+                self.tldr(rpc, &interaction).await?
+            }
+
+            Event::InteractionCreate { interaction }
+                if interaction.data.id == commands.lore_trivia =>
+            {
+                self.start_lore_trivia(rpc, &interaction).await?
+            }
+
+            // Starboard posts come from another bot, so this is checked before bots are ignored
+            Event::MessageCreate { message }
+                if self.starboard_channel_id == Some(message.channel_id)
+                    && message.author.id != self.bot_id =>
+            {
+                self.comment_on_starboard(rpc, &message).await?
+            }
+
+            Event::InteractionCreate { interaction } if interaction.data.id == commands.llm => {
                 // dbg!(&interaction);
                 use CommandDataOptionValue::*;
                 let Some(sub_cmd) = interaction.data.options.first() else {
@@ -1009,6 +1390,8 @@ impl HandleEvents for LlmPlugin {
                     // Ignore messages outside of the configured guild
                     return Ok(());
                 }
+
+                self.check_trivia_guess(&rpc, &message).await?;
 
                 let user_name = message
                     .member
@@ -1051,7 +1434,20 @@ impl HandleEvents for LlmPlugin {
                 };
 
                 if message.mentions_user_id(self.bot_id) {
-                    self.answer_message(rpc, &message, user_llm_message).await?;
+                    if self.cooldowns.try_start(message.author.id).is_ok() {
+                        self.answer_message(rpc, &message, user_llm_message).await?;
+                    } else {
+                        // Still keep the message as context, and show why there's no answer
+                        self.register_message(rpc.clone(), &message, user_llm_message)
+                            .await?;
+                        rpc.create_reaction(
+                            rpc::context::current(),
+                            message.channel_id,
+                            message.id,
+                            ReactionType::Unicode("⏳".to_string()),
+                        )
+                        .await??;
+                    }
                 } else {
                     self.register_message(rpc, &message, user_llm_message)
                         .await?;
@@ -1097,3 +1493,96 @@ impl HandleEvents for LlmPlugin {
 //     }
 // }
 // use bot_command;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(id: u64) -> DiscordProfile {
+        DiscordProfile {
+            user_id: UserId::new(id),
+            username: format!("user{id}"),
+            avatar_url: None,
+        }
+    }
+
+    fn lore_book_with(lore: &str) -> LoreBook {
+        let mut lore_book = LoreBook::default();
+        lore_book.lore_by_user.insert(
+            UserId::new(1),
+            UserLore {
+                member: profile(1),
+                lore: lore.to_string(),
+            },
+        );
+        lore_book
+    }
+
+    fn accept(lore_book: &mut LoreBook, by_user_id: u64) {
+        let suggestions = lore_book
+            .suggestions_by_user
+            .get_mut(&UserId::new(1))
+            .unwrap();
+        let index = suggestions
+            .iter()
+            .position(|s| s.suggestion_by.user_id == UserId::new(by_user_id))
+            .unwrap();
+        let suggestion = suggestions.remove(index);
+        let user_lore = lore_book.lore_by_user.get_mut(&UserId::new(1)).unwrap();
+        user_lore.lore = suggestion.applied_to(&user_lore.lore);
+    }
+
+    fn lore(lore_book: &LoreBook) -> &str {
+        &lore_book.lore_by_user[&UserId::new(1)].lore
+    }
+
+    #[test]
+    fn addition_appends_to_lore_at_acceptance_time() {
+        let mut lore_book = lore_book_with("Likes cats");
+        lore_book
+            .suggest_addition(UserId::new(1), profile(2), "Hates mondays")
+            .unwrap();
+        lore_book
+            .suggest(UserId::new(1), profile(3), "Likes dogs.")
+            .unwrap();
+
+        accept(&mut lore_book, 3);
+        accept(&mut lore_book, 2);
+
+        assert_eq!(lore(&lore_book), "Likes dogs. Hates mondays");
+    }
+
+    #[test]
+    fn additions_from_the_same_user_accumulate() {
+        let mut lore_book = lore_book_with("");
+        lore_book
+            .suggest_addition(UserId::new(1), profile(2), "Likes cats")
+            .unwrap();
+        lore_book
+            .suggest_addition(UserId::new(1), profile(2), "Hates mondays")
+            .unwrap();
+
+        accept(&mut lore_book, 2);
+
+        assert_eq!(lore(&lore_book), "Likes cats. Hates mondays");
+    }
+
+    #[test]
+    fn cannot_suggest_for_yourself() {
+        let mut lore_book = lore_book_with("Likes cats");
+        let result = lore_book.suggest_addition(UserId::new(1), profile(1), "Is great");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stored_suggestions_without_kind_still_load_as_replace() {
+        let json = serde_json::json!({
+            "member": profile(1),
+            "suggestion": "Likes dogs",
+            "suggestion_by": profile(2),
+            "votes_by_user_id": {}
+        });
+        let suggestion: UserLoreSuggestion = serde_json::from_value(json).unwrap();
+        assert_eq!(suggestion.kind, SuggestionKind::Replace);
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "hype",
+  "description": "Have Globibot hype someone up",
+  "options": [
+    {
+      "name": "user",
+      "description": "Who to hype up",
+      "type": 6,
+      "required": true
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "tldr",
+  "description": "Summarize recent messages in this channel (only you will see it)",
+  "options": [
+    {
+      "name": "messages",
+      "description": "How many recent messages to cover (default 50)",
+      "type": 4,
+      "required": false,
+      "min_value": 5,
+      "max_value": 200
+    }
+  ]
+}
