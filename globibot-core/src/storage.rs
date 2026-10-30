@@ -45,6 +45,20 @@ impl RedisStorage {
         Ok(T::Format::from_extracted(extracted))
     }
 
+    /// Like [`Self::get`], but a missing key yields `Ok(None)` instead of an error
+    pub async fn get_opt<T: StorageValue>(
+        &mut self,
+        key: impl StorageSubkey,
+    ) -> Result<Option<T>, StorageError> {
+        let ns_key = StorageKey {
+            ns: T::REDIS_NS,
+            key,
+        };
+        let extracted: Option<<T::Format as StorageValueFormat<T>>::Extract> =
+            self.conn.get(ns_key).await?;
+        Ok(extracted.map(T::Format::from_extracted))
+    }
+
     pub async fn list_keys<Ns: StorageValue>(
         &mut self,
         pattern: &str,

@@ -1,5 +1,3 @@
-#![feature(vec_deque_truncate_front)]
-
 mod openrouter;
 
 use anyhow::Context;
@@ -64,7 +62,13 @@ async fn main() -> anyhow::Result<()> {
             .list_guild_members(rpc::context::current(), guild_id)
             .await??;
 
-        let lore_book = storage.get::<LoreBook>("latest").await.unwrap_or_default();
+        // Only default when the key is missing: a read or decode error must not lead to the
+        // periodic save overwriting the stored lore book with an empty one
+        let lore_book = storage
+            .get_opt::<LoreBook>("latest")
+            .await
+            .context("Failed to load LLM lore book")?
+            .unwrap_or_default();
         let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
 
         LlmPlugin::from_env(
@@ -758,20 +762,33 @@ impl LlmPlugin {
         Ok(())
     }
 
-    #[expect(clippy::await_holding_lock)] // 🔶 Fetch channel after releasing the lock
     async fn register_message(
         &self,
         rpc: rpc::ProtocolClient,
         message: &Message,
         llm_message: LlmMessage,
     ) -> anyhow::Result<()> {
+        // Fetch the channel before taking the lock: holding a blocking mutex across an RPC
+        // await can starve the runtime's worker threads
+        let is_new_channel = !self
+            .contexts_by_channel
+            .lock()
+            .contains_key(&message.channel_id);
+        let fetched_channel = if is_new_channel {
+            Some(
+                rpc.get_channel(rpc::context::current(), message.channel_id)
+                    .await??,
+            )
+        } else {
+            None
+        };
+
         let mut contexts_by_channel = self.contexts_by_channel.lock();
         let context = match contexts_by_channel.entry(message.channel_id) {
             Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
             Entry::Vacant(vacant_entry) => {
-                let channel = rpc
-                    .get_channel(rpc::context::current(), message.channel_id)
-                    .await??;
+                let channel = fetched_channel
+                    .context("Channel context vanished while registering message")?;
                 vacant_entry.insert(ChannelContext {
                     channel,
                     messages: VecDeque::new(),
@@ -783,7 +800,8 @@ impl LlmPlugin {
         messages.push_back(llm_message);
         let max_size = self.context_window_size.load(Ordering::Relaxed);
         if messages.len() > max_size {
-            messages.truncate_front(max_size);
+            let excess = messages.len() - max_size;
+            messages.drain(..excess);
         }
 
         Ok(())
