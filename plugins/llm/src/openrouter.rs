@@ -17,13 +17,13 @@ impl Client {
         })
     }
 
-    pub fn complete<Parts: IntoIterator<Item = Message> + Send>(
+    pub fn complete<Parts: IntoIterator<Item = Message> + Send, SessionId: Into<Option<String>>>(
         &self,
         model: &str,
-        session_id: String,
+        session_id: SessionId,
         system_prompt: String,
         parts: Parts,
-    ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts> {
+    ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts, SessionId> {
         let mut messages = vec![Message {
             role: Role::System,
             content: vec![ContentPart::Text(TextContentPart {
@@ -37,7 +37,7 @@ impl Client {
         let req = Request {
             model,
             messages,
-            session_id,
+            session_id: session_id.into(),
         };
 
         let request = self
@@ -72,7 +72,8 @@ const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 struct Request<'model> {
     model: &'model str,
     messages: Vec<Message>,
-    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

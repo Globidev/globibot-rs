@@ -31,9 +31,12 @@ impl LlmPlugin {
         };
 
         // Build the request before awaiting so the model's lock isn't held across the await
-        let completion =
-            self.llm_client
-                .complete(&self.llm_model.read(), self.system_prompt(), [message]);
+        let completion = self.llm_client.complete(
+            &self.llm_model.read(),
+            None,
+            self.system_prompt(),
+            [message],
+        );
         let answer = completion.await?;
 
         Ok(sanitize_llm_output(&answer))
