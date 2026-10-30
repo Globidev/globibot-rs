@@ -20,6 +20,7 @@ impl Client {
     pub fn complete<Parts: IntoIterator<Item = Message> + Send>(
         &self,
         model: &str,
+        session_id: String,
         system_prompt: String,
         parts: Parts,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts> {
@@ -33,7 +34,11 @@ impl Client {
 
         messages.extend(parts);
 
-        let req = Request { model, messages };
+        let req = Request {
+            model,
+            messages,
+            session_id,
+        };
 
         let request = self
             .http_client
@@ -67,6 +72,7 @@ const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 struct Request<'model> {
     model: &'model str,
     messages: Vec<Message>,
+    session_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

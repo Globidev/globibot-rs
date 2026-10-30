@@ -729,9 +729,12 @@ impl LlmPlugin {
         parts.push(user_llm_message.clone());
 
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
-        let completion =
-            self.llm_client
-                .complete(&self.llm_model.read(), self.system_prompt(), parts);
+        let completion = self.llm_client.complete(
+            &self.llm_model.read(),
+            message.channel_id.to_string(),
+            self.system_prompt(),
+            parts,
+        );
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
         self.register_message(rpc.clone(), message, user_llm_message)
