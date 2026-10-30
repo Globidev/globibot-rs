@@ -16,6 +16,8 @@
     suggestion: string;
     suggestion_by: DiscordMember;
     votes_by_user_id: Record<string, SuggestionVote>;
+    // Append suggestions are added to the lore when accepted instead of replacing it
+    kind: 'Replace' | 'Append';
   };
 
   type SuggestionVote = 'Up' | 'Down' | 'Omegalul';
@@ -39,7 +41,17 @@
 
   let initPromise = $state(loadData());
   let currentUserId = $derived(authStore.user?.user_id ?? '');
-  let isAllowedToAccept = $derived(currentUserId === '89108411861467136'); // 🔶 Make configurable
+  let isAllowedToAccept = $state(false);
+
+  // The plugin decides who the admin is (LLM_ADMIN_USER_ID), the settings tell us if it's us.
+  // The accept endpoint checks this again server side
+  async function loadIsAllowedToAccept(): Promise<void> {
+    const res = await fetch('/plugin-api/llm/settings');
+    if (!res.ok) return;
+    const settings: { allowed_to_edit?: boolean } = await res.json();
+    isAllowedToAccept = settings.allowed_to_edit === true;
+  }
+  loadIsAllowedToAccept();
   let searchQuery = $state('');
   let loreFilter = $state<'all' | 'lore_only' | 'no_lore_only'>('all');
 
@@ -194,6 +206,9 @@
             <div
               class="rounded border border-dashed border-gray-700 bg-gray-950 p-2 text-sm text-gray-300 italic"
             >
+              {#if sug.kind === 'Append'}
+                <span class="font-medium text-green-400 not-italic">➕ adds:</span>
+              {/if}
               {sug.suggestion}
             </div>
 
