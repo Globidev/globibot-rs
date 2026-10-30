@@ -801,8 +801,7 @@ impl LlmPlugin {
         messages.push_back(llm_message);
         let max_size = self.context_window_size.load(Ordering::Relaxed);
         if messages.len() > max_size {
-            let excess = messages.len() - max_size;
-            messages.drain(..excess);
+            messages.retain_back(max_size);
         }
 
         Ok(())
