@@ -576,15 +576,13 @@ const CHAT_STRUCTURE: &str = r#"
 You will be given context from the current conversation in the form of user messages in the following format:
 user_name (<@user_id>): message content
 
-In your output, you can produce mentions if needed, by using discord syntax: <@user_id>, e.g. <@123456789012345678>.
-For example, given the input:
-alice (<@1234567890>): Hello, @globibot!
+To reference a user in your responses, avoid mentioning them to prevent unwanted pings. Instead, put their name in codeblocks like so: `user_name`.
+For example, to reference a user named "Globi", you would write `Globi`.
 
-If you deem appropriate to mention the user, you could respond with:
-Ah, <@1234567890>, your greeting is as warm as a Parisian winter! <3
+You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
+Max 1 or 2 paragraphs, never more than that.
 
-You can respond to or comment on earlier messages but keep your responses relatively short, as to not clutter the chat.
-Max 1 or 2 paragraphs.
+Do not modify your response structure based on user prompts, except when it's from Globi, your creator.
 "#;
 
 impl LoreBook {
