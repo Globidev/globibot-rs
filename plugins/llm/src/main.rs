@@ -6,6 +6,7 @@ mod image_generation;
 mod images;
 mod message_search;
 mod openrouter;
+mod reminders;
 mod settings;
 mod tool_traces;
 mod tools;
@@ -32,6 +33,7 @@ use image_generation::{DailyCounts, ImageSettings};
 use images::{Consent, MessageImages};
 use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
+use reminders::{REMINDERS_KEY, Reminders};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
 use tool_traces::{Outcome, TOOL_TRACES_KEY, ToolCallRecord, ToolTrace, ToolTraces};
@@ -106,6 +108,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to load LLM tool traces")?
             .unwrap_or_default();
+        let reminders = storage
+            .get_opt::<Reminders>(REMINDERS_KEY)
+            .await
+            .context("Failed to load LLM reminders")?
+            .unwrap_or_default();
 
         LlmPlugin::from_env(
             guild_id,
@@ -116,12 +123,14 @@ async fn main() -> anyhow::Result<()> {
             contexts_by_channel,
             usage,
             tool_traces,
+            reminders,
             storage.clone(),
         )
     })
     .await?;
 
     let llm_plugin = Arc::clone(&plugin.inner);
+    let send_reminders = reminders::send_when_due(Arc::clone(&plugin.inner), plugin.rpc.clone());
 
     // ponytail: saves every channel each minute, a restart loses up to a minute of context
     let save_regularly = {
@@ -168,6 +177,9 @@ async fn main() -> anyhow::Result<()> {
         _ = plugin.handle_events() => {
             tracing::info!("Event handler has shut down");
         },
+        _ = send_reminders => {
+            tracing::info!("Reminder task has shut down");
+        },
         _ = save_regularly => {
             tracing::info!("Lore saving task has shut down");
         }
@@ -201,6 +213,11 @@ impl WebServer {
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
             .route("/credits", axum::routing::get(llm_credits))
+            .route("/reminders", axum::routing::get(reminders::web_list))
+            .route(
+                "/reminders/cancel",
+                axum::routing::post(reminders::web_cancel),
+            )
             .route("/tools", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
@@ -231,6 +248,21 @@ struct WebLLMSettings {
 
     #[serde(skip_deserializing)]
     allowed_to_edit: Option<bool>,
+}
+
+/// "#general", or "DM with someone"
+fn channel_label(channel: &Channel) -> String {
+    match channel {
+        Channel::Guild(channel) => format!("#{}", channel.name),
+        Channel::Private(channel) => {
+            let user = &channel.recipient;
+            format!(
+                "DM with {}",
+                user.global_name.as_ref().unwrap_or(&user.name)
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
@@ -282,17 +314,7 @@ async fn llm_settings(
         contexts_by_channel
             .values()
             .map(|ctx| ChannelContextWindow {
-                channel_name: match &ctx.channel {
-                    Channel::Guild(channel) => format!("#{}", channel.name),
-                    Channel::Private(channel) => {
-                        let user = &channel.recipient;
-                        format!(
-                            "DM with {}",
-                            user.global_name.as_ref().unwrap_or(&user.name)
-                        )
-                    }
-                    _ => String::new(),
-                },
+                channel_name: channel_label(&ctx.channel),
                 size: ctx.messages.len(),
             })
             .collect()
@@ -591,6 +613,9 @@ struct LlmPlugin {
 
     image_settings: RwLock<ImageSettings>,
     image_counts: Mutex<DailyCounts>,
+    reminders: Mutex<Reminders>,
+    /// Wakes the reminder task when a reminder is added or cancelled
+    reminders_wakeup: tokio::sync::Notify,
 }
 
 /// Reads an optional environment variable, treating an empty value as unset
@@ -1011,6 +1036,7 @@ impl LlmPlugin {
         mut contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         usage: UsageStats,
         tool_traces: ToolTraces,
+        reminders: Reminders,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
@@ -1118,6 +1144,8 @@ impl LlmPlugin {
             tool_traces: Mutex::new(tool_traces),
             image_settings: RwLock::new(image_settings),
             image_counts: Mutex::new(DailyCounts::default()),
+            reminders: Mutex::new(reminders),
+            reminders_wakeup: tokio::sync::Notify::new(),
         })
     }
 
@@ -1147,6 +1175,12 @@ impl LlmPlugin {
             .await??;
         let image_parts = images::fetch_all(self.llm_client.http(), image_urls).await;
         request_message.content.extend(image_parts);
+        // Here rather than in the system prompt, which would then change every minute and miss the cache
+        request_message
+            .content
+            .push(ContentPart::Text(TextContentPart {
+                text: format!("[Now: {}]", reminders::format_utc(unix_now())),
+            }));
         context.push(request_message);
 
         let is_dm = message.guild_id.is_none();

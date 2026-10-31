@@ -17,6 +17,7 @@ use crate::{
     image_generation, images,
     message_search::{self, parse_id},
     openrouter::ToolOutput,
+    reminders,
     tool_traces::{self, Outcome, ToolTrace, ToolTraces},
     usage::{self, Totals, UsageKind, UsageStats},
 };
@@ -37,6 +38,7 @@ pub fn tool_definitions(images_enabled: bool) -> Vec<Value> {
     definitions.extend(usage_tools());
     definitions.push(message_search::definition());
     definitions.extend(avatar_tools());
+    definitions.extend(reminders::definitions());
     if images_enabled {
         definitions.push(image_generation::definition());
     }
@@ -116,6 +118,15 @@ impl LlmPlugin {
         match name {
             "get_avatars" => match parse_args(args) {
                 Ok(GetAvatars { user_ids }) => self.avatars(rpc, asked.author.id, &user_ids).await,
+                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
+            },
+            "set_reminder" => match parse_args(args) {
+                Ok(set) => ToolOutput::text(self.set_reminder(asked, set).await),
+                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
+            },
+            "list_reminders" => ToolOutput::text(self.list_reminders(asked.author.id)),
+            "cancel_reminder" => match parse_args(args) {
+                Ok(cancel) => ToolOutput::text(self.cancel_reminder(asked.author.id, cancel).await),
                 Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
             },
             "generate_image" => match parse_args(args) {
