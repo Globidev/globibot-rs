@@ -10,7 +10,7 @@ use itertools::Itertools;
 use crate::{
     LlmPlugin,
     cooldown::cooldown_message,
-    openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart},
+    openrouter::{ContentPart, Message as LlmMessage, Role},
 };
 
 const LOST_TRAIN_OF_THOUGHT: &str = "Sorry, I lost my train of thought.";
@@ -24,13 +24,7 @@ pub enum Vibe {
 impl LlmPlugin {
     /// One-off completion with the current personality and lore, outside of any chat context
     pub async fn complete_one_shot(&self, prompt: String) -> anyhow::Result<String> {
-        let message = LlmMessage {
-            role: Role::User,
-            content: vec![ContentPart::Text(TextContentPart {
-                kind: "text",
-                text: prompt,
-            })],
-        };
+        let message = LlmMessage::text(Role::User, prompt);
 
         // Build the request before awaiting so the model's lock isn't held across the await
         let completion = self.llm_client.complete(
@@ -204,7 +198,7 @@ fn resolved_display_name(interaction: &CommandInteraction, user_id: UserId) -> S
         .unwrap_or_else(|| format!("<@{user_id}>"))
 }
 
-fn transcript_line(message: &LlmMessage) -> String {
+pub fn transcript_line(message: &LlmMessage) -> String {
     let text = message
         .content
         .iter()

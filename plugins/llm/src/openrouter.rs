@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     api_key: String,
     http_client: reqwest::Client,
@@ -24,13 +24,7 @@ impl Client {
         system_prompt: String,
         parts: Parts,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts, SessionId> {
-        let mut messages = vec![Message {
-            role: Role::System,
-            content: vec![ContentPart::Text(TextContentPart {
-                kind: "text",
-                text: system_prompt,
-            })],
-        }];
+        let mut messages = vec![Message::text(Role::System, system_prompt)];
 
         messages.extend(parts);
 
@@ -92,13 +86,13 @@ struct ReponseMessage {
     content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentPart>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -106,28 +100,65 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ContentPart {
+    #[serde(rename = "text")]
     Text(TextContentPart),
+    #[serde(rename = "image_url")]
     Image(ImageContentPart),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextContentPart {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageContentPart {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
     pub image_url: ImageUrl,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
+}
+
+impl Message {
+    pub fn text(role: Role, text: String) -> Self {
+        Self {
+            role,
+            content: vec![ContentPart::Text(TextContentPart { text })],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_parts_use_openrouter_format() {
+        let message = Message {
+            role: Role::User,
+            content: vec![
+                ContentPart::Text(TextContentPart { text: "hi".into() }),
+                ContentPart::Image(ImageContentPart {
+                    image_url: ImageUrl {
+                        url: "https://x".into(),
+                    },
+                }),
+            ],
+        };
+        let json = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "hi" },
+                { "type": "image_url", "image_url": { "url": "https://x" } }
+            ]
+        });
+        assert_eq!(serde_json::to_value(&message).unwrap(), json);
+        let parsed = serde_json::from_value::<Message>(json).unwrap();
+        assert!(matches!(&parsed.content[0], ContentPart::Text(part) if part.text == "hi"));
+    }
 }

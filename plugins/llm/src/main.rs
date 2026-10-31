@@ -1,4 +1,5 @@
 mod commands;
+mod context;
 mod cooldown;
 mod fun;
 mod openrouter;
@@ -18,6 +19,7 @@ use commands::{
     AddToLore, AddUserContext, Hype, Llm, LlmCommands, LoreTrivia, ModelCommand, PersonalityChoice,
     PersonalityCommand, Roast, Tldr,
 };
+use context::{ChannelContext, SavedContext};
 use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
@@ -27,7 +29,7 @@ use tokio::net::ToSocketAddrs;
 use trivia::TriviaRounds;
 
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     str::FromStr,
     sync::{
         Arc,
@@ -41,7 +43,7 @@ use globibot_core::{
     interaction::{CommandCtx, CommandInteractionExt},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, UserId},
+    serenity::all::{ChannelId, GuildId, Member, Message, ReactionType, UserId},
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
@@ -83,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             .get_opt::<LlmSettings>(SETTINGS_KEY)
             .await
             .context("Failed to load LLM settings")?;
+        let contexts_by_channel = load_contexts(rpc, &mut storage).await?;
 
         LlmPlugin::from_env(
             guild_id,
@@ -90,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
             lore_book,
             personality_registry,
             settings,
+            contexts_by_channel,
             storage.clone(),
         )
     })
@@ -97,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
 
     let llm_plugin = Arc::clone(&plugin.inner);
 
-    let save_lore_regularly = {
+    // ponytail: saves every channel each minute, a restart loses up to a minute of context
+    let save_regularly = {
         let plugin = Arc::clone(&plugin.inner);
         let mut storage = storage.clone();
         async move {
@@ -106,6 +111,18 @@ async fn main() -> anyhow::Result<()> {
                 let lore_book = plugin.lore_book.read().clone();
                 if let Err(err) = storage.set("latest", &lore_book).await {
                     tracing::error!("Failed to save LLM lore book: {err:?}");
+                }
+
+                let contexts = plugin
+                    .contexts_by_channel
+                    .lock()
+                    .iter()
+                    .map(|(channel_id, context)| (*channel_id, context.to_saved()))
+                    .collect_vec();
+                for (channel_id, context) in contexts {
+                    if let Err(err) = storage.set(channel_id, &context).await {
+                        tracing::error!(%channel_id, "Failed to save LLM context: {err:?}");
+                    }
                 }
             }
         }
@@ -120,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         _ = plugin.handle_events() => {
             tracing::info!("Event handler has shut down");
         },
-        _ = save_lore_regularly => {
+        _ = save_regularly => {
             tracing::info!("Lore saving task has shut down");
         }
     }
@@ -476,7 +493,7 @@ struct LlmPlugin {
     llm_model: RwLock<String>,
     personality: RwLock<Personality>,
     personality_registry: RwLock<PersonalityRegistry>,
-    contexts_by_channel: Mutex<HashMap<ChannelId, ChannelContext>>,
+    contexts_by_channel: Arc<Mutex<HashMap<ChannelId, ChannelContext>>>,
 
     context_window_size: AtomicUsize,
     cooldowns: Cooldowns,
@@ -578,6 +595,8 @@ user_name (<@user_id>): message content
 
 To reference a user in your responses, avoid mentioning them to prevent unwanted pings. Instead, put their name in codeblocks like so: `user_name`.
 For example, to reference a user named "Globi", you would write `Globi`.
+
+The conversation may start with a summary of older messages, starting with "[Summary of earlier messages in this channel]".
 
 You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
 Max 1 or 2 paragraphs, never more than that.
@@ -776,18 +795,37 @@ enum SuggestionVote {
     Down,
 }
 
-#[derive(Debug)]
-struct ChannelContext {
-    channel: Channel,
-    messages: VecDeque<openrouter::Message>,
-}
-
 fn suggested_addition_reply(for_user_id: UserId) -> String {
     format!(
         "Suggested an addition to <@{for_user_id}>'s lore. \
         It can be voted on and accepted in the lore book: \
         <https://globibot.com/plugins/llm#lore_book>"
     )
+}
+
+/// Contexts saved by a previous run. Channels that can't be fetched anymore are skipped.
+async fn load_contexts(
+    rpc: &rpc::ProtocolClient,
+    storage: &mut RedisStorage,
+) -> anyhow::Result<HashMap<ChannelId, ChannelContext>> {
+    let mut contexts = HashMap::new();
+    for key in storage.list_keys::<SavedContext>("*").await? {
+        let Ok(channel_id) = key.parse::<ChannelId>() else {
+            continue;
+        };
+        let saved = storage
+            .get::<SavedContext>(channel_id)
+            .await
+            .with_context(|| format!("Failed to load LLM context for channel {channel_id}"))?;
+        match rpc.get_channel(rpc::context::current(), channel_id).await? {
+            Ok(channel) => {
+                contexts.insert(channel_id, ChannelContext::from_saved(channel, saved));
+            }
+            Err(err) => tracing::warn!(%channel_id, "Skipping saved context: {err}"),
+        }
+    }
+    tracing::info!("Loaded {} saved channel contexts", contexts.len());
+    Ok(contexts)
 }
 
 fn profile_from_member(member: &Member) -> DiscordProfile {
@@ -810,6 +848,7 @@ impl LlmPlugin {
         mut lore_book: LoreBook,
         registry: PersonalityRegistry,
         saved_settings: Option<LlmSettings>,
+        contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
@@ -873,7 +912,7 @@ impl LlmPlugin {
             llm_model: RwLock::new(model),
             personality: RwLock::new(personality),
             personality_registry: RwLock::new(registry),
-            contexts_by_channel: <_>::default(),
+            contexts_by_channel: Arc::new(Mutex::new(contexts_by_channel)),
             context_window_size: AtomicUsize::new(context_window_size),
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
             lore_book: RwLock::new(lore_book),
@@ -924,13 +963,7 @@ impl LlmPlugin {
             rpc.send_reply(ctx, message.channel_id, answer.clone(), message.id)
                 .await??;
 
-            let bot_llm_message = LlmMessage {
-                role: Role::Assistant,
-                content: vec![ContentPart::Text(TextContentPart {
-                    kind: "text",
-                    text: answer,
-                })],
-            };
+            let bot_llm_message = LlmMessage::text(Role::Assistant, answer);
             self.register_message(rpc, message, bot_llm_message).await?;
         } else {
             tracing::error!("Failed to get LLM completion: {:?}", completion_res.err());
@@ -967,25 +1000,41 @@ impl LlmPlugin {
             None
         };
 
-        let mut contexts_by_channel = self.contexts_by_channel.lock();
-        let context = match contexts_by_channel.entry(message.channel_id) {
-            Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
-            Entry::Vacant(vacant_entry) => {
-                let channel = fetched_channel
-                    .context("Channel context vanished while registering message")?;
-                vacant_entry.insert(ChannelContext {
-                    channel,
-                    messages: VecDeque::new(),
-                })
+        let max_size = self.context_window_size.load(Ordering::Relaxed);
+        let (dropped, previous_summary) = {
+            let mut contexts_by_channel = self.contexts_by_channel.lock();
+            let context = match contexts_by_channel.entry(message.channel_id) {
+                Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+                Entry::Vacant(vacant_entry) => {
+                    let channel = fetched_channel
+                        .context("Channel context vanished while registering message")?;
+                    vacant_entry.insert(ChannelContext::new(channel))
+                }
+            };
+            match context.push(llm_message, max_size) {
+                Some(dropped) => (dropped, context.summary.clone()),
+                None => return Ok(()),
             }
         };
 
-        let messages = &mut context.messages;
-        messages.push_back(llm_message);
-        let max_size = self.context_window_size.load(Ordering::Relaxed);
-        if messages.len() > max_size {
-            messages.retain_back(max_size);
-        }
+        // Summarizing takes a few seconds: don't hold up the reply
+        let llm_client = self.llm_client.clone();
+        let model = self.llm_model.read().clone();
+        let contexts_by_channel = Arc::clone(&self.contexts_by_channel);
+        let channel_id = message.channel_id;
+        tokio::spawn(async move {
+            let summary = context::summarize(&llm_client, &model, previous_summary, &dropped).await;
+            match summary {
+                Ok(summary) => {
+                    if let Some(context) = contexts_by_channel.lock().get_mut(&channel_id) {
+                        context.summary = Some(summary);
+                    }
+                    tracing::info!(%channel_id, "Summarized {} dropped messages", dropped.len());
+                }
+                // The dropped messages are lost, the previous summary stays
+                Err(err) => tracing::error!(%channel_id, "Failed to summarize context: {err:?}"),
+            }
+        });
 
         Ok(())
     }
@@ -995,7 +1044,7 @@ impl LlmPlugin {
         let context = contexts_by_channel.get(&chan_id);
 
         if let Some(context) = context {
-            context.messages.iter().cloned().collect_vec()
+            context.prompt_messages()
         } else {
             vec![]
         }
@@ -1219,7 +1268,6 @@ impl HandleEvents for LlmPlugin {
 
                 let user_llm_message = {
                     let mut content = vec![ContentPart::Text(TextContentPart {
-                        kind: "text",
                         text: format!("{user_name} (<@{user_id}>): {content_safe}"),
                     })];
 
@@ -1227,7 +1275,6 @@ impl HandleEvents for LlmPlugin {
                         content.extend(message.attachments.iter().filter_map(|att| {
                             let _dims = att.dimensions()?;
                             Some(ContentPart::Image(ImageContentPart {
-                                kind: "image_url",
                                 image_url: openrouter::ImageUrl {
                                     url: att.url.clone(),
                                 },
@@ -1272,6 +1319,11 @@ impl HandleEvents for LlmPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_structure_explains_the_summary_tag() {
+        assert!(CHAT_STRUCTURE.contains(context::SUMMARY_TAG));
+    }
 
     fn profile(id: u64) -> DiscordProfile {
         DiscordProfile {
