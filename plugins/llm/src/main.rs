@@ -24,7 +24,7 @@ use commands::{
 use context::{ChannelContext, ContextMessage, SavedContext};
 use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
-use images::MessageImages;
+use images::{Consent, MessageImages};
 use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
 use settings::{LlmSettings, SETTINGS_KEY};
@@ -33,7 +33,7 @@ use trivia::TriviaRounds;
 use usage::{USAGE_KEY, UsageKind, UsageStats};
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     str::FromStr,
     sync::{
         Arc,
@@ -47,7 +47,7 @@ use globibot_core::{
     interaction::{CommandCtx, CommandInteractionExt},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, UserId},
+    serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, RoleId, UserId},
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
@@ -236,7 +236,10 @@ async fn llm_settings(
                     Channel::Guild(channel) => format!("#{}", channel.name),
                     Channel::Private(channel) => {
                         let user = &channel.recipient;
-                        format!("DM with {}", user.global_name.as_ref().unwrap_or(&user.name))
+                        format!(
+                            "DM with {}",
+                            user.global_name.as_ref().unwrap_or(&user.name)
+                        )
                     }
                     _ => String::new(),
                 },
@@ -506,6 +509,8 @@ struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
     guild_id: GuildId,
+    /// Members with this role agree to their images being sent to the model provider
+    images_role_id: Option<RoleId>,
     starboard_channel_id: Option<ChannelId>,
 
     llm_client: openrouter::Client,
@@ -620,6 +625,7 @@ For example, to reference a user named "Globi", you would write `Globi`.
 The conversation may start with a summary of older messages, starting with "[Summary of earlier messages in this channel]".
 
 Images appear as "[Image: description]" and GIFs as "[GIF: description]". When you are asked about an image, the image itself may be attached.
+"[Image not shared with the bot]" is an image you can't see: its author didn't agree to share it. Don't guess what it shows. People can share an image by pinging you in the message that has it.
 
 You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
 Max 1 or 2 paragraphs, never more than that.
@@ -875,7 +881,7 @@ impl LlmPlugin {
         mut lore_book: LoreBook,
         registry: PersonalityRegistry,
         saved_settings: Option<LlmSettings>,
-        contexts_by_channel: HashMap<ChannelId, ChannelContext>,
+        mut contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         usage: UsageStats,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
@@ -887,6 +893,24 @@ impl LlmPlugin {
         let default_model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
         let llm_client = openrouter::Client::from_env(usage)?;
         let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
+        let images_role_id: Option<RoleId> = optional_env("LLM_IMAGES_ROLE_ID")?;
+
+        // Consent can be withdrawn by dropping the role: forget what it covered
+        let role_holders = members
+            .iter()
+            .filter(|member| images_role_id.is_some_and(|role| member.roles.contains(&role)))
+            .map(|member| member.user.id)
+            .collect::<HashSet<_>>();
+        let forgotten: usize = contexts_by_channel
+            .values_mut()
+            .map(|context| {
+                context.forget_captions(|consent| match consent {
+                    Consent::Shared => true,
+                    Consent::Role(user_id) => role_holders.contains(&user_id),
+                })
+            })
+            .sum();
+        tracing::info!("Forgot {forgotten} image captions without consent");
         let user_cooldown_secs =
             optional_env("LLM_USER_COOLDOWN_SECS")?.unwrap_or(DEFAULT_USER_COOLDOWN_SECS);
 
@@ -934,6 +958,7 @@ impl LlmPlugin {
             bot_id,
             admin_id,
             guild_id,
+            images_role_id,
             starboard_channel_id,
             llm_client,
             storage,
@@ -1013,6 +1038,7 @@ impl LlmPlugin {
 
             let bot_message = ContextMessage {
                 id: None,
+                images_consent: None,
                 message: LlmMessage::text(Role::Assistant, answer),
             };
             self.register_message(rpc, message, bot_message).await?;
@@ -1026,18 +1052,27 @@ impl LlmPlugin {
 
     /// The images to show the model when answering `message`: its own, else those of the message
     /// it replies to, else the channel's latest ones if recent. With a label saying what they are.
-    fn images_to_show(
+    /// Only images whose author consents.
+    async fn images_to_show(
         &self,
+        rpc: &rpc::ProtocolClient,
         message: &Message,
         own_images: &MessageImages,
     ) -> (Option<String>, Vec<String>) {
+        // Answering means a ping or a DM: the asker shares their own images
         if !own_images.urls.is_empty() {
             return (None, own_images.urls.clone());
         }
 
         if let Some(replied_to) = &message.referenced_message {
             let images = MessageImages::of(replied_to);
-            if !images.urls.is_empty() {
+            let in_dm = message.guild_id.is_none();
+            let author = replied_to.author.id;
+            // Replying to your own image with a ping shares it now
+            let shared = replied_to.mentions_user_id(self.bot_id) || author == message.author.id;
+            let has_role = !in_dm && !shared && self.has_images_role(rpc, author).await;
+            if !images.urls.is_empty() && images::consent(in_dm, shared, author, has_role).is_some()
+            {
                 let label = "[Images from the message being replied to]".to_string();
                 return (Some(label), images.urls);
             }
@@ -1051,6 +1086,27 @@ impl LlmPlugin {
                 let label = format!("[The latest images, posted by {}]", images.author_name);
                 (Some(label), images.urls.clone())
             })
+    }
+
+    /// Whether a member has the images role. Looked up when not in the message, e.g. for the author
+    /// of a message replied to.
+    async fn has_images_role(&self, rpc: &rpc::ProtocolClient, user_id: UserId) -> bool {
+        let Some(role) = self.images_role_id else {
+            return false;
+        };
+        let member = async {
+            anyhow::Ok(
+                rpc.get_member(rpc::context::current(), self.guild_id, user_id)
+                    .await??,
+            )
+        };
+        match member.await {
+            Ok(member) => member.is_some_and(|member| member.roles.contains(&role)),
+            Err(err) => {
+                tracing::warn!(%user_id, "Failed to get member: {err}");
+                false
+            }
+        }
     }
 
     /// Remembers the images of `message` (already registered) and replaces their placeholder in
@@ -1392,6 +1448,22 @@ impl HandleEvents for LlmPlugin {
                     .replace("@rust-bot", "@globibot");
 
                 let images = MessageImages::of(&message);
+                let has_role = self.images_role_id.is_some_and(|role| {
+                    message
+                        .member
+                        .as_ref()
+                        .is_some_and(|member| member.roles.contains(&role))
+                });
+                let images_consent = (!images.urls.is_empty())
+                    .then(|| {
+                        images::consent(
+                            is_dm,
+                            message.mentions_user_id(self.bot_id),
+                            message.author.id,
+                            has_role,
+                        )
+                    })
+                    .flatten();
                 let stored_message = {
                     let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];
                     texts.extend(
@@ -1403,10 +1475,15 @@ impl HandleEvents for LlmPlugin {
                         texts.push("[Spoiler image]".to_string());
                     }
                     if !images.urls.is_empty() {
-                        texts.push(images.placeholder().to_string());
+                        texts.push(if images_consent.is_some() {
+                            images.placeholder().to_string()
+                        } else {
+                            images::NOT_SHARED.to_string()
+                        });
                     }
                     ContextMessage {
                         id: Some(message.id),
+                        images_consent,
                         message: LlmMessage {
                             role: Role::User,
                             content: texts
@@ -1422,16 +1499,16 @@ impl HandleEvents for LlmPlugin {
                 let answering = mentioned && self.cooldowns.try_start(message.author.id).is_ok();
 
                 // Taken before this message is added, which is sent separately with its images
-                let answer_input = answering.then(|| {
-                    (
-                        self.context_for_channel(message.channel_id),
-                        self.images_to_show(&message, &images),
-                    )
-                });
+                let answer_input = if answering {
+                    let context = self.context_for_channel(message.channel_id);
+                    Some((context, self.images_to_show(&rpc, &message, &images).await))
+                } else {
+                    None
+                };
 
                 self.register_message(rpc.clone(), &message, stored_message.clone())
                     .await?;
-                if !images.urls.is_empty() {
+                if images_consent.is_some() {
                     self.describe_images(&message, user_name, &images);
                 }
 
