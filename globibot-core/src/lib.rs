@@ -1,3 +1,4 @@
+pub mod command;
 pub mod events;
 pub mod plugin;
 pub mod rpc;
