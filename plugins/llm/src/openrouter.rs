@@ -68,7 +68,7 @@ impl Client {
         clippy::too_many_arguments,
         reason = "same arguments as complete, plus the tools"
     )]
-    pub async fn complete_with_tools<ToolRun: Future<Output = String> + Send>(
+    pub async fn complete_with_tools<ToolRun: Future<Output = ToolOutput> + Send>(
         &self,
         kind: UsageKind,
         model: String,
@@ -109,14 +109,29 @@ impl Client {
             }
 
             let mut results = Vec::new();
+            let mut images = Vec::new();
             for call in &message.tool_calls {
-                let text =
+                let output =
                     run_tool(call.function.name.clone(), call.function.arguments.clone()).await;
+                images.extend(output.images);
                 results.push(Message {
                     role: Role::Tool,
-                    content: vec![ContentPart::Text(TextContentPart { text })],
+                    content: vec![ContentPart::Text(TextContentPart { text: output.text })],
                     tool_calls: Vec::new(),
                     tool_call_id: Some(call.id.clone()),
+                });
+            }
+            // Most providers only take text in tool results: images follow as a user message
+            if !images.is_empty() {
+                let mut content = vec![ContentPart::Text(TextContentPart {
+                    text: "[Images from the tool calls above, in order]".to_string(),
+                })];
+                content.extend(images);
+                results.push(Message {
+                    role: Role::User,
+                    content,
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
                 });
             }
             req.messages.push(Message {
@@ -195,6 +210,23 @@ impl Client {
         }
 
         Ok((message, totals))
+    }
+}
+
+/// What a tool answers: text, and images to show the model
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+    pub text: String,
+    /// Inline images: only with their owner's consent (`images::consent`)
+    pub images: Vec<ContentPart>,
+}
+
+impl ToolOutput {
+    pub fn text(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
     }
 }
 

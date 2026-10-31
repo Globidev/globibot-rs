@@ -118,6 +118,22 @@ fn fit(width: u32, height: u32, max: u32) -> (u32, u32) {
     (scale(width), scale(height))
 }
 
+/// An avatar link (`Member::face`) as a small static image for the model: Discord's CDN
+/// resizes to `size`, and gives an animated avatar's first frame as WebP
+pub fn avatar_for_model(avatar_url: &str) -> String {
+    const AVATAR_SIZE: u32 = 256;
+
+    let Ok(mut url) = reqwest::Url::parse(avatar_url) else {
+        return avatar_url.to_string();
+    };
+    if let Some(stem) = url.path().strip_suffix(".gif") {
+        let path = format!("{stem}.webp");
+        url.set_path(&path);
+    }
+    url.set_query(Some(&format!("size={AVATAR_SIZE}")));
+    url.into()
+}
+
 /// What Tenor and Giphy links show, read from their URL: `tenor.com/view/cat-dancing-gif-123`
 /// is "cat dancing". Discord's GIF picker posts Tenor links, so that's most GIFs, for free.
 pub fn gif_descriptions(content: &str) -> Vec<String> {
@@ -287,6 +303,18 @@ mod tests {
             .collect::<Vec<_>>();
         let images = MessageImages::of(&message_with(attachments.into()));
         assert_eq!(images.urls.len(), MAX_IMAGES_PER_MESSAGE);
+    }
+
+    #[test]
+    fn avatars_become_small_still_images() {
+        assert_eq!(
+            avatar_for_model("https://cdn.discordapp.com/avatars/1/a_hash.gif?size=1024"),
+            "https://cdn.discordapp.com/avatars/1/a_hash.webp?size=256"
+        );
+        assert_eq!(
+            avatar_for_model("https://cdn.discordapp.com/embed/avatars/0.png"),
+            "https://cdn.discordapp.com/embed/avatars/0.png?size=256"
+        );
     }
 
     #[test]

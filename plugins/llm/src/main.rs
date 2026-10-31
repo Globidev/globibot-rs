@@ -1093,13 +1093,18 @@ impl LlmPlugin {
                 context.clone(),
                 &tools,
                 move |name, args| async move {
-                    let result = self.run_tool(rpc_ref, message, &name, &args).await;
+                    let output = self.run_tool(rpc_ref, message, &name, &args).await;
+                    // Traces keep text only: the images are noted
+                    let result = match output.images.len() {
+                        0 => output.text.clone(),
+                        count => format!("{}\n[{count} image(s) shown to the model]", output.text),
+                    };
                     calls_ref.lock().push(ToolCallRecord {
                         name,
                         arguments: args,
-                        result: result.clone(),
+                        result,
                     });
-                    result
+                    output
                 },
             )
             .await;

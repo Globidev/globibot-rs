@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use crate::{
     LlmPlugin, LoreBook,
     context::clamp_chars,
+    images,
     message_search::{self, parse_id},
+    openrouter::ToolOutput,
     tool_traces::{self, Outcome, ToolTrace, ToolTraces},
     usage::{self, Totals, UsageKind, UsageStats},
 };
@@ -33,6 +35,7 @@ pub fn tool_definitions() -> Vec<Value> {
     let mut definitions = lore_tools();
     definitions.extend(usage_tools());
     definitions.push(message_search::definition());
+    definitions.extend(avatar_tools());
     definitions
 }
 
@@ -99,6 +102,28 @@ impl LlmPlugin {
         asked: &Message,
         name: &str,
         args: &str,
+    ) -> ToolOutput {
+        #[derive(Deserialize)]
+        struct GetAvatars {
+            user_ids: Vec<String>,
+        }
+
+        match name {
+            "get_avatars" => match parse_args(args) {
+                Ok(GetAvatars { user_ids }) => self.avatars(rpc, asked.author.id, &user_ids).await,
+                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
+            },
+            _ => ToolOutput::text(self.run_text_tool(rpc, asked, name, args).await),
+        }
+    }
+
+    /// The tools that only answer with text
+    async fn run_text_tool(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        asked: &Message,
+        name: &str,
+        args: &str,
     ) -> String {
         #[derive(Deserialize)]
         struct GetUsage {
@@ -151,6 +176,98 @@ impl LlmPlugin {
 
         result.unwrap_or_else(|err| format!("Invalid arguments for {name}: {err}"))
     }
+
+    /// A link to each avatar, and the image itself when its owner consents, like images in
+    /// messages: asking about your own avatar shares it, others need the images role
+    async fn avatars(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        requester: UserId,
+        user_ids: &[String],
+    ) -> ToolOutput {
+        let mut output = ToolOutput::default();
+        let mut lines = Vec::new();
+        for raw_id in user_ids.iter().take(images::MAX_IMAGES_PER_MESSAGE) {
+            let Some(user_id) = parse_user_id(raw_id) else {
+                lines.push(format!("{raw_id}: not a user id"));
+                continue;
+            };
+            let member = match rpc
+                .get_member(rpc::context::current(), self.guild_id, user_id)
+                .await
+            {
+                Ok(Ok(Some(member))) => member,
+                Ok(Ok(None)) => {
+                    lines.push(format!("<@{user_id}>: not in the server"));
+                    continue;
+                }
+                Ok(Err(err)) => {
+                    lines.push(format!("<@{user_id}>: failed to get them: {}", err.0));
+                    continue;
+                }
+                Err(err) => {
+                    lines.push(format!("<@{user_id}>: failed to get them: {err}"));
+                    continue;
+                }
+            };
+
+            let avatar_url = member.face();
+            let who = format!("{} (<@{user_id}>): {avatar_url}", member.display_name());
+            let has_role = self
+                .images_role_id
+                .is_some_and(|role| member.roles.contains(&role));
+            if images::consent(false, user_id == requester, user_id, has_role).is_none() {
+                lines.push(format!(
+                    "{who}, not attached: they haven't agreed to share images with you"
+                ));
+                continue;
+            }
+            match images::fetch(
+                self.llm_client.http(),
+                &images::avatar_for_model(&avatar_url),
+            )
+            .await
+            {
+                Ok(image) => {
+                    output.images.push(image);
+                    lines.push(format!("{who}, attached as image {}", output.images.len()));
+                }
+                Err(err) => {
+                    tracing::warn!(%user_id, "Failed to download an avatar: {err:?}");
+                    lines.push(format!("{who}, not attached: the download failed"));
+                }
+            }
+        }
+
+        output.text = lines.join("\n");
+        output
+    }
+}
+
+fn avatar_tools() -> Vec<Value> {
+    vec![json!({
+        "type": "function",
+        "function": {
+            "name": "get_avatars",
+            "description": format!(
+                "Get the avatars (profile pictures) of people in the server: a link to each, and the image \
+                itself for you to look at when its owner agrees to share images with you. The person asking \
+                always shares their own. At most {} people.",
+                images::MAX_IMAGES_PER_MESSAGE
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Discord user ids"
+                    }
+                },
+                "required": ["user_ids"]
+            }
+        }
+    })]
 }
 
 /// Models sometimes send no arguments at all for a tool without required ones
