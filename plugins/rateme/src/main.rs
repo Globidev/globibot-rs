@@ -7,6 +7,7 @@ use globibot_core::{
     bot_command,
     command::{self, Command},
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
@@ -115,13 +116,12 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
                     None => return Ok(()),
                 };
 
+                let ctx = interaction.ctx(&rpc);
                 let CommandInteraction {
-                    id,
-                    token,
                     channel_id,
                     user: author,
                     ..
-                } = *interaction;
+                } = &*interaction;
 
                 let (target, user_to_rate) = match target {
                     Some(user_id) => {
@@ -142,50 +142,34 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
                     .avatar_url()
                     .unwrap_or_else(|| user_to_rate.default_avatar_url());
 
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    id,
-                    token.clone(),
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!(
-                                "{} hold on, I'm computing {} face…",
-                                author.mention(),
-                                whose_face
-                            ),
-                        }
-                    }),
-                )
-                .await??;
+                ctx.reply(format!(
+                    "{} hold on, I'm computing {} face…",
+                    author.mention(),
+                    whose_face
+                ))
+                .await?;
 
                 let gif = match self.generate_rating_gif(rate, &avatar_url).await {
                     Ok(gif) => gif,
                     Err(e) => {
                         tracing::error!("failed to generate gif: {}", &e);
-                        rpc.edit_interaction_response(
-                            rpc_context(),
-                            token,
-                            serde_json::json!({ "content":
-                                format!(
-                                    "I am unable to accurately compute the rating for some \
-                                    reason\nbut {} look like an __HB{}__ {}",
-                                    match target {
-                                        RateTarget::User(_) => "they",
-                                        RateTarget::Me => "you",
-                                    },
-                                    rate as u8,
-                                    rate.emote()
-                                ),
-                            }),
-                        )
-                        .await??;
+                        ctx.edit(format!(
+                            "I am unable to accurately compute the rating for some \
+                            reason\nbut {} look like an __HB{}__ {}",
+                            match target {
+                                RateTarget::User(_) => "they",
+                                RateTarget::Me => "you",
+                            },
+                            rate as u8,
+                            rate.emote()
+                        ))
+                        .await?;
                         return Err(e);
                     }
                 };
 
                 let p2message = rpc
-                    .send_file(rpc_context(), channel_id, gif, "rate.gif".to_owned())
+                    .send_file(rpc_context(), *channel_id, gif, "rate.gif".to_owned())
                     .await??;
 
                 tokio::time::sleep(Duration::from_secs(19)).await;

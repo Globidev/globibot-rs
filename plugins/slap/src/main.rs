@@ -6,6 +6,7 @@ use globibot_core::{
     bot_choices, bot_command,
     command::{self, Command},
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
@@ -156,13 +157,12 @@ impl HandleEvents for SlapPlugin {
                 };
                 let descriptor_idx = flavor.map(|flavor| flavor.value() as usize);
 
+                let ctx = interaction.ctx(&rpc);
                 let CommandInteraction {
-                    id,
-                    token,
                     channel_id,
                     user: author,
                     ..
-                } = *interaction;
+                } = &*interaction;
 
                 let slapper_avatar_url = author
                     .avatar_url()
@@ -173,28 +173,19 @@ impl HandleEvents for SlapPlugin {
                     .avatar_url()
                     .unwrap_or_else(|| user_to_slap.default_avatar_url());
 
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    id,
-                    token,
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!(
-                                "{} walks angrily towards {}",
-                                author.mention(), user_to_slap.mention()
-                            )
-                        }
-                    }),
-                )
-                .await??;
+                ctx.reply(format!(
+                    "{} walks angrily towards {}",
+                    author.mention(),
+                    user_to_slap.mention()
+                ))
+                .await?;
 
                 let gif = self
                     .generate_slapping_gif(&slapper_avatar_url, &slapped_avatar_url, descriptor_idx)
                     .await?;
                 tracing::info!("Sending gif of {} bytes", gif.len());
 
-                rpc.send_file(rpc_context(), channel_id, gif, "slap.gif".to_owned())
+                rpc.send_file(rpc_context(), *channel_id, gif, "slap.gif".to_owned())
                     .await??;
             }
             _ => (),

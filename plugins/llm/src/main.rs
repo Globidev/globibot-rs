@@ -38,11 +38,10 @@ use std::{
 
 use globibot_core::{
     events::{Event, EventType},
+    interaction::{CommandCtx, CommandInteractionExt},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::all::{
-        Channel, ChannelId, CommandInteraction, GuildId, Member, Message, ReactionType, UserId,
-    },
+    serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, UserId},
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
@@ -791,28 +790,6 @@ fn suggested_addition_reply(for_user_id: UserId) -> String {
     )
 }
 
-async fn respond_ephemeral(
-    rpc: &rpc::ProtocolClient,
-    interaction: &CommandInteraction,
-    content: String,
-) -> anyhow::Result<()> {
-    rpc.create_interaction_response(
-        rpc::context::current(),
-        interaction.id,
-        interaction.token.clone(),
-        serde_json::json!({
-            "type": 4,
-            "data": {
-                "content": content,
-                // Ephemeral: only visible to the user who ran the command
-                "flags": 64
-            }
-        }),
-    )
-    .await??;
-    Ok(())
-}
-
 fn profile_from_member(member: &Member) -> DiscordProfile {
     DiscordProfile {
         user_id: member.user.id,
@@ -1026,14 +1003,14 @@ impl LlmPlugin {
 
     async fn add_user_context(
         &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
+        ctx: &CommandCtx<'_>,
         AddUserContext {
             user: target_id,
             context,
         }: AddUserContext,
     ) -> anyhow::Result<()> {
-        let suggestion_by = interaction
+        let suggestion_by = ctx
+            .interaction
             .member
             .as_deref()
             .map(profile_from_member)
@@ -1048,13 +1025,12 @@ impl LlmPlugin {
             Err(why) => why.to_string(),
         };
 
-        respond_ephemeral(&rpc, interaction, content).await
+        Ok(ctx.reply_ephemeral(content).await?)
     }
 
     async fn add_message_to_lore(
         &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
+        ctx: &CommandCtx<'_>,
         AddToLore { message }: AddToLore,
     ) -> anyhow::Result<()> {
         const MAX_QUOTE_CHARS: usize = 300;
@@ -1072,7 +1048,8 @@ impl LlmPlugin {
                 quote.push('…');
             }
 
-            let suggestion_by = interaction
+            let suggestion_by = ctx
+                .interaction
                 .member
                 .as_deref()
                 .map(profile_from_member)
@@ -1089,99 +1066,47 @@ impl LlmPlugin {
             }
         };
 
-        respond_ephemeral(&rpc, interaction, content).await
+        Ok(ctx.reply_ephemeral(content).await?)
     }
 
-    async fn show_model(
-        &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<()> {
-        rpc.create_interaction_response(
-            rpc::context::current(),
-            interaction.id,
-            interaction.token.clone(),
-            serde_json::json!({
-                "type": 4,
-                "data": {
-                    "content": format!(
-                        "Current model is set to `{}`",
-                        self.llm_model.read()
-                    )
-                }
-            }),
-        )
-        .await??;
+    async fn show_model(&self, ctx: &CommandCtx<'_>) -> anyhow::Result<()> {
+        ctx.reply(format!(
+            "Current model is set to `{}`",
+            self.llm_model.read()
+        ))
+        .await?;
         Ok(())
     }
 
-    async fn set_model(
-        &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
-        new_model: String,
-    ) -> anyhow::Result<()> {
-        if interaction.user.id != self.admin_id {
-            rpc.create_interaction_response(
-                rpc::context::current(),
-                interaction.id,
-                interaction.token.clone(),
-                serde_json::json!({
-                    "type": 4,
-                    "data": {
-                        "content": format!("You do not have permission to change the model. ask <@{}>", self.admin_id)
-                    }
-                }),
-            )
-            .await??;
+    async fn set_model(&self, ctx: &CommandCtx<'_>, new_model: String) -> anyhow::Result<()> {
+        if ctx.interaction.user.id != self.admin_id {
+            ctx.reply(format!(
+                "You do not have permission to change the model. ask <@{}>",
+                self.admin_id
+            ))
+            .await?;
             return Ok(());
         }
 
         *self.llm_model.write() = new_model.trim().to_string();
         self.save_settings().await;
-        rpc.create_interaction_response(
-            rpc::context::current(),
-            interaction.id,
-            interaction.token.clone(),
-            serde_json::json!({
-                "type": 4,
-                "data": {
-                    "content": format!("Model changed to `{new_model}`")
-                }
-            }),
-        )
-        .await??;
+        ctx.reply(format!("Model changed to `{new_model}`")).await?;
 
         Ok(())
     }
 
-    async fn show_personality(
-        &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<()> {
-        rpc.create_interaction_response(
-            rpc::context::current(),
-            interaction.id,
-            interaction.token.clone(),
-            serde_json::json!({
-                "type": 4,
-                "data": {
-                    "content": format!(
-                        "Current personality is set to `{}`",
-                        self.personality.read().name
-                    )
-                }
-            }),
-        )
-        .await??;
+    async fn show_personality(&self, ctx: &CommandCtx<'_>) -> anyhow::Result<()> {
+        ctx.reply(format!(
+            "Current personality is set to `{}`",
+            self.personality.read().name
+        ))
+        .await?;
         Ok(())
     }
 
     async fn set_personality(
         &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
+        ctx: &CommandCtx<'_>,
         choice: PersonalityChoice,
     ) -> anyhow::Result<()> {
         let new_personality_name = choice.value();
@@ -1192,36 +1117,16 @@ impl LlmPlugin {
             .get(&new_personality_name)
             .cloned()
         else {
-            rpc.create_interaction_response(
-                rpc::context::current(),
-                interaction.id,
-                interaction.token.clone(),
-                serde_json::json!({
-                    "type": 4,
-                    "data": {
-                        "content": format!("Unknown personality `{new_personality_name}`")
-                    }
-                }),
-            )
-            .await??;
+            ctx.reply(format!("Unknown personality `{new_personality_name}`"))
+                .await?;
             return Ok(());
         };
 
         *self.personality.write() = new_personality;
         self.save_settings().await;
 
-        rpc.create_interaction_response(
-            rpc::context::current(),
-            interaction.id,
-            interaction.token.clone(),
-            serde_json::json!({
-                "type": 4,
-                "data": {
-                    "content": format!("Personality changed to `{new_personality_name}`")
-                }
-            }),
-        )
-        .await??;
+        ctx.reply(format!("Personality changed to `{new_personality_name}`"))
+            .await?;
 
         Ok(())
     }
@@ -1249,38 +1154,34 @@ impl HandleEvents for LlmPlugin {
                     None => return Ok(()),
                 };
 
-                let interaction = &interaction;
+                let ctx = interaction.ctx(&rpc);
                 match command {
                     LlmCommands::Llm(Llm::Model(ModelCommand::Show)) => {
-                        self.show_model(rpc, interaction).await?
+                        self.show_model(&ctx).await?
                     }
                     LlmCommands::Llm(Llm::Model(ModelCommand::Set { model })) => {
-                        self.set_model(rpc, interaction, model).await?
+                        self.set_model(&ctx, model).await?
                     }
                     LlmCommands::Llm(Llm::Personality(PersonalityCommand::Show)) => {
-                        self.show_personality(rpc, interaction).await?
+                        self.show_personality(&ctx).await?
                     }
                     LlmCommands::Llm(Llm::Personality(PersonalityCommand::Set { personality })) => {
-                        self.set_personality(rpc, interaction, personality).await?
+                        self.set_personality(&ctx, personality).await?
                     }
                     LlmCommands::AddUserContext(command) => {
-                        self.add_user_context(rpc, interaction, command).await?
+                        self.add_user_context(&ctx, command).await?
                     }
                     LlmCommands::AddToLore(command) => {
-                        self.add_message_to_lore(rpc, interaction, command).await?
+                        self.add_message_to_lore(&ctx, command).await?
                     }
                     LlmCommands::Roast(Roast { user }) => {
-                        self.vibe_check(rpc, interaction, user, Vibe::Roast).await?
+                        self.vibe_check(&ctx, user, Vibe::Roast).await?
                     }
                     LlmCommands::Hype(Hype { user }) => {
-                        self.vibe_check(rpc, interaction, user, Vibe::Hype).await?
+                        self.vibe_check(&ctx, user, Vibe::Hype).await?
                     }
-                    LlmCommands::Tldr(Tldr { messages }) => {
-                        self.tldr(rpc, interaction, messages).await?
-                    }
-                    LlmCommands::LoreTrivia(LoreTrivia) => {
-                        self.start_lore_trivia(rpc, interaction).await?
-                    }
+                    LlmCommands::Tldr(Tldr { messages }) => self.tldr(&ctx, messages).await?,
+                    LlmCommands::LoreTrivia(LoreTrivia) => self.start_lore_trivia(&ctx).await?,
                 }
             }
 

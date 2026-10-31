@@ -7,6 +7,7 @@ use common::anyhow::Context;
 use globibot_core::{
     bot_command, bot_commands,
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     storage::RedisStorage,
@@ -16,10 +17,6 @@ use tokio::sync::Mutex;
 use web::WebServer;
 
 type PluginError = Box<dyn Error + Send + Sync>;
-
-/// Interaction response type that opens the application's Activity for the
-/// user. Serenity 0.12 has no builder for it, but the RPC forwards raw JSON.
-const LAUNCH_ACTIVITY: u8 = 12;
 
 const DESCRIPTION: &str = "Play today's mini crossword and compete on the server leaderboard";
 
@@ -117,13 +114,7 @@ impl HandleEvents for CrosswordPlugin {
             Event::InteractionCreate { interaction }
                 if CrosswordCommands::parse(&interaction).is_some() =>
             {
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    interaction.id,
-                    interaction.token.clone(),
-                    serde_json::json!({ "type": LAUNCH_ACTIVITY }),
-                )
-                .await??;
+                interaction.ctx(&rpc).launch_activity().await?;
                 tracing::info!(user = %interaction.user.id, "Launched crossword Activity");
             }
             _ => (),

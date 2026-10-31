@@ -5,6 +5,7 @@ use globibot_core::{
     bot_choices, bot_command,
     command::{self, Command},
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
@@ -202,13 +203,12 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                 };
                 let gif_idx = flavor.map(|flavor| flavor.value() as usize);
 
+                let ctx = interaction.ctx(&rpc);
                 let CommandInteraction {
-                    id,
-                    token,
                     channel_id,
                     user: author,
                     ..
-                } = *interaction;
+                } = &*interaction;
 
                 let tucker_avatar_url = author
                     .avatar_url()
@@ -219,28 +219,19 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                     .avatar_url()
                     .unwrap_or_else(|| user_to_tuck.default_avatar_url());
 
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    id,
-                    token.clone(),
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!(
-                                "{} is fetching some blankets for {}",
-                                author.mention(), user_id_to_tuck.mention()
-                            )
-                        }
-                    }),
-                )
-                .await??;
+                ctx.reply(format!(
+                    "{} is fetching some blankets for {}",
+                    author.mention(),
+                    user_id_to_tuck.mention()
+                ))
+                .await?;
 
                 let gif = self
                     .generate_tucking_gif(&tucker_avatar_url, &tucked_avatar_url, gif_idx)
                     .await?;
                 tracing::info!("Sending gif of {} bytes", gif.len());
 
-                rpc.send_file(rpc_context(), channel_id, gif, "tuck.gif".to_owned())
+                rpc.send_file(rpc_context(), *channel_id, gif, "tuck.gif".to_owned())
                     .await??;
             }
             _ => (),
