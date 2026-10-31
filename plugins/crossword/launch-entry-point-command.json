@@ -1,0 +1,6 @@
+{
+    "name": "launch",
+    "description": "Play today's mini crossword and compete on the server leaderboard",
+    "type": 4,
+    "handler": 1
+}

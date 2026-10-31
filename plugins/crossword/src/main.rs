@@ -34,12 +34,18 @@ async fn main() -> common::anyhow::Result<()> {
 
     let desired_command: serde_json::Value =
         serde_json::from_str(include_str!("../crossword-slash-command.json"))?;
+    // App Launcher entry. Handled by us (not Discord) so launching doesn't post an invite card.
+    let desired_entry_point: serde_json::Value =
+        serde_json::from_str(include_str!("../launch-entry-point-command.json"))?;
 
     let mut storage = RedisStorage::from_env().await?;
 
     let plugin = CrosswordPlugin::connect_init(endpoints, async |rpc| {
         let command = rpc
             .upsert_global_command(rpc_context(), desired_command)
+            .await??;
+        let entry_point = rpc
+            .upsert_global_command(rpc_context(), desired_entry_point)
             .await??;
 
         rpc.register_web_api(rpc_context(), web_addr_advertise)
@@ -52,7 +58,7 @@ async fn main() -> common::anyhow::Result<()> {
             .unwrap_or_default();
 
         common::anyhow::Ok(CrosswordPlugin {
-            command_id: command.id,
+            command_ids: [command.id, entry_point.id],
             results: Mutex::new(results),
         })
     })
@@ -83,7 +89,7 @@ async fn main() -> common::anyhow::Result<()> {
 /// repo) served as this application's Activity, so Activities must be enabled
 /// for the app in the Developer Portal. That app reports solves to `/results`.
 pub struct CrosswordPlugin {
-    command_id: CommandId,
+    command_ids: [CommandId; 2],
     results: Mutex<CrosswordResults>,
 }
 
@@ -99,7 +105,7 @@ impl HandleEvents for CrosswordPlugin {
 
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
-            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+            Event::InteractionCreate { interaction } if self.command_ids.contains(&interaction.data.id) => {
                 rpc.create_interaction_response(
                     rpc_context(),
                     interaction.id,
