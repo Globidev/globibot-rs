@@ -27,6 +27,8 @@ pub enum UsageKind {
     Summary,
     /// Descriptions of posted images
     Caption,
+    /// Images made with the `generate_image` tool
+    ImageGeneration,
 }
 
 /// The `usage` object of an OpenRouter response

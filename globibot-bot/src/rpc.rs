@@ -2,8 +2,8 @@ use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
 use globibot_core::rpc::{
-    self, AcceptError, DiscordApiError, MessageSearch, MessageSearchResults, RegisterWebApiError,
-    TypingKey,
+    self, AcceptError, DiscordApiError, FileAttachment, MessageSearch, MessageSearchResults,
+    RegisterWebApiError, TypingKey,
 };
 use globibot_core::serenity::all::{
     ChannelType, CommandId, CreateAttachment, CreateMessage, EditMessage, Guild, GuildChannel,
@@ -231,6 +231,25 @@ impl Protocol for Server {
         Ok(chan_id
             .send_message(self.discord_http, CreateMessage::new().add_file(attachment))
             .await?)
+    }
+
+    async fn send_message_with_files(
+        self,
+        _ctx: Context,
+        chan_id: ChannelId,
+        content: String,
+        reply_to: Option<MessageId>,
+        files: Vec<FileAttachment>,
+    ) -> DiscordApiResult<Message> {
+        let mut message = CreateMessage::new().content(content).add_files(
+            files
+                .into_iter()
+                .map(|file| CreateAttachment::bytes(file.data, file.name)),
+        );
+        if let Some(reference) = reply_to {
+            message = message.reference_message((chan_id, reference));
+        }
+        Ok(chan_id.send_message(self.discord_http, message).await?)
     }
 
     async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<TypingKey> {

@@ -11,7 +11,14 @@
     cost: number;
   };
 
-  type Kind = 'chat' | 'command' | 'starboard' | 'summary' | 'caption' | 'direct_message';
+  type Kind =
+    | 'chat'
+    | 'command'
+    | 'starboard'
+    | 'summary'
+    | 'caption'
+    | 'direct_message'
+    | 'image_generation';
 
   type Usage = {
     /** Keyed by UTC day number (days since the Unix epoch) */
@@ -26,7 +33,8 @@
     { id: 'starboard', name: 'Starboard', color: '#199e70' },
     { id: 'summary', name: 'Summaries', color: '#c98500' },
     { id: 'caption', name: 'Image captions', color: '#d55181' },
-    { id: 'direct_message', name: 'DM replies', color: '#008300' }
+    { id: 'direct_message', name: 'DM replies', color: '#008300' },
+    { id: 'image_generation', name: 'Generated images', color: '#9085e9' }
   ];
   const HIT_RATE_COLOR = '#9085e9';
   const KIND_NAMES = Object.fromEntries(KINDS.map((k) => [k.id, k.name])) as Record<Kind, string>;

@@ -3,6 +3,9 @@
     model: string;
     prompt: string;
     context_window_size: number;
+    image_model: string;
+    image_generation_enabled: boolean;
+    images_per_user_per_day: number;
     context_windows_by_channel: ChannelContextWindow[];
     allowed_to_edit: boolean;
   };
@@ -87,6 +90,44 @@
         id="window"
         type="number"
         bind:value={formData.context_window_size}
+        class="w-full rounded border border-gray-700 bg-gray-900 p-2 text-white transition-colors outline-none focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+
+      <label for="image-enabled" class="font-medium whitespace-nowrap text-gray-400">
+        Image generation
+      </label>
+      <label class="flex cursor-pointer items-center gap-2 text-sm text-gray-300">
+        <input
+          disabled={!formData.allowed_to_edit}
+          id="image-enabled"
+          type="checkbox"
+          bind:checked={formData.image_generation_enabled}
+          class="w-auto! disabled:cursor-not-allowed"
+        />
+        Let the bot make images when asked
+      </label>
+
+      <label for="image-model" class="font-medium whitespace-nowrap text-gray-400">
+        Image model
+      </label>
+      <input
+        disabled={!formData.allowed_to_edit}
+        id="image-model"
+        type="text"
+        bind:value={formData.image_model}
+        placeholder="e.g. google/gemini-3.1-flash-image"
+        class="w-full rounded border border-gray-700 bg-gray-900 p-2 text-white transition-colors outline-none focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+
+      <label for="images-per-day" class="font-medium whitespace-nowrap text-gray-400">
+        Images per person per day
+      </label>
+      <input
+        disabled={!formData.allowed_to_edit}
+        id="images-per-day"
+        type="number"
+        min="0"
+        bind:value={formData.images_per_user_per_day}
         class="w-full rounded border border-gray-700 bg-gray-900 p-2 text-white transition-colors outline-none focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
       />
 
