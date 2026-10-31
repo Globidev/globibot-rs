@@ -81,6 +81,46 @@ pub trait Protocol {
     async fn list_guild_members(guild_id: GuildId) -> DiscordApiResult<Vec<Member>>;
     /// `None` if the user isn't in the guild
     async fn get_member(guild_id: GuildId, user_id: UserId) -> DiscordApiResult<Option<Member>>;
+
+    /// Discord's message search, only in channels `reader` can read. With `public_only`, also
+    /// only in channels everyone in the guild can read, for results shown in a public channel.
+    /// NSFW channels are left out.
+    async fn search_guild_messages(
+        guild_id: GuildId,
+        reader: UserId,
+        public_only: bool,
+        search: MessageSearch,
+    ) -> DiscordApiResult<MessageSearchResults>;
+}
+
+/// Filters of Discord's message search. Empty lists and `None`s don't filter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageSearch {
+    /// Words to look for
+    pub content: Option<String>,
+    pub author_ids: Vec<UserId>,
+    /// Messages that mention one of these users
+    pub mentions: Vec<UserId>,
+    /// Narrows down the channels the reader can read
+    pub channel_ids: Vec<ChannelId>,
+    /// What messages contain: `image`, `link`, `file`, `video`, `embed`, `poll`, ...
+    pub has: Vec<String>,
+    /// Only messages after this one, or after the time this id was made at
+    pub min_id: Option<MessageId>,
+    pub max_id: Option<MessageId>,
+    /// Oldest first instead of newest first
+    pub oldest_first: bool,
+    /// 1 to 25
+    pub limit: u8,
+    pub offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageSearchResults {
+    /// Every match, not only the returned ones. Discord says it can be off while messages are
+    /// sent or deleted.
+    pub total_results: u64,
+    pub messages: Vec<Message>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]

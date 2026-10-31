@@ -237,7 +237,7 @@ pub async fn summarize(
     Ok(clamp_chars(summary, MAX_SUMMARY_CHARS))
 }
 
-fn clamp_chars(text: &str, max_chars: usize) -> String {
+pub fn clamp_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }

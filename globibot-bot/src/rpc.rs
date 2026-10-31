@@ -1,9 +1,13 @@
 use std::{io, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
-use globibot_core::rpc::{self, AcceptError, DiscordApiError, RegisterWebApiError, TypingKey};
+use globibot_core::rpc::{
+    self, AcceptError, DiscordApiError, MessageSearch, MessageSearchResults, RegisterWebApiError,
+    TypingKey,
+};
 use globibot_core::serenity::all::{
-    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, Member, Typing, UserId,
+    ChannelType, CommandId, CreateAttachment, CreateMessage, EditMessage, Guild, GuildChannel,
+    InteractionId, Member, Permissions, RoleId, Typing, UserId,
 };
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
@@ -230,11 +234,16 @@ impl Protocol for Server {
     }
 
     async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<TypingKey> {
+        // Serenity keeps typing until the `Typing` is dropped: by `stop_typing`, or after this in
+        // case the plugin never calls it. Answers with several tool rounds can take a minute.
+        const MAX_TYPING: Duration = Duration::from_secs(120);
+
         let typing = self.discord_http.start_typing(chan_id);
         let key = self.typings.lock().insert(typing);
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(8)).await;
+            tokio::time::sleep(MAX_TYPING).await;
+            // Slotmap keys are versioned: a stopped typing's key matches nothing
             self.typings.lock().remove(key);
         });
 
@@ -449,6 +458,158 @@ impl Protocol for Server {
             Err(err) => Err(err.into()),
         }
     }
+
+    async fn search_guild_messages(
+        self,
+        ctx: Context,
+        guild_id: GuildId,
+        reader: UserId,
+        public_only: bool,
+        search: MessageSearch,
+    ) -> DiscordApiResult<MessageSearchResults> {
+        // Discord takes at most this many channels in a search
+        const MAX_CHANNELS: usize = 500;
+
+        let Some(member) = self.clone().get_member(ctx, guild_id, reader).await? else {
+            return Err("Only members of the server can search it".into());
+        };
+
+        let mut channel_ids = {
+            let guild = self
+                .discord_cache
+                .guild(guild_id)
+                .ok_or("The server isn't in the cache")?;
+            readable_channels(&guild, &member, public_only)
+        };
+        if !search.channel_ids.is_empty() {
+            channel_ids.retain(|id| search.channel_ids.contains(id));
+            if channel_ids.is_empty() {
+                return Err(if public_only {
+                    "Those channels can't be searched from here: only channels everyone can read"
+                        .into()
+                } else {
+                    "Those channels can't be searched: they're not readable by whoever asked".into()
+                });
+            }
+        }
+        if channel_ids.len() > MAX_CHANNELS {
+            // ponytail: searches the first 500 readable channels, split into several searches if a
+            // server ever gets bigger
+            warn!(
+                "{} readable channels in {guild_id}, searching the first {MAX_CHANNELS}",
+                channel_ids.len()
+            );
+            channel_ids.truncate(MAX_CHANNELS);
+        }
+
+        let mut query = vec![
+            ("limit", search.limit.clamp(1, 25).to_string()),
+            ("offset", search.offset.to_string()),
+            (
+                "sort_order",
+                if search.oldest_first { "asc" } else { "desc" }.to_string(),
+            ),
+        ];
+        query.extend(search.content.map(|content| ("content", content)));
+        query.extend(search.min_id.map(|id| ("min_id", id.to_string())));
+        query.extend(search.max_id.map(|id| ("max_id", id.to_string())));
+        query.extend(
+            search
+                .author_ids
+                .iter()
+                .map(|id| ("author_id", id.to_string())),
+        );
+        query.extend(
+            search
+                .mentions
+                .iter()
+                .map(|id| ("mentions", id.to_string())),
+        );
+        query.extend(search.has.into_iter().map(|has| ("has", has)));
+        query.extend(channel_ids.iter().map(|id| ("channel_id", id.to_string())));
+
+        // Serenity doesn't have this endpoint yet
+        let response = reqwest::Client::new()
+            .get(format!(
+                "https://discord.com/api/v10/guilds/{guild_id}/messages/search"
+            ))
+            .header("Authorization", self.discord_http.token())
+            .header("User-Agent", "DiscordBot (https://globibot.com, 1.0)")
+            .query(&query)
+            .send()
+            .await
+            .map_err(|err| DiscordApiError(err.to_string()))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::ACCEPTED {
+            return Err("Discord is still indexing this server's messages, try again later".into());
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(DiscordApiError(format!(
+                "Message search failed with {status}: {body}"
+            )));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SearchResponse {
+            total_results: u64,
+            /// Each match used to come with the messages around it
+            messages: Vec<Vec<Message>>,
+        }
+        let found: SearchResponse = response
+            .json()
+            .await
+            .map_err(|err| DiscordApiError(err.to_string()))?;
+
+        Ok(MessageSearchResults {
+            total_results: found.total_results,
+            messages: found.messages.into_iter().flatten().collect(),
+        })
+    }
+}
+
+/// The text channels and active public threads of `guild` that `member` can read, leaving out
+/// NSFW ones. With `public_only`, only those the @everyone role can read as well.
+#[expect(
+    deprecated,
+    reason = "role_permissions_in ignores a user's other roles: here it's for @everyone alone"
+)]
+fn readable_channels(guild: &Guild, member: &Member, public_only: bool) -> Vec<ChannelId> {
+    let needed = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+    // The @everyone role has the guild's id
+    let everyone = guild.roles.get(&RoleId::new(guild.id.get()));
+    let readable = |channel: &GuildChannel| {
+        !channel.nsfw
+            && guild.user_permissions_in(channel, member).contains(needed)
+            && (!public_only
+                || everyone.is_some_and(|role| {
+                    guild
+                        .role_permissions_in(channel, role)
+                        .is_ok_and(|permissions| permissions.contains(needed))
+                }))
+    };
+
+    let mut channel_ids = guild
+        .channels
+        .values()
+        .filter(|channel| channel.kind != ChannelType::Category && readable(channel))
+        .map(|channel| channel.id)
+        .collect::<Vec<_>>();
+    // A thread's messages are in the thread's own channel. Archived threads aren't in the cache.
+    let threads = guild
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.kind == ChannelType::PublicThread
+                && thread
+                    .parent_id
+                    .is_some_and(|parent| channel_ids.contains(&parent))
+        })
+        .map(|thread| thread.id)
+        .collect::<Vec<_>>();
+    channel_ids.extend(threads);
+    channel_ids
 }
 
 /// The existing command with the same name and type as `cmd_data`. Discord allows a slash and a

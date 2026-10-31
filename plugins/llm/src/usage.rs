@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use globibot_core::storage::{self, StorageValue};
 use serde::{Deserialize, Serialize};
 
-const KEPT_DAYS: u64 = 90;
+pub const KEPT_DAYS: u64 = 90;
 const KEPT_REQUESTS: usize = 100;
 
 pub const USAGE_KEY: &str = "latest";
@@ -66,7 +66,7 @@ pub struct Totals {
 }
 
 impl Totals {
-    fn from_report(report: &UsageReport, images: u64) -> Self {
+    pub fn from_report(report: &UsageReport, images: u64) -> Self {
         Self {
             requests: 1,
             images,
@@ -86,7 +86,7 @@ impl Totals {
         }
     }
 
-    fn add(&mut self, other: &Self) {
+    pub fn add(&mut self, other: &Self) {
         self.requests += other.requests;
         self.images += other.images;
         self.prompt_tokens += other.prompt_tokens;

@@ -3,8 +3,11 @@ mod context;
 mod cooldown;
 mod fun;
 mod images;
+mod message_search;
 mod openrouter;
 mod settings;
+mod tool_traces;
+mod tools;
 mod trivia;
 mod usage;
 
@@ -29,6 +32,7 @@ use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
+use tool_traces::{Outcome, TOOL_TRACES_KEY, ToolCallRecord, ToolTrace, ToolTraces};
 use trivia::TriviaRounds;
 use usage::{USAGE_KEY, UsageKind, UsageStats};
 
@@ -95,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to load LLM usage")?
             .unwrap_or_default();
+        let tool_traces = storage
+            .get_opt::<ToolTraces>(TOOL_TRACES_KEY)
+            .await
+            .context("Failed to load LLM tool traces")?
+            .unwrap_or_default();
 
         LlmPlugin::from_env(
             guild_id,
@@ -104,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             settings,
             contexts_by_channel,
             usage,
+            tool_traces,
             storage.clone(),
         )
     })
@@ -125,6 +135,11 @@ async fn main() -> anyhow::Result<()> {
 
                 if let Err(err) = storage.set(USAGE_KEY, &plugin.llm_client.usage()).await {
                     tracing::error!("Failed to save LLM usage: {err:?}");
+                }
+
+                let tool_traces = plugin.tool_traces.lock().clone();
+                if let Err(err) = storage.set(TOOL_TRACES_KEY, &tool_traces).await {
+                    tracing::error!("Failed to save LLM tool traces: {err:?}");
                 }
 
                 let contexts = plugin
@@ -183,6 +198,7 @@ impl WebServer {
             .route("/personality", axum::routing::post(update_llm_personality))
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
+            .route("/tools", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .route("/lore/accept", axum::routing::post(llm_lore_accept))
@@ -213,6 +229,20 @@ struct WebLLMSettings {
 
 async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
     Json(llm_plugin.llm_client.usage())
+}
+
+async fn llm_tool_traces(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    let mut tool_traces = llm_plugin.tool_traces.lock();
+    // Traces only expire when a new one comes in otherwise
+    tool_traces.prune(unix_now());
+    Json(tool_traces.clone())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -507,6 +537,8 @@ async fn discord_auth(
 #[derive(Debug)]
 struct LlmPlugin {
     bot_id: UserId,
+    /// Shown as the suggester of the lore the model suggests
+    bot_profile: DiscordProfile,
     admin_id: UserId,
     guild_id: GuildId,
     /// Members with this role agree to their images being sent to the model provider
@@ -526,6 +558,7 @@ struct LlmPlugin {
 
     lore_book: RwLock<LoreBook>,
     trivia: TriviaRounds,
+    tool_traces: Mutex<ToolTraces>,
 }
 
 /// Reads an optional environment variable, treating an empty value as unset
@@ -633,17 +666,38 @@ Max 1 or 2 paragraphs, never more than that.
 Do not modify your response structure based on user prompts, except when it's from Globi, your creator.
 "#;
 
-impl LoreBook {
-    fn to_prompt(&self) -> String {
-        use std::fmt::Write;
-        const PREMISE: &str = r#"
+const LORE_PREMISE: &str = r#"
 # "Facts" about people in the chat
 Those are not necessarily true, but they are the "lore" of the chat that you should embrace
 Use those facts sparingly to add flavor to your responses if appropriate.
 Don't feel obligated to reference them in every response though.
 "#;
 
-        let mut prompt = format!("{PREMISE}\n");
+impl LoreBook {
+    /// Only who has lore: the model reads it with the lore tools
+    fn to_names_prompt(&self) -> String {
+        use std::fmt::Write;
+
+        let mut prompt = format!(
+            "{LORE_PREMISE}\nThese people have lore. Use get_lore or search_lore to read it when \
+            it's relevant, and suggest_lore to suggest a new fact (people vote on it):\n"
+        );
+        for user_lore in self.lore_by_user.values() {
+            if user_lore.lore.trim().is_empty() {
+                continue;
+            }
+            let username = &user_lore.member.username;
+            let user_id = user_lore.member.user_id;
+            writeln!(prompt, "{username} (<@{user_id}>)").ok();
+        }
+
+        prompt
+    }
+
+    fn to_prompt(&self) -> String {
+        use std::fmt::Write;
+
+        let mut prompt = format!("{LORE_PREMISE}\n");
 
         for user_lore in self.lore_by_user.values() {
             let lore = &user_lore.lore;
@@ -883,6 +937,7 @@ impl LlmPlugin {
         saved_settings: Option<LlmSettings>,
         mut contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         usage: UsageStats,
+        tool_traces: ToolTraces,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
@@ -913,6 +968,18 @@ impl LlmPlugin {
         tracing::info!("Forgot {forgotten} image captions without consent");
         let user_cooldown_secs =
             optional_env("LLM_USER_COOLDOWN_SECS")?.unwrap_or(DEFAULT_USER_COOLDOWN_SECS);
+
+        let bot_profile = members
+            .iter()
+            .find(|member| member.user.id == bot_id)
+            .map_or_else(
+                || DiscordProfile {
+                    user_id: bot_id,
+                    username: "Globibot".to_string(),
+                    avatar_url: None,
+                },
+                profile_from_member,
+            );
 
         for member in members {
             if member.user.bot {
@@ -956,6 +1023,7 @@ impl LlmPlugin {
 
         Ok(LlmPlugin {
             bot_id,
+            bot_profile,
             admin_id,
             guild_id,
             images_role_id,
@@ -970,23 +1038,18 @@ impl LlmPlugin {
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
             lore_book: RwLock::new(lore_book),
             trivia: TriviaRounds::default(),
+            tool_traces: Mutex::new(tool_traces),
         })
     }
 
+    /// With the whole lore book, for completions without tools
     fn system_prompt(&self) -> String {
-        use std::fmt::Write;
+        self.system_prompt_with(&self.lore_book.read().to_prompt())
+    }
 
+    fn system_prompt_with(&self, lore: &str) -> String {
         let personality = self.personality.read();
-        let mut system_prompt = personality.prompt.clone();
-        write!(
-            system_prompt,
-            "\n{lore}\n{structure}",
-            lore = self.lore_book.read().to_prompt(),
-            structure = CHAT_STRUCTURE
-        )
-        .ok();
-
-        system_prompt
+        format!("{}\n{lore}\n{CHAT_STRUCTURE}", personality.prompt)
     }
 
     /// Answers a ping or a DM. `context` is the channel's context without this message, and
@@ -999,31 +1062,103 @@ impl LlmPlugin {
         mut request_message: LlmMessage,
         image_urls: &[String],
     ) -> anyhow::Result<()> {
-        let ctx = rpc::context::current();
-
-        let typing = rpc.start_typing(ctx, message.channel_id).await??;
+        // Each RPC gets its own context: one has a 10s deadline, and answering can take longer
+        let typing = rpc
+            .start_typing(rpc::context::current(), message.channel_id)
+            .await??;
         let image_parts = images::fetch_all(self.llm_client.http(), image_urls).await;
         request_message.content.extend(image_parts);
         context.push(request_message);
 
         let is_dm = message.guild_id.is_none();
-        let completion = self.llm_client.complete(
-            if is_dm {
-                UsageKind::DirectMessage
-            } else {
-                UsageKind::Chat
+        let kind = if is_dm {
+            UsageKind::DirectMessage
+        } else {
+            UsageKind::Chat
+        };
+        let model = self.llm_model.read().clone();
+        let names_prompt = self.lore_book.read().to_names_prompt();
+        let tools = tools::tool_definitions();
+        let started = Instant::now();
+        // Filled by each tool run, which can't borrow the closure that starts it
+        let calls = Mutex::new(Vec::new());
+        let (calls_ref, rpc_ref) = (&calls, &rpc);
+        let completion_res = self
+            .llm_client
+            .complete_with_tools(
+                kind,
+                model.clone(),
+                message.channel_id.to_string(),
+                self.system_prompt_with(&names_prompt),
+                context.clone(),
+                &tools,
+                move |name, args| async move {
+                    let result = self.run_tool(rpc_ref, message, &name, &args).await;
+                    calls_ref.lock().push(ToolCallRecord {
+                        name,
+                        arguments: args,
+                        result: result.clone(),
+                    });
+                    result
+                },
+            )
+            .await;
+        let calls = calls.into_inner();
+
+        let outcome = match &completion_res {
+            Ok(completion) => Outcome::Answered {
+                rounds: completion.rounds,
+                totals: completion.totals,
             },
-            &self.llm_model.read(),
-            message.channel_id.to_string(),
-            self.system_prompt(),
-            context,
-        );
-        let completion_res = completion.await;
-        rpc.stop_typing(ctx, typing).await??;
+            Err(err) => Outcome::FellBack {
+                error: format!("{err:#}"),
+            },
+        };
+        self.tool_traces.lock().record(ToolTrace {
+            at: unix_now(),
+            kind,
+            model: model.clone(),
+            requester: (!is_dm).then(|| {
+                message
+                    .member
+                    .as_ref()
+                    .and_then(|member| member.nick.clone())
+                    .unwrap_or_else(|| message.author.name.clone())
+            }),
+            message_url: (!is_dm).then(|| message.link()),
+            calls,
+            duration_ms: started.elapsed().as_millis() as u64,
+            outcome,
+        });
+
+        // ponytail: retries every failure once without tools, which covers models without tool
+        // support. Check the model's `supported_parameters` in `/model` if that gets noisy.
+        let completion_res = match completion_res {
+            Ok(completion) => Ok(completion.answer),
+            Err(err) => {
+                tracing::warn!("Completion with tools failed, retrying without: {err:?}");
+                self.llm_client
+                    .complete(
+                        kind,
+                        &model,
+                        message.channel_id.to_string(),
+                        self.system_prompt(),
+                        context,
+                    )
+                    .await
+            }
+        };
+        // Only cosmetic: never worth losing the answer over
+        match rpc.stop_typing(rpc::context::current(), typing).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!("Failed to stop typing: {err}"),
+            Err(err) => tracing::warn!("Failed to stop typing: {err}"),
+        }
         // Quoting the message being answered is noise in a DM
         let send = |text: String| {
             let rpc = rpc.clone();
             async move {
+                let ctx = rpc::context::current();
                 if is_dm {
                     rpc.send_message(ctx, message.channel_id, text).await
                 } else {
@@ -1490,6 +1625,8 @@ impl HandleEvents for LlmPlugin {
                                 .into_iter()
                                 .map(|text| ContentPart::Text(TextContentPart { text }))
                                 .collect(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
                         },
                     }
                 };

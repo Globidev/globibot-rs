@@ -206,6 +206,8 @@ pub async fn caption(
             [Message {
                 role: Role::User,
                 content,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
             }],
         )
         .await?;
