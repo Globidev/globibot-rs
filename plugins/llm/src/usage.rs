@@ -66,7 +66,7 @@ pub struct Totals {
 }
 
 impl Totals {
-    fn from_report(report: &UsageReport, images: u64) -> Self {
+    pub fn from_report(report: &UsageReport, images: u64) -> Self {
         Self {
             requests: 1,
             images,
@@ -86,7 +86,7 @@ impl Totals {
         }
     }
 
-    fn add(&mut self, other: &Self) {
+    pub fn add(&mut self, other: &Self) {
         self.requests += other.requests;
         self.images += other.images;
         self.prompt_tokens += other.prompt_tokens;

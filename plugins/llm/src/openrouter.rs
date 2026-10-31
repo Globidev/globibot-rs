@@ -7,7 +7,7 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::usage::{UsageKind, UsageReport, UsageStats};
+use crate::usage::{Totals, UsageKind, UsageReport, UsageStats};
 
 /// Records the usage of every completion it makes
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl Client {
         let client = self.clone();
 
         async move {
-            let message = client.send(kind, &req).await?;
+            let (message, _) = client.send(kind, &req).await?;
             Ok(message.content.unwrap_or_default())
         }
     }
@@ -77,8 +77,10 @@ impl Client {
         parts: Vec<Message>,
         tools: &[serde_json::Value],
         mut run_tool: impl FnMut(&str, &str) -> String + Send,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ToolCompletion> {
         const MAX_TOOL_ROUNDS: usize = 5;
+
+        let mut totals = Totals::default();
 
         let mut messages = vec![Message::text(Role::System, system_prompt)];
         messages.extend(parts);
@@ -96,9 +98,14 @@ impl Client {
                 req.tool_choice = Some("none");
             }
 
-            let message = self.send(kind, &req).await?;
+            let (message, round_totals) = self.send(kind, &req).await?;
+            totals.add(&round_totals);
             if message.tool_calls.is_empty() {
-                return Ok(message.content.unwrap_or_default());
+                return Ok(ToolCompletion {
+                    answer: message.content.unwrap_or_default(),
+                    rounds: round,
+                    totals,
+                });
             }
 
             let results = message
@@ -130,8 +137,12 @@ impl Client {
         anyhow::bail!("The model kept calling tools after {MAX_TOOL_ROUNDS} rounds")
     }
 
-    /// Sends one request and records its usage
-    async fn send(&self, kind: UsageKind, req: &Request<'_>) -> anyhow::Result<ReponseMessage> {
+    /// Sends one request and records its usage, which it also returns
+    async fn send(
+        &self,
+        kind: UsageKind,
+        req: &Request<'_>,
+    ) -> anyhow::Result<(ReponseMessage, Totals)> {
         let images = req
             .messages
             .iter()
@@ -159,15 +170,19 @@ impl Client {
 
         let chat_response: Response = serde_json::from_value(chat_response)?;
 
-        match &chat_response.usage {
+        let totals = match &chat_response.usage {
             Some(report) => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 // The model that actually answered, in case OpenRouter picked a fallback
                 let model = chat_response.model.as_deref().unwrap_or(&req.model);
                 self.usage.lock().record(now, kind, model, images, report);
+                Totals::from_report(report, images)
             }
-            None => tracing::warn!("OpenRouter response has no usage"),
-        }
+            None => {
+                tracing::warn!("OpenRouter response has no usage");
+                Totals::default()
+            }
+        };
 
         let mut choices = chat_response.choices.into_iter();
         let mut message = choices
@@ -180,8 +195,18 @@ impl Client {
             message.tool_calls.extend(choice.message.tool_calls);
         }
 
-        Ok(message)
+        Ok((message, totals))
     }
+}
+
+/// The answer of `complete_with_tools`, with what it took to get it
+#[derive(Debug, Clone)]
+pub struct ToolCompletion {
+    pub answer: String,
+    /// Requests made: one per round of tool calls, plus the answer
+    pub rounds: usize,
+    /// Usage of every round added up
+    pub totals: Totals,
 }
 
 const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";

@@ -5,6 +5,7 @@ mod fun;
 mod images;
 mod openrouter;
 mod settings;
+mod tool_traces;
 mod tools;
 mod trivia;
 mod usage;
@@ -30,6 +31,7 @@ use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
+use tool_traces::{Outcome, TOOL_TRACES_KEY, ToolCallRecord, ToolTrace, ToolTraces};
 use trivia::TriviaRounds;
 use usage::{USAGE_KEY, UsageKind, UsageStats};
 
@@ -96,6 +98,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to load LLM usage")?
             .unwrap_or_default();
+        let tool_traces = storage
+            .get_opt::<ToolTraces>(TOOL_TRACES_KEY)
+            .await
+            .context("Failed to load LLM tool traces")?
+            .unwrap_or_default();
 
         LlmPlugin::from_env(
             guild_id,
@@ -105,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             settings,
             contexts_by_channel,
             usage,
+            tool_traces,
             storage.clone(),
         )
     })
@@ -126,6 +134,11 @@ async fn main() -> anyhow::Result<()> {
 
                 if let Err(err) = storage.set(USAGE_KEY, &plugin.llm_client.usage()).await {
                     tracing::error!("Failed to save LLM usage: {err:?}");
+                }
+
+                let tool_traces = plugin.tool_traces.lock().clone();
+                if let Err(err) = storage.set(TOOL_TRACES_KEY, &tool_traces).await {
+                    tracing::error!("Failed to save LLM tool traces: {err:?}");
                 }
 
                 let contexts = plugin
@@ -184,6 +197,7 @@ impl WebServer {
             .route("/personality", axum::routing::post(update_llm_personality))
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
+            .route("/tools", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .route("/lore/accept", axum::routing::post(llm_lore_accept))
@@ -214,6 +228,20 @@ struct WebLLMSettings {
 
 async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
     Json(llm_plugin.llm_client.usage())
+}
+
+async fn llm_tool_traces(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    let mut tool_traces = llm_plugin.tool_traces.lock();
+    // Traces only expire when a new one comes in otherwise
+    tool_traces.prune(unix_now());
+    Json(tool_traces.clone())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -529,6 +557,7 @@ struct LlmPlugin {
 
     lore_book: RwLock<LoreBook>,
     trivia: TriviaRounds,
+    tool_traces: Mutex<ToolTraces>,
 }
 
 /// Reads an optional environment variable, treating an empty value as unset
@@ -907,6 +936,7 @@ impl LlmPlugin {
         saved_settings: Option<LlmSettings>,
         mut contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         usage: UsageStats,
+        tool_traces: ToolTraces,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
@@ -1007,6 +1037,7 @@ impl LlmPlugin {
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
             lore_book: RwLock::new(lore_book),
             trivia: TriviaRounds::default(),
+            tool_traces: Mutex::new(tool_traces),
         })
     }
 
@@ -1046,7 +1077,8 @@ impl LlmPlugin {
         let model = self.llm_model.read().clone();
         let names_prompt = self.lore_book.read().to_names_prompt();
         let tools = tools::lore_tools();
-        let requester = message.author.id;
+        let started = Instant::now();
+        let mut calls = Vec::new();
         let completion_res = self
             .llm_client
             .complete_with_tools(
@@ -1057,15 +1089,48 @@ impl LlmPlugin {
                 context.clone(),
                 &tools,
                 |name, args| {
-                    tracing::info!("Tool call {name} {args} while answering {requester}");
-                    tools::run_lore_tool(&self.lore_book, &self.bot_profile, name, args)
+                    let result =
+                        tools::run_lore_tool(&self.lore_book, &self.bot_profile, name, args);
+                    calls.push(ToolCallRecord {
+                        name: name.to_string(),
+                        arguments: args.to_string(),
+                        result: result.clone(),
+                    });
+                    result
                 },
             )
             .await;
+
+        let outcome = match &completion_res {
+            Ok(completion) => Outcome::Answered {
+                rounds: completion.rounds,
+                totals: completion.totals,
+            },
+            Err(err) => Outcome::FellBack {
+                error: format!("{err:#}"),
+            },
+        };
+        self.tool_traces.lock().record(ToolTrace {
+            at: unix_now(),
+            kind,
+            model: model.clone(),
+            requester: (!is_dm).then(|| {
+                message
+                    .member
+                    .as_ref()
+                    .and_then(|member| member.nick.clone())
+                    .unwrap_or_else(|| message.author.name.clone())
+            }),
+            message_url: (!is_dm).then(|| message.link()),
+            calls,
+            duration_ms: started.elapsed().as_millis() as u64,
+            outcome,
+        });
+
         // ponytail: retries every failure once without tools, which covers models without tool
         // support. Check the model's `supported_parameters` in `/model` if that gets noisy.
         let completion_res = match completion_res {
-            Ok(answer) => Ok(answer),
+            Ok(completion) => Ok(completion.answer),
             Err(err) => {
                 tracing::warn!("Completion with tools failed, retrying without: {err:?}");
                 self.llm_client
