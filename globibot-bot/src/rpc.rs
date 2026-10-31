@@ -448,17 +448,18 @@ fn command_changed(
     let opts_changed = 'opts_changed: {
         let existing_opts = &existing_cmd.options;
         let Some(cmd_opts) = cmd_data.get("options") else {
-            break 'opts_changed existing_opts.is_empty();
+            break 'opts_changed !existing_opts.is_empty();
         };
         let cmd_opts = Vec::<CommandOption>::deserialize(cmd_opts)
             .map_err(|e| DiscordApiError(e.to_string()))?;
 
-        cmd_opts.iter().any(|opt| {
-            let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
-                return true;
-            };
-            serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
-        })
+        cmd_opts.len() != existing_opts.len()
+            || cmd_opts.iter().any(|opt| {
+                let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
+                    return true;
+                };
+                serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
+            })
     };
 
     Ok(description_changed || opts_changed)
