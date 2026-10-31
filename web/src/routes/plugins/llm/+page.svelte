@@ -6,11 +6,13 @@
   import PersonalityTab from './tabs/PersonalityTab.svelte';
   import LoreBookTab from './tabs/LoreBookTab.svelte';
   import ContributorsTab from './tabs/ContributorsTab.svelte';
+  import UsageTab from './tabs/UsageTab.svelte';
 
   const tabs = [
     { id: 'general_settings', label: '⚙️ General settings', component: GeneralSettingsTab },
     { id: 'personality', label: '🎭 Personality', component: PersonalityTab },
     { id: 'lore_book', label: '📓 Lore book', component: LoreBookTab },
+    { id: 'usage', label: '📊 Usage', component: UsageTab },
     { id: 'contributors', label: '❤️ Contributors', component: ContributorsTab }
   ] as const;
 
