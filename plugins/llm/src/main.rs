@@ -5,6 +5,7 @@ mod fun;
 mod openrouter;
 mod settings;
 mod trivia;
+mod usage;
 
 use anyhow::Context;
 use axum::{
@@ -27,6 +28,7 @@ use parking_lot::{Mutex, RwLock};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
 use trivia::TriviaRounds;
+use usage::{USAGE_KEY, UsageKind, UsageStats};
 
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -86,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to load LLM settings")?;
         let contexts_by_channel = load_contexts(rpc, &mut storage).await?;
+        let usage = storage
+            .get_opt::<UsageStats>(USAGE_KEY)
+            .await
+            .context("Failed to load LLM usage")?
+            .unwrap_or_default();
 
         LlmPlugin::from_env(
             guild_id,
@@ -94,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             personality_registry,
             settings,
             contexts_by_channel,
+            usage,
             storage.clone(),
         )
     })
@@ -111,6 +119,10 @@ async fn main() -> anyhow::Result<()> {
                 let lore_book = plugin.lore_book.read().clone();
                 if let Err(err) = storage.set("latest", &lore_book).await {
                     tracing::error!("Failed to save LLM lore book: {err:?}");
+                }
+
+                if let Err(err) = storage.set(USAGE_KEY, &plugin.llm_client.usage()).await {
+                    tracing::error!("Failed to save LLM usage: {err:?}");
                 }
 
                 let contexts = plugin
@@ -168,6 +180,7 @@ impl WebServer {
             .route("/personality", axum::routing::get(llm_personality))
             .route("/personality", axum::routing::post(update_llm_personality))
             .route("/lore", axum::routing::get(llm_lore))
+            .route("/usage", axum::routing::get(llm_usage))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .route("/lore/accept", axum::routing::post(llm_lore_accept))
@@ -194,6 +207,10 @@ struct WebLLMSettings {
 
     #[serde(skip_deserializing)]
     allowed_to_edit: Option<bool>,
+}
+
+async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    Json(llm_plugin.llm_client.usage())
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -842,6 +859,10 @@ fn profile_from_member(member: &Member) -> DiscordProfile {
 }
 
 impl LlmPlugin {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "called once, with everything loaded at startup"
+    )]
     fn from_env(
         guild_id: GuildId,
         members: Vec<Member>,
@@ -849,6 +870,7 @@ impl LlmPlugin {
         registry: PersonalityRegistry,
         saved_settings: Option<LlmSettings>,
         contexts_by_channel: HashMap<ChannelId, ChannelContext>,
+        usage: UsageStats,
         storage: RedisStorage,
     ) -> anyhow::Result<Self> {
         const DEFAULT_CONTEXT_WINDOW_SIZE: usize = 1_000;
@@ -857,7 +879,7 @@ impl LlmPlugin {
         let bot_id = std::env::var("DISCORD_BOT_ID")?.parse()?;
         let admin_id = std::env::var("LLM_ADMIN_USER_ID")?.parse()?;
         let default_model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
-        let llm_client = openrouter::Client::from_env()?;
+        let llm_client = openrouter::Client::from_env(usage)?;
         let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
         let user_cooldown_secs =
             optional_env("LLM_USER_COOLDOWN_SECS")?.unwrap_or(DEFAULT_USER_COOLDOWN_SECS);
@@ -949,6 +971,7 @@ impl LlmPlugin {
 
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
         let completion = self.llm_client.complete(
+            UsageKind::Chat,
             &self.llm_model.read(),
             message.channel_id.to_string(),
             self.system_prompt(),

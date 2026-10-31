@@ -1,24 +1,40 @@
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use itertools::Itertools;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::usage::{UsageKind, UsageReport, UsageStats};
+
+/// Records the usage of every completion it makes
 #[derive(Debug, Clone)]
 pub struct Client {
     api_key: String,
     http_client: reqwest::Client,
+    usage: Arc<Mutex<UsageStats>>,
 }
 
 impl Client {
-    pub fn from_env() -> anyhow::Result<Self> {
+    pub fn from_env(usage: UsageStats) -> anyhow::Result<Self> {
         let api_key = std::env::var("LLM_OPENROUTER_API_KEY")?;
 
         Ok(Self {
             api_key,
             http_client: reqwest::Client::new(),
+            usage: Arc::new(Mutex::new(usage)),
         })
+    }
+
+    pub fn usage(&self) -> UsageStats {
+        self.usage.lock().clone()
     }
 
     pub fn complete<Parts: IntoIterator<Item = Message> + Send, SessionId: Into<Option<String>>>(
         &self,
+        kind: UsageKind,
         model: &str,
         session_id: SessionId,
         system_prompt: String,
@@ -39,6 +55,8 @@ impl Client {
             .post(COMPLETE_ENDPOINT)
             .bearer_auth(&self.api_key)
             .json(&req);
+        let usage = Arc::clone(&self.usage);
+        let model = model.to_string();
 
         async move {
             let response = request.send().await?.error_for_status()?;
@@ -48,6 +66,16 @@ impl Client {
             tracing::debug!("OpenRouter chat response JSON: {chat_response:?}");
 
             let chat_response: Response = serde_json::from_value(chat_response)?;
+
+            match &chat_response.usage {
+                Some(report) => {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                    // The model that actually answered, in case OpenRouter picked a fallback
+                    let model = chat_response.model.as_deref().unwrap_or(&model);
+                    usage.lock().record(now, kind, model, report);
+                }
+                None => tracing::warn!("OpenRouter response has no usage"),
+            }
 
             let answer = chat_response
                 .choices
@@ -73,6 +101,8 @@ struct Request<'model> {
 #[derive(Debug, Clone, Deserialize)]
 struct Response {
     choices: Vec<Choice>,
+    model: Option<String>,
+    usage: Option<UsageReport>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

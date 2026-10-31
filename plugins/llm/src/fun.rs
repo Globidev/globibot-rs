@@ -11,6 +11,7 @@ use crate::{
     LlmPlugin,
     cooldown::cooldown_message,
     openrouter::{ContentPart, Message as LlmMessage, Role},
+    usage::UsageKind,
 };
 
 const LOST_TRAIN_OF_THOUGHT: &str = "Sorry, I lost my train of thought.";
@@ -23,11 +24,16 @@ pub enum Vibe {
 
 impl LlmPlugin {
     /// One-off completion with the current personality and lore, outside of any chat context
-    pub async fn complete_one_shot(&self, prompt: String) -> anyhow::Result<String> {
+    pub async fn complete_one_shot(
+        &self,
+        kind: UsageKind,
+        prompt: String,
+    ) -> anyhow::Result<String> {
         let message = LlmMessage::text(Role::User, prompt);
 
         // Build the request before awaiting so the model's lock isn't held across the await
         let completion = self.llm_client.complete(
+            kind,
             &self.llm_model.read(),
             None,
             self.system_prompt(),
@@ -68,10 +74,13 @@ impl LlmPlugin {
             ),
         };
 
-        let answer = self.complete_one_shot(prompt).await.unwrap_or_else(|err| {
-            tracing::error!("Failed to get LLM completion for {vibe:?}: {err:?}");
-            LOST_TRAIN_OF_THOUGHT.to_string()
-        });
+        let answer = self
+            .complete_one_shot(UsageKind::Command, prompt)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::error!("Failed to get LLM completion for {vibe:?}: {err:?}");
+                LOST_TRAIN_OF_THOUGHT.to_string()
+            });
 
         ctx.edit_with(answer_edit(answer)).await?;
         Ok(())
@@ -118,10 +127,13 @@ impl LlmPlugin {
             Use a few short bullet points and say who said what when it matters. Stay in \
             character, but clarity comes first.\n\n{transcript}"
         );
-        let answer = self.complete_one_shot(prompt).await.unwrap_or_else(|err| {
-            tracing::error!("Failed to get LLM completion for /tldr: {err:?}");
-            LOST_TRAIN_OF_THOUGHT.to_string()
-        });
+        let answer = self
+            .complete_one_shot(UsageKind::Command, prompt)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::error!("Failed to get LLM completion for /tldr: {err:?}");
+                LOST_TRAIN_OF_THOUGHT.to_string()
+            });
 
         ctx.edit_with(answer_edit(answer)).await?;
         Ok(())
@@ -143,7 +155,7 @@ impl LlmPlugin {
             star reactions are shared:\n\n{post}\n\nReact to it in character in one or two short \
             sentences."
         );
-        let answer = self.complete_one_shot(prompt).await?;
+        let answer = self.complete_one_shot(UsageKind::Starboard, prompt).await?;
 
         rpc.send_reply(
             rpc::context::current(),
