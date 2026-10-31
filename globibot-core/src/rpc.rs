@@ -1,6 +1,7 @@
-use crate::transport::{FramedRead, FramedStream, FramedWrite, frame_transport};
+pub use crate::transport::AcceptError;
+use crate::transport::{FramedStream, FramedWrite, accept_handshake, frame_transport};
 
-use futures::{Future, SinkExt, StreamExt, TryFutureExt};
+use futures::{Future, SinkExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serenity::{
@@ -12,15 +13,12 @@ use serenity::{
         prelude::{Channel, CurrentUser, User},
     },
 };
-use std::{error::Error, io, net::SocketAddr, time::Duration};
+use std::{error::Error, io, net::SocketAddr};
 use tarpc::{
     ClientMessage, Response, client,
     server::{self, BaseChannel},
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time::timeout,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use tarpc::context;
 
@@ -124,18 +122,6 @@ impl HandshakeRequest {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum AcceptError {
-    #[error("IO error: {0}")]
-    IO(#[from] io::Error),
-
-    #[error("Handshake timed out")]
-    HandshakeTimedOut,
-
-    #[error("Handshake missing")]
-    HandshakeMissing,
-}
-
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum RegisterWebApiError {
     #[error("Control plane error: {0}")]
@@ -167,19 +153,12 @@ pub type ServerChannel<T> = ServerChannelP<T, ProtocolRequest, ProtocolResponse>
 
 pub async fn accept<T>(
     config: server::Config,
-    mut transport: T,
+    transport: T,
 ) -> Result<(HandshakeRequest, ServerChannel<T>), AcceptError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut handshake_transport: FramedRead<_, _> = frame_transport(&mut transport);
-    let timed_request_read = timeout(Duration::from_secs(5), handshake_transport.next());
-    let request: HandshakeRequest = timed_request_read
-        .await
-        .map_err(|_timed_out| AcceptError::HandshakeTimedOut)?
-        .ok_or(AcceptError::HandshakeMissing)??;
-
-    let rpc_transport = frame_transport(transport);
+    let (request, rpc_transport) = accept_handshake(transport).await?;
     let rpc_channel = ServerChannel::new(config, rpc_transport);
     Ok((request, rpc_channel))
 }

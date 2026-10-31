@@ -1,18 +1,16 @@
-use crate::transport::{FramedRead, FramedWrite, frame_transport};
+pub use crate::transport::AcceptError;
+use crate::transport::{FramedRead, FramedWrite, accept_handshake, frame_transport};
 
-use std::{collections::HashSet, io, time::Duration};
+use std::{collections::HashSet, io};
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use serde::{Deserialize, Serialize};
 use serenity::model::{
     application::CommandInteraction,
     channel::Message,
     id::{ChannelId, MessageId},
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time::timeout,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -51,18 +49,6 @@ pub struct HandshakeRequest {
     pub events: HashSet<EventType>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum AcceptError {
-    #[error("IO error: {0}")]
-    IO(#[from] io::Error),
-
-    #[error("Handshake timed out")]
-    HandshakeTimedOut,
-
-    #[error("Handshake missing")]
-    HandshakeMissing,
-}
-
 pub type EventRead<T> = FramedRead<T, Event>;
 pub type EventWrite<T> = FramedWrite<T, Event>;
 
@@ -77,18 +63,9 @@ where
     Ok(rpc_transport)
 }
 
-pub async fn accept<T>(mut transport: T) -> Result<(HandshakeRequest, EventWrite<T>), AcceptError>
+pub async fn accept<T>(transport: T) -> Result<(HandshakeRequest, EventWrite<T>), AcceptError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut handshake_transport: FramedRead<_, _> = frame_transport(&mut transport);
-    let timed_request_read = timeout(Duration::from_secs(5), handshake_transport.next());
-
-    let request = timed_request_read
-        .await
-        .map_err(|_timed_out| AcceptError::HandshakeTimedOut)?
-        .ok_or(AcceptError::HandshakeMissing)??;
-
-    let rpc_transport: FramedWrite<T, Event> = frame_transport(transport);
-    Ok((request, rpc_transport))
+    accept_handshake(transport).await
 }
