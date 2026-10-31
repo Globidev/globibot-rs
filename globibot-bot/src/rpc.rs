@@ -8,7 +8,7 @@ use globibot_core::serenity::all::{
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
     cache::Cache as DiscordCache,
-    http::Http as DiscordHttp,
+    http::{Http as DiscordHttp, HttpError},
     model::{
         application::Command,
         channel::{Message, ReactionType},
@@ -423,6 +423,31 @@ impl Protocol for Server {
             .discord_http
             .get_guild_members(guild_id, None, None)
             .await?)
+    }
+
+    async fn get_member(
+        self,
+        _ctx: Context,
+        guild_id: GuildId,
+        user_id: UserId,
+    ) -> DiscordApiResult<Option<Member>> {
+        let cached = self
+            .discord_cache
+            .guild(guild_id)
+            .and_then(|guild| guild.members.get(&user_id).cloned());
+        if let Some(member) = cached {
+            return Ok(Some(member));
+        }
+
+        match self.discord_http.get_member(guild_id, user_id).await {
+            Ok(member) => Ok(Some(member)),
+            Err(globibot_core::serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                if response.status_code.as_u16() == 404 =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 }
 

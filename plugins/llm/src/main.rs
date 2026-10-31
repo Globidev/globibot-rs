@@ -47,7 +47,7 @@ use globibot_core::{
     interaction::{CommandCtx, CommandInteractionExt},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
-    serenity::all::{ChannelId, GuildId, Member, Message, ReactionType, UserId},
+    serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, UserId},
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
@@ -232,12 +232,14 @@ async fn llm_settings(
         contexts_by_channel
             .values()
             .map(|ctx| ChannelContextWindow {
-                channel_name: ctx
-                    .channel
-                    .clone()
-                    .guild()
-                    .map(|g| g.name.clone())
-                    .unwrap_or_default(),
+                channel_name: match &ctx.channel {
+                    Channel::Guild(channel) => format!("#{}", channel.name),
+                    Channel::Private(channel) => {
+                        let user = &channel.recipient;
+                        format!("DM with {}", user.global_name.as_ref().unwrap_or(&user.name))
+                    }
+                    _ => String::new(),
+                },
                 size: ctx.messages.len(),
             })
             .collect()
@@ -962,7 +964,7 @@ impl LlmPlugin {
         system_prompt
     }
 
-    /// Answers a ping. `context` is the channel's context without this message, and
+    /// Answers a ping or a DM. `context` is the channel's context without this message, and
     /// `request_message` is this message as sent, with the images at `image_urls`.
     async fn answer_message(
         &self,
@@ -979,8 +981,13 @@ impl LlmPlugin {
         request_message.content.extend(image_parts);
         context.push(request_message);
 
+        let is_dm = message.guild_id.is_none();
         let completion = self.llm_client.complete(
-            UsageKind::Chat,
+            if is_dm {
+                UsageKind::DirectMessage
+            } else {
+                UsageKind::Chat
+            },
             &self.llm_model.read(),
             message.channel_id.to_string(),
             self.system_prompt(),
@@ -988,10 +995,21 @@ impl LlmPlugin {
         );
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
+        // Quoting the message being answered is noise in a DM
+        let send = |text: String| {
+            let rpc = rpc.clone();
+            async move {
+                if is_dm {
+                    rpc.send_message(ctx, message.channel_id, text).await
+                } else {
+                    rpc.send_reply(ctx, message.channel_id, text, message.id)
+                        .await
+                }
+            }
+        };
         if let Ok(answer) = completion_res {
             let answer = sanitize_llm_output(&answer);
-            rpc.send_reply(ctx, message.channel_id, answer.clone(), message.id)
-                .await??;
+            send(answer.clone()).await??;
 
             let bot_message = ContextMessage {
                 id: None,
@@ -1000,13 +1018,7 @@ impl LlmPlugin {
             self.register_message(rpc, message, bot_message).await?;
         } else {
             tracing::error!("Failed to get LLM completion: {:?}", completion_res.err());
-            rpc.send_reply(
-                ctx,
-                message.channel_id,
-                "Sorry, I lost my train of thought.".to_string(),
-                message.id,
-            )
-            .await??;
+            send("Sorry, I lost my train of thought.".to_string()).await??;
         }
 
         Ok(())
@@ -1346,25 +1358,35 @@ impl HandleEvents for LlmPlugin {
             }
 
             Event::MessageCreate { message } if !message.author.bot => {
-                if message.guild_id.is_none_or(|gid| gid != self.guild_id) {
-                    // Ignore messages outside of the configured guild
+                // Messages in the configured guild, and DMs from its members
+                let is_dm = message.guild_id.is_none();
+                let nick = if is_dm {
+                    let member = rpc
+                        .get_member(rpc::context::current(), self.guild_id, message.author.id)
+                        .await??;
+                    let Some(member) = member else {
+                        return Ok(());
+                    };
+                    member.nick
+                } else if message.guild_id == Some(self.guild_id) {
+                    message.member.as_ref().and_then(|m| m.nick.clone())
+                } else {
                     return Ok(());
+                };
+
+                if !is_dm {
+                    self.check_trivia_guess(&rpc, &message).await?;
                 }
 
-                self.check_trivia_guess(&rpc, &message).await?;
-
-                let user_name = message
-                    .member
-                    .as_ref()
-                    .and_then(|m| m.nick.as_deref())
-                    .unwrap_or_else(|| &message.author.name);
+                let user_name = nick.as_deref().unwrap_or(&message.author.name);
                 let user_id = message.author.id.get();
 
+                // The guild's nicknames, DMs included
                 let content_safe = rpc
                     .content_safe(
                         rpc::context::current(),
                         message.content.clone(),
-                        message.guild_id,
+                        Some(self.guild_id),
                     )
                     .await??
                     .replace("@rust-bot", "@globibot");
@@ -1395,7 +1417,8 @@ impl HandleEvents for LlmPlugin {
                     }
                 };
 
-                let mentioned = message.mentions_user_id(self.bot_id);
+                // Every DM is for the bot
+                let mentioned = is_dm || message.mentions_user_id(self.bot_id);
                 let answering = mentioned && self.cooldowns.try_start(message.author.id).is_ok();
 
                 // Taken before this message is added, which is sent separately with its images

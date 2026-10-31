@@ -100,7 +100,7 @@
         {:else}
           {#each formData.context_windows_by_channel as entry}
             <div class="flex items-center gap-2">
-              <span class="font-mono text-sm text-gray-300">#{entry.channel_name}</span>
+              <span class="font-mono text-sm text-gray-300">{entry.channel_name}</span>
               <span class="text-sm text-gray-400">- {entry.size}</span>
             </div>
           {/each}
