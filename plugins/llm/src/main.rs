@@ -1,3 +1,4 @@
+mod commands;
 mod cooldown;
 mod fun;
 mod openrouter;
@@ -13,6 +14,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Key};
+use commands::{
+    AddToLore, AddUserContext, Hype, Llm, LlmCommands, LoreTrivia, ModelCommand, PersonalityChoice,
+    PersonalityCommand, Roast, Tldr,
+};
 use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
 use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
@@ -36,8 +41,7 @@ use globibot_core::{
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc,
     serenity::all::{
-        Channel, ChannelId, CommandDataOptionValue, CommandId, CommandInteraction, GuildId, Member,
-        Message, ReactionType, ResolvedTarget, UserId,
+        Channel, ChannelId, CommandInteraction, GuildId, Member, Message, ReactionType, UserId,
     },
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
@@ -59,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let mut storage = RedisStorage::from_env().await?;
 
     let plugin = LlmPlugin::connect_init(endpoints, async |rpc| {
-        let commands = CommandIds::upsert_all(rpc, guild_id).await?;
+        LlmCommands::register(rpc, Some(guild_id)).await?;
 
         rpc.register_web_api(rpc::context::current(), web_addr_advertise)
             .await??;
@@ -83,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
 
         LlmPlugin::from_env(
             guild_id,
-            commands,
             members,
             lore_book,
             personality_registry,
@@ -466,7 +469,6 @@ struct LlmPlugin {
     bot_id: UserId,
     admin_id: UserId,
     guild_id: GuildId,
-    commands: CommandIds,
     starboard_channel_id: Option<ChannelId>,
 
     llm_client: openrouter::Client,
@@ -482,59 +484,6 @@ struct LlmPlugin {
 
     lore_book: RwLock<LoreBook>,
     trivia: TriviaRounds,
-}
-
-/// IDs of the commands the plugin registers in its guild
-#[derive(Debug)]
-struct CommandIds {
-    llm: CommandId,
-    add_user_context: CommandId,
-    add_to_lore: CommandId,
-    roast: CommandId,
-    hype: CommandId,
-    tldr: CommandId,
-    lore_trivia: CommandId,
-}
-
-impl CommandIds {
-    async fn upsert_all(rpc: &rpc::ProtocolClient, guild_id: GuildId) -> anyhow::Result<Self> {
-        async fn upsert(
-            rpc: &rpc::ProtocolClient,
-            guild_id: GuildId,
-            definition: &str,
-        ) -> anyhow::Result<CommandId> {
-            let data = serde_json::from_str(definition)?;
-            let command = rpc
-                .upsert_guild_command(rpc::context::current(), guild_id, data)
-                .await??;
-            Ok(command.id)
-        }
-
-        Ok(Self {
-            llm: upsert(rpc, guild_id, include_str!("../llm-slash-command.json")).await?,
-            add_user_context: upsert(
-                rpc,
-                guild_id,
-                include_str!("../add-user-context-slash-command.json"),
-            )
-            .await?,
-            add_to_lore: upsert(
-                rpc,
-                guild_id,
-                include_str!("../add-to-lore-message-command.json"),
-            )
-            .await?,
-            roast: upsert(rpc, guild_id, include_str!("../roast-slash-command.json")).await?,
-            hype: upsert(rpc, guild_id, include_str!("../hype-slash-command.json")).await?,
-            tldr: upsert(rpc, guild_id, include_str!("../tldr-slash-command.json")).await?,
-            lore_trivia: upsert(
-                rpc,
-                guild_id,
-                include_str!("../lore-trivia-slash-command.json"),
-            )
-            .await?,
-        })
-    }
 }
 
 /// Reads an optional environment variable, treating an empty value as unset
@@ -880,7 +829,6 @@ fn profile_from_member(member: &Member) -> DiscordProfile {
 impl LlmPlugin {
     fn from_env(
         guild_id: GuildId,
-        commands: CommandIds,
         members: Vec<Member>,
         mut lore_book: LoreBook,
         registry: PersonalityRegistry,
@@ -942,7 +890,6 @@ impl LlmPlugin {
             bot_id,
             admin_id,
             guild_id,
-            commands,
             starboard_channel_id,
             llm_client,
             storage,
@@ -1081,20 +1028,11 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
+        AddUserContext {
+            user: target_id,
+            context,
+        }: AddUserContext,
     ) -> anyhow::Result<()> {
-        let options = &interaction.data.options;
-        let target_id = options
-            .iter()
-            .find(|opt| opt.name == "user")
-            .and_then(|opt| opt.value.as_user_id());
-        let context = options
-            .iter()
-            .find(|opt| opt.name == "context")
-            .and_then(|opt| opt.value.as_str());
-        let (Some(target_id), Some(context)) = (target_id, context) else {
-            return Ok(());
-        };
-
         let suggestion_by = interaction
             .member
             .as_deref()
@@ -1104,7 +1042,7 @@ impl LlmPlugin {
         let suggest_result =
             self.lore_book
                 .write()
-                .suggest_addition(target_id, suggestion_by, context);
+                .suggest_addition(target_id, suggestion_by, &context);
         let content = match suggest_result {
             Ok(()) => suggested_addition_reply(target_id),
             Err(why) => why.to_string(),
@@ -1117,12 +1055,9 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
+        AddToLore { message }: AddToLore,
     ) -> anyhow::Result<()> {
         const MAX_QUOTE_CHARS: usize = 300;
-
-        let Some(ResolvedTarget::Message(message)) = interaction.data.target() else {
-            return Ok(());
-        };
 
         let author_id = message.author.id;
         let quote = message.content.trim();
@@ -1184,7 +1119,7 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
-        value: &CommandDataOptionValue,
+        new_model: String,
     ) -> anyhow::Result<()> {
         if interaction.user.id != self.admin_id {
             rpc.create_interaction_response(
@@ -1202,26 +1137,20 @@ impl LlmPlugin {
             return Ok(());
         }
 
-        if let CommandDataOptionValue::SubCommand(opts) = value
-            && let Some(opt) = opts.first()
-            && opt.name == "model"
-            && let Some(new_model) = opt.value.as_str()
-        {
-            *self.llm_model.write() = new_model.trim().to_string();
-            self.save_settings().await;
-            rpc.create_interaction_response(
-                rpc::context::current(),
-                interaction.id,
-                interaction.token.clone(),
-                serde_json::json!({
-                    "type": 4,
-                    "data": {
-                        "content": format!("Model changed to `{new_model}`")
-                    }
-                }),
-            )
-            .await??;
-        }
+        *self.llm_model.write() = new_model.trim().to_string();
+        self.save_settings().await;
+        rpc.create_interaction_response(
+            rpc::context::current(),
+            interaction.id,
+            interaction.token.clone(),
+            serde_json::json!({
+                "type": 4,
+                "data": {
+                    "content": format!("Model changed to `{new_model}`")
+                }
+            }),
+        )
+        .await??;
 
         Ok(())
     }
@@ -1253,38 +1182,16 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
-        value: &CommandDataOptionValue,
+        choice: PersonalityChoice,
     ) -> anyhow::Result<()> {
-        if let CommandDataOptionValue::SubCommand(opts) = value
-            && let Some(opt) = opts.first()
-            && opt.name == "personality"
-            && let Some(new_personality_name) = opt.value.as_str()
-        {
-            let Some(new_personality) = self
-                .personality_registry
-                .read()
-                .personalities_by_name
-                .get(new_personality_name)
-                .cloned()
-            else {
-                rpc.create_interaction_response(
-                    rpc::context::current(),
-                    interaction.id,
-                    interaction.token.clone(),
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!("Unknown personality `{new_personality_name}`")
-                        }
-                    }),
-                )
-                .await??;
-                return Ok(());
-            };
-
-            *self.personality.write() = new_personality;
-            self.save_settings().await;
-
+        let new_personality_name = choice.value();
+        let Some(new_personality) = self
+            .personality_registry
+            .read()
+            .personalities_by_name
+            .get(&new_personality_name)
+            .cloned()
+        else {
             rpc.create_interaction_response(
                 rpc::context::current(),
                 interaction.id,
@@ -1292,12 +1199,29 @@ impl LlmPlugin {
                 serde_json::json!({
                     "type": 4,
                     "data": {
-                        "content": format!("Personality changed to `{new_personality_name}`")
+                        "content": format!("Unknown personality `{new_personality_name}`")
                     }
                 }),
             )
             .await??;
-        }
+            return Ok(());
+        };
+
+        *self.personality.write() = new_personality;
+        self.save_settings().await;
+
+        rpc.create_interaction_response(
+            rpc::context::current(),
+            interaction.id,
+            interaction.token.clone(),
+            serde_json::json!({
+                "type": 4,
+                "data": {
+                    "content": format!("Personality changed to `{new_personality_name}`")
+                }
+            }),
+        )
+        .await??;
 
         Ok(())
     }
@@ -1314,37 +1238,50 @@ impl HandleEvents for LlmPlugin {
     type Err = anyhow::Error;
 
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
-        let commands = &self.commands;
-
         match event {
-            Event::InteractionCreate { interaction }
-                if interaction.data.id == commands.add_user_context =>
-            {
-                self.add_user_context(rpc, &interaction).await?
-            }
+            Event::InteractionCreate { interaction } => {
+                let command = match LlmCommands::parse(&interaction) {
+                    Some(Ok(command)) => command,
+                    Some(Err(err)) => {
+                        tracing::warn!("Invalid `{}` interaction: {err}", interaction.data.name);
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                };
 
-            Event::InteractionCreate { interaction }
-                if interaction.data.id == commands.add_to_lore =>
-            {
-                self.add_message_to_lore(rpc, &interaction).await?
-            }
-
-            Event::InteractionCreate { interaction } if interaction.data.id == commands.roast => {
-                self.vibe_check(rpc, &interaction, Vibe::Roast).await?
-            }
-
-            Event::InteractionCreate { interaction } if interaction.data.id == commands.hype => {
-                self.vibe_check(rpc, &interaction, Vibe::Hype).await?
-            }
-
-            Event::InteractionCreate { interaction } if interaction.data.id == commands.tldr => {
-                self.tldr(rpc, &interaction).await?
-            }
-
-            Event::InteractionCreate { interaction }
-                if interaction.data.id == commands.lore_trivia =>
-            {
-                self.start_lore_trivia(rpc, &interaction).await?
+                let interaction = &interaction;
+                match command {
+                    LlmCommands::Llm(Llm::Model(ModelCommand::Show)) => {
+                        self.show_model(rpc, interaction).await?
+                    }
+                    LlmCommands::Llm(Llm::Model(ModelCommand::Set { model })) => {
+                        self.set_model(rpc, interaction, model).await?
+                    }
+                    LlmCommands::Llm(Llm::Personality(PersonalityCommand::Show)) => {
+                        self.show_personality(rpc, interaction).await?
+                    }
+                    LlmCommands::Llm(Llm::Personality(PersonalityCommand::Set { personality })) => {
+                        self.set_personality(rpc, interaction, personality).await?
+                    }
+                    LlmCommands::AddUserContext(command) => {
+                        self.add_user_context(rpc, interaction, command).await?
+                    }
+                    LlmCommands::AddToLore(command) => {
+                        self.add_message_to_lore(rpc, interaction, command).await?
+                    }
+                    LlmCommands::Roast(Roast { user }) => {
+                        self.vibe_check(rpc, interaction, user, Vibe::Roast).await?
+                    }
+                    LlmCommands::Hype(Hype { user }) => {
+                        self.vibe_check(rpc, interaction, user, Vibe::Hype).await?
+                    }
+                    LlmCommands::Tldr(Tldr { messages }) => {
+                        self.tldr(rpc, interaction, messages).await?
+                    }
+                    LlmCommands::LoreTrivia(LoreTrivia) => {
+                        self.start_lore_trivia(rpc, interaction).await?
+                    }
+                }
             }
 
             // Starboard posts come from another bot, so this is checked before bots are ignored
@@ -1353,36 +1290,6 @@ impl HandleEvents for LlmPlugin {
                     && message.author.id != self.bot_id =>
             {
                 self.comment_on_starboard(rpc, &message).await?
-            }
-
-            Event::InteractionCreate { interaction } if interaction.data.id == commands.llm => {
-                // dbg!(&interaction);
-                use CommandDataOptionValue::*;
-                let Some(sub_cmd) = interaction.data.options.first() else {
-                    return Ok(());
-                };
-
-                match (sub_cmd.name.as_str(), &sub_cmd.value) {
-                    ("model", SubCommandGroup(opts)) => match opts.first() {
-                        Some(opt) if opt.name == "show" => {
-                            self.show_model(rpc, &interaction).await?
-                        }
-                        Some(opt) if opt.name == "set" => {
-                            self.set_model(rpc, &interaction, &opt.value).await?
-                        }
-                        _ => {}
-                    },
-                    ("personality", SubCommandGroup(opts)) => match opts.first() {
-                        Some(opt) if opt.name == "show" => {
-                            self.show_personality(rpc, &interaction).await?
-                        }
-                        Some(opt) if opt.name == "set" => {
-                            self.set_personality(rpc, &interaction, &opt.value).await?
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
             }
 
             Event::MessageCreate { message } if !message.author.bot => {
@@ -1460,39 +1367,6 @@ impl HandleEvents for LlmPlugin {
         Ok(())
     }
 }
-
-// bot_command! {
-//     enum LLMCommand {
-//         #[subcommand]
-//         Model(ModelCommand),
-
-//         #[subcommand]
-//         Personality(PersonalityCommand),
-//     }
-
-// }
-// enum ModelCommand {
-//     Show,
-//     Set { model: String },
-// }
-
-// enum PersonalityCommand {
-//     Show,
-//     Set { personality: String },
-// }
-
-// macro_rules! bot_command {
-//     (enum $name: ident { $( $tt:tt )* }) => {
-//         bot_command!(@gen_enum $name $( $tt )* );
-//     };
-
-//     (@gen_enum $enum_name: ident $(#[$meta: meta])? $variant_name: ident ( $($ty: ty),* ) $( $tt: tt )*) => {
-//         enum $enum_name {
-
-//         }
-//     }
-// }
-// use bot_command;
 
 #[cfg(test)]
 mod tests {

@@ -47,18 +47,9 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
+        target_id: UserId,
         vibe: Vibe,
     ) -> anyhow::Result<()> {
-        let Some(target_id) = interaction
-            .data
-            .options
-            .iter()
-            .find(|opt| opt.name == "user")
-            .and_then(|opt| opt.value.as_user_id())
-        else {
-            return Ok(());
-        };
-
         if let Err(remaining) = self.cooldowns.try_start(interaction.user.id) {
             return respond_ephemeral(&rpc, interaction, cooldown_message(remaining)).await;
         }
@@ -95,19 +86,14 @@ impl LlmPlugin {
         &self,
         rpc: rpc::ProtocolClient,
         interaction: &CommandInteraction,
+        messages: Option<i64>,
     ) -> anyhow::Result<()> {
         const DEFAULT_MESSAGE_COUNT: usize = 50;
         const MAX_MESSAGE_COUNT: usize = 200;
 
-        let message_count = interaction
-            .data
-            .options
-            .iter()
-            .find(|opt| opt.name == "messages")
-            .and_then(|opt| opt.value.as_i64())
-            .map_or(DEFAULT_MESSAGE_COUNT, |count| {
-                count.clamp(1, MAX_MESSAGE_COUNT as i64) as usize
-            });
+        let message_count = messages.map_or(DEFAULT_MESSAGE_COUNT, |count| {
+            count.clamp(1, MAX_MESSAGE_COUNT as i64) as usize
+        });
 
         let transcript = {
             let contexts_by_channel = self.contexts_by_channel.lock();
