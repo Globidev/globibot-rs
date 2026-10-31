@@ -1076,7 +1076,7 @@ impl LlmPlugin {
         };
         let model = self.llm_model.read().clone();
         let names_prompt = self.lore_book.read().to_names_prompt();
-        let tools = tools::lore_tools();
+        let tools = tools::tool_definitions();
         let started = Instant::now();
         let mut calls = Vec::new();
         let completion_res = self
@@ -1089,8 +1089,7 @@ impl LlmPlugin {
                 context.clone(),
                 &tools,
                 |name, args| {
-                    let result =
-                        tools::run_lore_tool(&self.lore_book, &self.bot_profile, name, args);
+                    let result = self.run_tool(name, args);
                     calls.push(ToolCallRecord {
                         name: name.to_string(),
                         arguments: args.to_string(),

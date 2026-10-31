@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use globibot_core::storage::{self, StorageValue};
 use serde::{Deserialize, Serialize};
 
-const KEPT_DAYS: u64 = 90;
+pub const KEPT_DAYS: u64 = 90;
 const KEPT_REQUESTS: usize = 100;
 
 pub const USAGE_KEY: &str = "latest";

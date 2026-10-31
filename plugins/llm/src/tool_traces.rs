@@ -11,7 +11,7 @@ use crate::{
     usage::{Totals, UsageKind},
 };
 
-const KEPT_SECS: u64 = 3 * 86_400;
+pub const KEPT_SECS: u64 = 3 * 86_400;
 const KEPT_TRACES: usize = 500;
 /// Per argument or result: a lore lookup of many people can be long
 const MAX_TEXT_CHARS: usize = 2_000;
