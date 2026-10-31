@@ -234,11 +234,16 @@ impl Protocol for Server {
     }
 
     async fn start_typing(self, _ctx: Context, chan_id: ChannelId) -> DiscordApiResult<TypingKey> {
+        // Serenity keeps typing until the `Typing` is dropped: by `stop_typing`, or after this in
+        // case the plugin never calls it. Answers with several tool rounds can take a minute.
+        const MAX_TYPING: Duration = Duration::from_secs(120);
+
         let typing = self.discord_http.start_typing(chan_id);
         let key = self.typings.lock().insert(typing);
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(8)).await;
+            tokio::time::sleep(MAX_TYPING).await;
+            // Slotmap keys are versioned: a stopped typing's key matches nothing
             self.typings.lock().remove(key);
         });
 

@@ -1062,9 +1062,10 @@ impl LlmPlugin {
         mut request_message: LlmMessage,
         image_urls: &[String],
     ) -> anyhow::Result<()> {
-        let ctx = rpc::context::current();
-
-        let typing = rpc.start_typing(ctx, message.channel_id).await??;
+        // Each RPC gets its own context: one has a 10s deadline, and answering can take longer
+        let typing = rpc
+            .start_typing(rpc::context::current(), message.channel_id)
+            .await??;
         let image_parts = images::fetch_all(self.llm_client.http(), image_urls).await;
         request_message.content.extend(image_parts);
         context.push(request_message);
@@ -1147,11 +1148,17 @@ impl LlmPlugin {
                     .await
             }
         };
-        rpc.stop_typing(ctx, typing).await??;
+        // Only cosmetic: never worth losing the answer over
+        match rpc.stop_typing(rpc::context::current(), typing).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!("Failed to stop typing: {err}"),
+            Err(err) => tracing::warn!("Failed to stop typing: {err}"),
+        }
         // Quoting the message being answered is noise in a DM
         let send = |text: String| {
             let rpc = rpc.clone();
             async move {
+                let ctx = rpc::context::current();
                 if is_dm {
                     rpc.send_message(ctx, message.channel_id, text).await
                 } else {
