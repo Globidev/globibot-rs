@@ -63,12 +63,12 @@ impl Client {
     }
 
     /// Like `complete`, but the model can call `tools`: each call is answered with
-    /// `run_tool(name, json_arguments)` until the model answers in text
+    /// `run_tool(name, json_arguments).await`, one at a time, until the model answers in text
     #[expect(
         clippy::too_many_arguments,
         reason = "same arguments as complete, plus the tools"
     )]
-    pub async fn complete_with_tools(
+    pub async fn complete_with_tools<ToolRun: Future<Output = String> + Send>(
         &self,
         kind: UsageKind,
         model: String,
@@ -76,7 +76,7 @@ impl Client {
         system_prompt: String,
         parts: Vec<Message>,
         tools: &[serde_json::Value],
-        mut run_tool: impl FnMut(&str, &str) -> String + Send,
+        mut run_tool: impl FnMut(String, String) -> ToolRun + Send,
     ) -> anyhow::Result<ToolCompletion> {
         const MAX_TOOL_ROUNDS: usize = 5;
 
@@ -108,18 +108,17 @@ impl Client {
                 });
             }
 
-            let results = message
-                .tool_calls
-                .iter()
-                .map(|call| Message {
+            let mut results = Vec::new();
+            for call in &message.tool_calls {
+                let text =
+                    run_tool(call.function.name.clone(), call.function.arguments.clone()).await;
+                results.push(Message {
                     role: Role::Tool,
-                    content: vec![ContentPart::Text(TextContentPart {
-                        text: run_tool(&call.function.name, &call.function.arguments),
-                    })],
+                    content: vec![ContentPart::Text(TextContentPart { text })],
                     tool_calls: Vec::new(),
                     tool_call_id: Some(call.id.clone()),
-                })
-                .collect::<Vec<_>>();
+                });
+            }
             req.messages.push(Message {
                 role: Role::Assistant,
                 content: message

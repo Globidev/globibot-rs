@@ -2,7 +2,11 @@
 
 use std::{collections::BTreeMap, fmt::Write};
 
-use globibot_core::{serenity::all::UserId, storage::DiscordProfile};
+use globibot_core::{
+    rpc,
+    serenity::all::{Message, UserId},
+    storage::DiscordProfile,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -10,6 +14,7 @@ use serde_json::{Value, json};
 use crate::{
     LlmPlugin, LoreBook,
     context::clamp_chars,
+    message_search::{self, parse_id},
     tool_traces::{self, Outcome, ToolTrace, ToolTraces},
     usage::{self, Totals, UsageKind, UsageStats},
 };
@@ -27,6 +32,7 @@ const MAX_CALL_CHARS: usize = 300;
 pub fn tool_definitions() -> Vec<Value> {
     let mut definitions = lore_tools();
     definitions.extend(usage_tools());
+    definitions.push(message_search::definition());
     definitions
 }
 
@@ -85,8 +91,15 @@ fn usage_tools() -> Vec<Value> {
 }
 
 impl LlmPlugin {
-    /// Runs the tool `name` with the model's JSON `args`. Errors are returned as text for the model.
-    pub fn run_tool(&self, name: &str, args: &str) -> String {
+    /// Runs the tool `name` with the model's JSON `args`, while answering `asked`. Errors are
+    /// returned as text for the model.
+    pub async fn run_tool(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        asked: &Message,
+        name: &str,
+        args: &str,
+    ) -> String {
         #[derive(Deserialize)]
         struct GetUsage {
             days: Option<u64>,
@@ -100,6 +113,21 @@ impl LlmPlugin {
 
         let now = crate::unix_now();
         let result = match name {
+            "search_messages" => match parse_args(args) {
+                Ok(search) => {
+                    // Results posted in a channel must only come from channels everyone can read
+                    let public_only = asked.guild_id.is_some();
+                    let found = message_search::run(
+                        rpc,
+                        self.guild_id,
+                        asked.author.id,
+                        public_only,
+                        search,
+                    );
+                    Ok(found.await)
+                }
+                Err(err) => Err(err),
+            },
             "get_usage" => parse_args(args).map(|GetUsage { days }| {
                 let days = days
                     .unwrap_or(DEFAULT_USAGE_DAYS)
@@ -399,11 +427,7 @@ fn run_lore_tool(
 
 /// Accepts "123", and "<@123>" in case the model copies a mention
 fn parse_user_id(id: &str) -> Option<UserId> {
-    let id = id.trim().trim_start_matches("<@").trim_end_matches('>');
-    id.parse::<u64>()
-        .ok()
-        .filter(|&id| id != 0)
-        .map(UserId::new)
+    parse_id(id).map(UserId::new)
 }
 
 impl LoreBook {

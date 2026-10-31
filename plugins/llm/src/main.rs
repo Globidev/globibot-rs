@@ -3,6 +3,7 @@ mod context;
 mod cooldown;
 mod fun;
 mod images;
+mod message_search;
 mod openrouter;
 mod settings;
 mod tool_traces;
@@ -1078,7 +1079,9 @@ impl LlmPlugin {
         let names_prompt = self.lore_book.read().to_names_prompt();
         let tools = tools::tool_definitions();
         let started = Instant::now();
-        let mut calls = Vec::new();
+        // Filled by each tool run, which can't borrow the closure that starts it
+        let calls = Mutex::new(Vec::new());
+        let (calls_ref, rpc_ref) = (&calls, &rpc);
         let completion_res = self
             .llm_client
             .complete_with_tools(
@@ -1088,17 +1091,18 @@ impl LlmPlugin {
                 self.system_prompt_with(&names_prompt),
                 context.clone(),
                 &tools,
-                |name, args| {
-                    let result = self.run_tool(name, args);
-                    calls.push(ToolCallRecord {
-                        name: name.to_string(),
-                        arguments: args.to_string(),
+                move |name, args| async move {
+                    let result = self.run_tool(rpc_ref, message, &name, &args).await;
+                    calls_ref.lock().push(ToolCallRecord {
+                        name,
+                        arguments: args,
                         result: result.clone(),
                     });
                     result
                 },
             )
             .await;
+        let calls = calls.into_inner();
 
         let outcome = match &completion_res {
             Ok(completion) => Outcome::Answered {
