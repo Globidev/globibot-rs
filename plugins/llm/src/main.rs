@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             .get_opt::<LlmSettings>(SETTINGS_KEY)
             .await
             .context("Failed to load LLM settings")?;
+        let contexts_by_channel = load_contexts(rpc, &mut storage).await?;
 
         LlmPlugin::from_env(
             guild_id,
@@ -92,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
             lore_book,
             personality_registry,
             settings,
+            contexts_by_channel,
             storage.clone(),
         )
     })
@@ -99,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
 
     let llm_plugin = Arc::clone(&plugin.inner);
 
-    let save_lore_regularly = {
+    // ponytail: saves every channel each minute, a restart loses up to a minute of context
+    let save_regularly = {
         let plugin = Arc::clone(&plugin.inner);
         let mut storage = storage.clone();
         async move {
@@ -108,6 +111,18 @@ async fn main() -> anyhow::Result<()> {
                 let lore_book = plugin.lore_book.read().clone();
                 if let Err(err) = storage.set("latest", &lore_book).await {
                     tracing::error!("Failed to save LLM lore book: {err:?}");
+                }
+
+                let contexts = plugin
+                    .contexts_by_channel
+                    .lock()
+                    .iter()
+                    .map(|(channel_id, context)| (*channel_id, context.to_saved()))
+                    .collect_vec();
+                for (channel_id, context) in contexts {
+                    if let Err(err) = storage.set(channel_id, &context).await {
+                        tracing::error!(%channel_id, "Failed to save LLM context: {err:?}");
+                    }
                 }
             }
         }
@@ -122,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         _ = plugin.handle_events() => {
             tracing::info!("Event handler has shut down");
         },
-        _ = save_lore_regularly => {
+        _ = save_regularly => {
             tracing::info!("Lore saving task has shut down");
         }
     }
@@ -788,6 +803,31 @@ fn suggested_addition_reply(for_user_id: UserId) -> String {
     )
 }
 
+/// Contexts saved by a previous run. Channels that can't be fetched anymore are skipped.
+async fn load_contexts(
+    rpc: &rpc::ProtocolClient,
+    storage: &mut RedisStorage,
+) -> anyhow::Result<HashMap<ChannelId, ChannelContext>> {
+    let mut contexts = HashMap::new();
+    for key in storage.list_keys::<SavedContext>("*").await? {
+        let Ok(channel_id) = key.parse::<ChannelId>() else {
+            continue;
+        };
+        let saved = storage
+            .get::<SavedContext>(channel_id)
+            .await
+            .with_context(|| format!("Failed to load LLM context for channel {channel_id}"))?;
+        match rpc.get_channel(rpc::context::current(), channel_id).await? {
+            Ok(channel) => {
+                contexts.insert(channel_id, ChannelContext::from_saved(channel, saved));
+            }
+            Err(err) => tracing::warn!(%channel_id, "Skipping saved context: {err}"),
+        }
+    }
+    tracing::info!("Loaded {} saved channel contexts", contexts.len());
+    Ok(contexts)
+}
+
 fn profile_from_member(member: &Member) -> DiscordProfile {
     DiscordProfile {
         user_id: member.user.id,
@@ -962,12 +1002,12 @@ impl LlmPlugin {
 
         let max_size = self.context_window_size.load(Ordering::Relaxed);
         let (dropped, previous_summary) = {
-        let mut contexts_by_channel = self.contexts_by_channel.lock();
-        let context = match contexts_by_channel.entry(message.channel_id) {
-            Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
-            Entry::Vacant(vacant_entry) => {
-                let channel = fetched_channel
-                    .context("Channel context vanished while registering message")?;
+            let mut contexts_by_channel = self.contexts_by_channel.lock();
+            let context = match contexts_by_channel.entry(message.channel_id) {
+                Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+                Entry::Vacant(vacant_entry) => {
+                    let channel = fetched_channel
+                        .context("Channel context vanished while registering message")?;
                     vacant_entry.insert(ChannelContext::new(channel))
                 }
             };
@@ -993,7 +1033,7 @@ impl LlmPlugin {
                 }
                 // The dropped messages are lost, the previous summary stays
                 Err(err) => tracing::error!(%channel_id, "Failed to summarize context: {err:?}"),
-        }
+            }
         });
 
         Ok(())
