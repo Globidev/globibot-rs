@@ -28,6 +28,10 @@ impl Client {
         })
     }
 
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
     pub fn usage(&self) -> UsageStats {
         self.usage.lock().clone()
     }
@@ -43,6 +47,11 @@ impl Client {
         let mut messages = vec![Message::text(Role::System, system_prompt)];
 
         messages.extend(parts);
+        let images = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|part| matches!(part, ContentPart::Image(_)))
+            .count() as u64;
 
         let req = Request {
             model,
@@ -72,7 +81,7 @@ impl Client {
                     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                     // The model that actually answered, in case OpenRouter picked a fallback
                     let model = chat_response.model.as_deref().unwrap_or(&model);
-                    usage.lock().record(now, kind, model, report);
+                    usage.lock().record(now, kind, model, images, report);
                 }
                 None => tracing::warn!("OpenRouter response has no usage"),
             }

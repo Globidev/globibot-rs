@@ -4,17 +4,20 @@
 //! same between drops and the provider's prompt cache keeps hitting. Each dropped chunk is merged
 //! into the summary, which is sent ahead of the messages.
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use globibot_core::{
-    serenity::all::Channel,
+    serenity::all::{Channel, MessageId},
     storage::{self, StorageValue},
 };
 use itertools::Itertools;
 
 use crate::{
     fun::transcript_line,
-    openrouter::{self, Message, Role},
+    openrouter::{self, ContentPart, Message, Role, TextContentPart},
     usage::UsageKind,
 };
 
@@ -26,11 +29,38 @@ const MAX_SUMMARY_CHARS: usize = 6_000;
 
 pub const SUMMARY_TAG: &str = "[Summary of earlier messages in this channel]";
 
+/// How far back a ping can look for an image when it has none of its own
+const RECENT_IMAGE_MAX_MESSAGES: u64 = 10;
+const RECENT_IMAGE_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContextMessage {
+    /// The Discord message, so its image captions can be added once ready. `None` for the
+    /// bot's answers, and for messages saved before IDs were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<MessageId>,
+    #[serde(flatten)]
+    pub message: Message,
+}
+
+/// The latest images posted in a channel. Not saved: their links expire anyway.
+#[derive(Debug, Clone)]
+pub struct PostedImages {
+    pub author_name: String,
+    pub urls: Vec<String>,
+    posted_at: Instant,
+    /// The channel's message count when they were posted
+    position: u64,
+}
+
 #[derive(Debug)]
 pub struct ChannelContext {
     pub channel: Channel,
     pub summary: Option<String>,
-    pub messages: VecDeque<Message>,
+    pub messages: VecDeque<ContextMessage>,
+    /// Messages pushed since startup
+    pushed: u64,
+    latest_images: Option<PostedImages>,
 }
 
 impl ChannelContext {
@@ -39,20 +69,65 @@ impl ChannelContext {
             channel,
             summary: None,
             messages: VecDeque::new(),
+            pushed: 0,
+            latest_images: None,
         }
     }
 
     /// Adds a message. Past `max_size` messages, drops the oldest ones down to 70% of it and
     /// returns them, to be merged into the summary.
-    pub fn push(&mut self, message: Message, max_size: usize) -> Option<Vec<Message>> {
+    pub fn push(&mut self, message: ContextMessage, max_size: usize) -> Option<Vec<Message>> {
         self.messages.push_back(message);
+        self.pushed += 1;
         if self.messages.len() <= max_size {
             return None;
         }
 
         let keep = max_size * KEEP_AFTER_DROP_PERCENT / 100;
         let drop_count = self.messages.len() - keep;
-        Some(self.messages.drain(..drop_count).collect())
+        Some(
+            self.messages
+                .drain(..drop_count)
+                .map(|context_message| context_message.message)
+                .collect(),
+        )
+    }
+
+    /// Replaces the `placeholder` text of a message, e.g. with its images' caption. False if the
+    /// message or placeholder is gone.
+    pub fn replace_text(&mut self, id: MessageId, placeholder: &str, text: String) -> bool {
+        let part = self
+            .messages
+            .iter_mut()
+            .rev()
+            .filter(|context_message| context_message.id == Some(id))
+            .flat_map(|context_message| context_message.message.content.iter_mut())
+            .find(|part| matches!(part, ContentPart::Text(part) if part.text == placeholder));
+        match part {
+            Some(part) => {
+                *part = ContentPart::Text(TextContentPart { text });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remembers images just posted. Call after pushing their message.
+    pub fn set_latest_images(&mut self, author_name: String, urls: Vec<String>) {
+        self.latest_images = Some(PostedImages {
+            author_name,
+            urls,
+            posted_at: Instant::now(),
+            position: self.pushed,
+        });
+    }
+
+    /// The latest images, if posted at most 10 messages and 5 minutes ago
+    pub fn recent_images(&self, now: Instant) -> Option<&PostedImages> {
+        self.latest_images.as_ref().filter(|images| {
+            self.pushed - images.position < RECENT_IMAGE_MAX_MESSAGES
+                && now.duration_since(images.posted_at) <= RECENT_IMAGE_MAX_AGE
+        })
     }
 
     /// What's sent to the model: the summary first, then the messages.
@@ -63,7 +138,11 @@ impl ChannelContext {
             .map(|summary| Message::text(Role::User, format!("{SUMMARY_TAG}\n{summary}")));
         summary
             .into_iter()
-            .chain(self.messages.iter().cloned())
+            .chain(
+                self.messages
+                    .iter()
+                    .map(|context_message| context_message.message.clone()),
+            )
             .collect()
     }
 
@@ -76,9 +155,9 @@ impl ChannelContext {
 
     pub fn from_saved(channel: Channel, saved: SavedContext) -> Self {
         Self {
-            channel,
             summary: saved.summary,
             messages: saved.messages,
+            ..Self::new(channel)
         }
     }
 }
@@ -87,7 +166,7 @@ impl ChannelContext {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SavedContext {
     summary: Option<String>,
-    messages: VecDeque<Message>,
+    messages: VecDeque<ContextMessage>,
 }
 
 impl StorageValue for SavedContext {
@@ -154,6 +233,13 @@ mod tests {
         }
     }
 
+    fn user_message(id: u64, text: &str) -> ContextMessage {
+        ContextMessage {
+            id: Some(MessageId::new(id + 1)),
+            message: Message::text(Role::User, text.to_string()),
+        }
+    }
+
     fn context_with(count: usize) -> (ChannelContext, Option<Vec<Message>>) {
         let channel = serde_json::from_value(serde_json::json!({
             "id": "1", "type": 0, "guild_id": "2", "name": "general"
@@ -162,7 +248,7 @@ mod tests {
         let mut context = ChannelContext::new(channel);
         let mut dropped = None;
         for i in 0..count {
-            dropped = context.push(Message::text(Role::User, i.to_string()), 10);
+            dropped = context.push(user_message(i as u64, &i.to_string()), 10);
         }
         (context, dropped)
     }
@@ -180,7 +266,7 @@ mod tests {
             dropped.iter().map(text_of).collect_vec(),
             ["0", "1", "2", "3"]
         );
-        assert_eq!(text_of(&context.messages[0]), "4");
+        assert_eq!(text_of(&context.messages[0].message), "4");
         assert_eq!(context.messages.len(), 7);
 
         // Then nothing is dropped until the window is full again
@@ -205,5 +291,73 @@ mod tests {
     fn clamps_long_summaries() {
         assert_eq!(clamp_chars("short", 10), "short");
         assert_eq!(clamp_chars("abcdefghijkl", 5), "abcd…");
+    }
+
+    #[test]
+    fn replaces_placeholders_by_message_id() {
+        let (mut context, _) = context_with(3);
+        context.messages[1]
+            .message
+            .content
+            .push(ContentPart::Text(TextContentPart {
+                text: "[Image]".to_string(),
+            }));
+
+        assert!(!context.replace_text(MessageId::new(1), "[Image]", "x".to_string()));
+        assert!(context.replace_text(MessageId::new(2), "[Image]", "[Image: a cat]".to_string()));
+        assert_eq!(
+            transcript_line(&context.messages[1].message),
+            "1 [Image: a cat]"
+        );
+        // Already replaced
+        assert!(!context.replace_text(MessageId::new(2), "[Image]", "x".to_string()));
+    }
+
+    #[test]
+    fn recent_images_expire_by_messages_and_time() {
+        let (mut context, _) = context_with(1);
+        context.set_latest_images("globi".to_string(), vec!["url".to_string()]);
+        let now = Instant::now();
+        assert!(context.recent_images(now).is_some());
+
+        // 9 more messages: still recent, the 10th after it is too far
+        for i in 0..9 {
+            context.push(user_message(100 + i, "later"), 1000);
+        }
+        assert!(context.recent_images(now).is_some());
+        context.push(user_message(200, "later"), 1000);
+        assert!(context.recent_images(now).is_none());
+
+        context.set_latest_images("globi".to_string(), vec!["url".to_string()]);
+        assert!(
+            context
+                .recent_images(now + Duration::from_secs(4 * 60))
+                .is_some()
+        );
+        assert!(
+            context
+                .recent_images(now + Duration::from_secs(6 * 60))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn loads_contexts_saved_without_message_ids() {
+        let saved = serde_json::from_value::<SavedContext>(serde_json::json!({
+            "summary": null,
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }]
+        }))
+        .unwrap();
+        assert!(saved.messages[0].id.is_none());
+        assert_eq!(text_of(&saved.messages[0].message), "hi");
+
+        // And IDs round-trip
+        let json = serde_json::to_value(ContextMessage {
+            id: Some(MessageId::new(5)),
+            message: Message::text(Role::User, "hi".to_string()),
+        })
+        .unwrap();
+        assert_eq!(json["id"], "5");
+        assert_eq!(json["role"], "user");
     }
 }

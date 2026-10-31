@@ -2,6 +2,7 @@ mod commands;
 mod context;
 mod cooldown;
 mod fun;
+mod images;
 mod openrouter;
 mod settings;
 mod trivia;
@@ -20,10 +21,11 @@ use commands::{
     AddToLore, AddUserContext, Hype, Llm, LlmCommands, LoreTrivia, ModelCommand, PersonalityChoice,
     PersonalityCommand, Roast, Tldr,
 };
-use context::{ChannelContext, SavedContext};
+use context::{ChannelContext, ContextMessage, SavedContext};
 use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
-use openrouter::{ContentPart, ImageContentPart, Message as LlmMessage, Role, TextContentPart};
+use images::MessageImages;
+use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
@@ -37,7 +39,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use globibot_core::{
@@ -615,6 +617,8 @@ For example, to reference a user named "Globi", you would write `Globi`.
 
 The conversation may start with a summary of older messages, starting with "[Summary of earlier messages in this channel]".
 
+Images appear as "[Image: description]" and GIFs as "[GIF: description]". When you are asked about an image, the image itself may be attached.
+
 You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
 Max 1 or 2 paragraphs, never more than that.
 
@@ -958,36 +962,42 @@ impl LlmPlugin {
         system_prompt
     }
 
+    /// Answers a ping. `context` is the channel's context without this message, and
+    /// `request_message` is this message as sent, with the images at `image_urls`.
     async fn answer_message(
         &self,
         rpc: rpc::ProtocolClient,
         message: &Message,
-        user_llm_message: LlmMessage,
+        mut context: Vec<LlmMessage>,
+        mut request_message: LlmMessage,
+        image_urls: &[String],
     ) -> anyhow::Result<()> {
         let ctx = rpc::context::current();
 
-        let mut parts = self.context_for_channel(message.channel_id);
-        parts.push(user_llm_message.clone());
-
         let typing = rpc.start_typing(ctx, message.channel_id).await??;
+        let image_parts = images::fetch_all(self.llm_client.http(), image_urls).await;
+        request_message.content.extend(image_parts);
+        context.push(request_message);
+
         let completion = self.llm_client.complete(
             UsageKind::Chat,
             &self.llm_model.read(),
             message.channel_id.to_string(),
             self.system_prompt(),
-            parts,
+            context,
         );
         let completion_res = completion.await;
         rpc.stop_typing(ctx, typing).await??;
-        self.register_message(rpc.clone(), message, user_llm_message)
-            .await?;
         if let Ok(answer) = completion_res {
             let answer = sanitize_llm_output(&answer);
             rpc.send_reply(ctx, message.channel_id, answer.clone(), message.id)
                 .await??;
 
-            let bot_llm_message = LlmMessage::text(Role::Assistant, answer);
-            self.register_message(rpc, message, bot_llm_message).await?;
+            let bot_message = ContextMessage {
+                id: None,
+                message: LlmMessage::text(Role::Assistant, answer),
+            };
+            self.register_message(rpc, message, bot_message).await?;
         } else {
             tracing::error!("Failed to get LLM completion: {:?}", completion_res.err());
             rpc.send_reply(
@@ -1002,11 +1012,81 @@ impl LlmPlugin {
         Ok(())
     }
 
+    /// The images to show the model when answering `message`: its own, else those of the message
+    /// it replies to, else the channel's latest ones if recent. With a label saying what they are.
+    fn images_to_show(
+        &self,
+        message: &Message,
+        own_images: &MessageImages,
+    ) -> (Option<String>, Vec<String>) {
+        if !own_images.urls.is_empty() {
+            return (None, own_images.urls.clone());
+        }
+
+        if let Some(replied_to) = &message.referenced_message {
+            let images = MessageImages::of(replied_to);
+            if !images.urls.is_empty() {
+                let label = "[Images from the message being replied to]".to_string();
+                return (Some(label), images.urls);
+            }
+        }
+
+        let contexts_by_channel = self.contexts_by_channel.lock();
+        contexts_by_channel
+            .get(&message.channel_id)
+            .and_then(|context| context.recent_images(Instant::now()))
+            .map_or((None, vec![]), |images| {
+                let label = format!("[The latest images, posted by {}]", images.author_name);
+                (Some(label), images.urls.clone())
+            })
+    }
+
+    /// Remembers the images of `message` (already registered) and replaces their placeholder in
+    /// the context with a caption, in the background
+    fn describe_images(&self, message: &Message, author_name: &str, images: &MessageImages) {
+        let channel_id = message.channel_id;
+        let message_id = message.id;
+        let placeholder = images.placeholder();
+        let urls = images.urls.clone();
+
+        if let Some(context) = self.contexts_by_channel.lock().get_mut(&channel_id) {
+            context.set_latest_images(author_name.to_string(), urls.clone());
+        }
+
+        let llm_client = self.llm_client.clone();
+        let model = self.llm_model.read().clone();
+        let contexts_by_channel = Arc::clone(&self.contexts_by_channel);
+        tokio::spawn(async move {
+            let image_parts = images::fetch_all(llm_client.http(), &urls).await;
+            let caption = match images::caption(&llm_client, &model, image_parts).await {
+                Ok(caption) => caption,
+                // The placeholder stays
+                Err(err) => {
+                    return tracing::error!(%channel_id, "Failed to caption images: {err:?}");
+                }
+            };
+            let label = if placeholder == "[Images]" {
+                "Images"
+            } else {
+                "Image"
+            };
+            let replaced = contexts_by_channel
+                .lock()
+                .get_mut(&channel_id)
+                .is_some_and(|context| {
+                    context.replace_text(message_id, placeholder, format!("[{label}: {caption}]"))
+                });
+            if !replaced {
+                tracing::warn!(%channel_id, "Captioned message left the context first");
+            }
+        });
+    }
+
     async fn register_message(
         &self,
         rpc: rpc::ProtocolClient,
         message: &Message,
-        llm_message: LlmMessage,
+        llm_message: ContextMessage,
     ) -> anyhow::Result<()> {
         // Fetch the channel before taking the lock: holding a blocking mutex across an RPC
         // await can starve the runtime's worker threads
@@ -1289,46 +1369,67 @@ impl HandleEvents for LlmPlugin {
                     .await??
                     .replace("@rust-bot", "@globibot");
 
-                let user_llm_message = {
-                    let mut content = vec![ContentPart::Text(TextContentPart {
-                        text: format!("{user_name} (<@{user_id}>): {content_safe}"),
-                    })];
-
-                    if false {
-                        content.extend(message.attachments.iter().filter_map(|att| {
-                            let _dims = att.dimensions()?;
-                            Some(ContentPart::Image(ImageContentPart {
-                                image_url: openrouter::ImageUrl {
-                                    url: att.url.clone(),
-                                },
-                            }))
-                        }));
+                let images = MessageImages::of(&message);
+                let stored_message = {
+                    let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];
+                    texts.extend(
+                        images::gif_descriptions(&message.content)
+                            .into_iter()
+                            .map(|gif| format!("[GIF: {gif}]")),
+                    );
+                    if images.spoilers > 0 {
+                        texts.push("[Spoiler image]".to_string());
                     }
-
-                    LlmMessage {
-                        role: Role::User,
-                        content,
+                    if !images.urls.is_empty() {
+                        texts.push(images.placeholder().to_string());
+                    }
+                    ContextMessage {
+                        id: Some(message.id),
+                        message: LlmMessage {
+                            role: Role::User,
+                            content: texts
+                                .into_iter()
+                                .map(|text| ContentPart::Text(TextContentPart { text }))
+                                .collect(),
+                        },
                     }
                 };
 
-                if message.mentions_user_id(self.bot_id) {
-                    if self.cooldowns.try_start(message.author.id).is_ok() {
-                        self.answer_message(rpc, &message, user_llm_message).await?;
-                    } else {
-                        // Still keep the message as context, and show why there's no answer
-                        self.register_message(rpc.clone(), &message, user_llm_message)
-                            .await?;
-                        rpc.create_reaction(
-                            rpc::context::current(),
-                            message.channel_id,
-                            message.id,
-                            ReactionType::Unicode("⏳".to_string()),
-                        )
-                        .await??;
+                let mentioned = message.mentions_user_id(self.bot_id);
+                let answering = mentioned && self.cooldowns.try_start(message.author.id).is_ok();
+
+                // Taken before this message is added, which is sent separately with its images
+                let answer_input = answering.then(|| {
+                    (
+                        self.context_for_channel(message.channel_id),
+                        self.images_to_show(&message, &images),
+                    )
+                });
+
+                self.register_message(rpc.clone(), &message, stored_message.clone())
+                    .await?;
+                if !images.urls.is_empty() {
+                    self.describe_images(&message, user_name, &images);
+                }
+
+                if let Some((context, (label, image_urls))) = answer_input {
+                    let mut request_message = stored_message.message;
+                    if let Some(label) = label {
+                        request_message
+                            .content
+                            .push(ContentPart::Text(TextContentPart { text: label }));
                     }
-                } else {
-                    self.register_message(rpc, &message, user_llm_message)
+                    self.answer_message(rpc, &message, context, request_message, &image_urls)
                         .await?;
+                } else if mentioned {
+                    // Still kept as context, show why there's no answer
+                    rpc.create_reaction(
+                        rpc::context::current(),
+                        message.channel_id,
+                        message.id,
+                        ReactionType::Unicode("⏳".to_string()),
+                    )
+                    .await??;
                 }
             }
 
