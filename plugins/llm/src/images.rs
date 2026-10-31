@@ -4,12 +4,17 @@
 //! context, so the context stays text: cheap, cache-friendly, and unaffected by Discord's image
 //! links expiring. The images themselves are only sent when someone pings the bot about them.
 //!
+//! Images only go to the model provider with their author's consent: they have the images role,
+//! or they shared them with the bot directly (a ping or a DM). Other images are only marked as
+//! posted.
+//!
 //! Images are always downloaded and sent inline: the model providers can't fetch Discord's CDN
 //! (Google gets a 403). They go through Discord's media proxy, resized to fit 1024px and
 //! converted to a static WebP (GIFs become their first frame).
 
 use base64::Engine;
-use globibot_core::serenity::all::{Attachment, Message as DiscordMessage};
+use globibot_core::serenity::all::{Attachment, Message as DiscordMessage, UserId};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     openrouter::{self, ContentPart, ImageContentPart, ImageUrl, Message, Role, TextContentPart},
@@ -22,6 +27,34 @@ pub const MAX_IMAGES_PER_MESSAGE: usize = 4;
 const MAX_IMAGE_SIDE: u32 = 1024;
 const MAX_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CAPTION_CHARS: usize = 1_500;
+
+/// Stands for images the bot can't see
+pub const NOT_SHARED: &str = "[Image not shared with the bot]";
+
+/// Why the images of a message may be sent to the model provider
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Consent {
+    /// The author shared them with the bot, in a ping or a DM: covers that message for good
+    Shared,
+    /// The author has the images role: lasts as long as they keep it
+    Role(UserId),
+}
+
+pub fn consent(in_dm: bool, shared: bool, author: UserId, has_role: bool) -> Option<Consent> {
+    if in_dm || shared {
+        Some(Consent::Shared)
+    } else if has_role {
+        Some(Consent::Role(author))
+    } else {
+        None
+    }
+}
+
+/// Whether a text part is an image caption, as put in the context once ready
+pub fn is_caption(text: &str) -> bool {
+    text.starts_with("[Image: ") || text.starts_with("[Images: ")
+}
 
 /// The images of a message that can be shown to the model
 #[derive(Debug, Default)]
@@ -259,6 +292,18 @@ mod tests {
         assert_eq!(fit(4000, 2000, 1024), (1024, 512));
         assert_eq!(fit(500, 3000, 1024), (170, 1024));
         assert_eq!(fit(800, 600, 1024), (800, 600));
+    }
+
+    #[test]
+    fn consent_comes_from_sharing_or_the_role() {
+        let author = UserId::new(1);
+        assert_eq!(consent(true, false, author, false), Some(Consent::Shared));
+        assert_eq!(consent(false, true, author, true), Some(Consent::Shared));
+        assert_eq!(
+            consent(false, false, author, true),
+            Some(Consent::Role(author))
+        );
+        assert_eq!(consent(false, false, author, false), None);
     }
 
     #[test]

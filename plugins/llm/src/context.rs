@@ -17,6 +17,7 @@ use itertools::Itertools;
 
 use crate::{
     fun::transcript_line,
+    images::{self, Consent},
     openrouter::{self, ContentPart, Message, Role, TextContentPart},
     usage::UsageKind,
 };
@@ -39,6 +40,10 @@ pub struct ContextMessage {
     /// bot's answers, and for messages saved before IDs were kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<MessageId>,
+    /// What allows its images to be captioned. `None` without images, or for messages saved
+    /// before consent was asked: their captions are forgotten on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_consent: Option<Consent>,
     #[serde(flatten)]
     pub message: Message,
 }
@@ -146,6 +151,26 @@ impl ChannelContext {
             .collect()
     }
 
+    /// Replaces the captions of messages whose consent no longer holds with the not shared marker.
+    /// Returns how many were replaced.
+    pub fn forget_captions(&mut self, still_holds: impl Fn(Consent) -> bool) -> usize {
+        let mut forgotten = 0;
+        for context_message in &mut self.messages {
+            if context_message.images_consent.is_some_and(&still_holds) {
+                continue;
+            }
+            for part in &mut context_message.message.content {
+                if let ContentPart::Text(part) = part
+                    && images::is_caption(&part.text)
+                {
+                    part.text = images::NOT_SHARED.to_string();
+                    forgotten += 1;
+                }
+            }
+        }
+        forgotten
+    }
+
     pub fn to_saved(&self) -> SavedContext {
         SavedContext {
             summary: self.summary.clone(),
@@ -236,6 +261,7 @@ mod tests {
     fn user_message(id: u64, text: &str) -> ContextMessage {
         ContextMessage {
             id: Some(MessageId::new(id + 1)),
+            images_consent: None,
             message: Message::text(Role::User, text.to_string()),
         }
     }
@@ -342,6 +368,47 @@ mod tests {
     }
 
     #[test]
+    fn forgets_captions_without_consent() {
+        let (mut context, _) = context_with(4);
+        let holder = globibot_core::serenity::all::UserId::new(7);
+        let consents = [
+            None,
+            Some(Consent::Shared),
+            Some(Consent::Role(holder)),
+            Some(Consent::Role(globibot_core::serenity::all::UserId::new(8))),
+        ];
+        for (context_message, consent) in context.messages.iter_mut().zip(consents) {
+            context_message.images_consent = consent;
+            context_message
+                .message
+                .content
+                .push(ContentPart::Text(TextContentPart {
+                    text: "[Image: a cat]".to_string(),
+                }));
+        }
+
+        let forgotten = context.forget_captions(|consent| match consent {
+            Consent::Shared => true,
+            Consent::Role(user) => user == holder,
+        });
+        assert_eq!(forgotten, 2);
+        let lines = context
+            .messages
+            .iter()
+            .map(|m| transcript_line(&m.message))
+            .collect_vec();
+        assert_eq!(
+            lines,
+            [
+                format!("0 {}", images::NOT_SHARED),
+                "1 [Image: a cat]".to_string(),
+                "2 [Image: a cat]".to_string(),
+                format!("3 {}", images::NOT_SHARED),
+            ]
+        );
+    }
+
+    #[test]
     fn loads_contexts_saved_without_message_ids() {
         let saved = serde_json::from_value::<SavedContext>(serde_json::json!({
             "summary": null,
@@ -354,6 +421,7 @@ mod tests {
         // And IDs round-trip
         let json = serde_json::to_value(ContextMessage {
             id: Some(MessageId::new(5)),
+            images_consent: None,
             message: Message::text(Role::User, "hi".to_string()),
         })
         .unwrap();

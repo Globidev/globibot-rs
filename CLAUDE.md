@@ -13,6 +13,7 @@ See README.md for the architecture. Private deploy/infra notes, if present, are 
 - The bot forwards only slash/command interactions to plugins (`globibot-bot/src/discord.rs`). Button/component clicks are dropped.
 - Plugin web API: `rpc.register_web_api(advertise_addr)` makes the bot add a Caddy route `/<plugin id>/*` (prefix stripped). Publicly: `https://globibot.com/plugin-api/<plugin id>/...`. Logged-in users are checked via the `discord_session` private cookie + `COOKIE_SECRET` (copy from the llm plugin). Sessions last 30 days from the last visit (`globibot-bot/src/web/discord_oauth.rs` refreshes Discord tokens); plugins read the cached `DiscordProfile`, which logout deletes.
 - Images for the LLM must be downloaded and sent inline as base64 data URLs: providers get a 403 from Discord's CDN. Discord's media proxy (`proxy_url` + `width`/`height`/`format=webp`) resizes and turns GIFs into a still frame (`plugins/llm/src/images.rs`).
+- Images go to the model provider only with their author's consent (`images::consent`): the role in `LLM_IMAGES_ROLE_ID`, or a ping or DM containing them. Any new path that sends or captions images must check it.
 - Storage: `RedisStorage::from_env()` (`REDIS_URL`), values implement `StorageValue` with a `REDIS_NS`.
 
 ## Slash commands
