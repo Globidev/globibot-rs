@@ -15,6 +15,7 @@ use itertools::Itertools;
 use crate::{
     fun::transcript_line,
     openrouter::{self, Message, Role},
+    usage::UsageKind,
 };
 
 /// Share of the window kept after a drop
@@ -119,6 +120,7 @@ pub async fn summarize(
 
     let summary = client
         .complete(
+            UsageKind::Summary,
             model,
             None,
             SYSTEM_PROMPT.to_string(),
