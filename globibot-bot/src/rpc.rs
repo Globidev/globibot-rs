@@ -3,8 +3,7 @@ use std::{io, sync::Arc, time::Duration};
 use futures::{Stream, StreamExt};
 use globibot_core::rpc::{self, AcceptError, DiscordApiError, RegisterWebApiError, TypingKey};
 use globibot_core::serenity::all::{
-    CommandId, CommandOption, CreateAttachment, CreateMessage, EditMessage, InteractionId, Member,
-    Typing, UserId,
+    CommandId, CreateAttachment, CreateMessage, EditMessage, InteractionId, Member, Typing, UserId,
 };
 use globibot_core::serenity::model::prelude::{Channel as DiscordChannel, User};
 use globibot_core::serenity::{
@@ -18,7 +17,6 @@ use globibot_core::serenity::{
     },
     utils::{self, ContentSafeOptions},
 };
-use serde::Deserialize;
 use tarpc::{ChannelError, context::Context, server::Channel};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -286,18 +284,14 @@ impl Protocol for Server {
         ctx: Context,
         cmd_data: serde_json::Value,
     ) -> DiscordApiResult<Command> {
-        let cmd_name = cmd_data
+        cmd_data
             .get("name")
-            .ok_or("Missing command name")?
-            .as_str()
-            .ok_or("Invalid command name")?;
+            .and_then(|name| name.as_str())
+            .ok_or("Missing command name")?;
 
         let existing_commands = self.discord_http.get_global_commands().await?;
 
-        let Some(existing_cmd) = existing_commands
-            .into_iter()
-            .find(|cmd| cmd.name == cmd_name)
-        else {
+        let Some(existing_cmd) = find_command(existing_commands, &cmd_data) else {
             return self.create_global_command(ctx, cmd_data).await;
         };
 
@@ -340,18 +334,14 @@ impl Protocol for Server {
         guild_id: GuildId,
         cmd_data: serde_json::Value,
     ) -> DiscordApiResult<Command> {
-        let cmd_name = cmd_data
+        cmd_data
             .get("name")
-            .ok_or("Missing command name")?
-            .as_str()
-            .ok_or("Invalid command name")?;
+            .and_then(|name| name.as_str())
+            .ok_or("Missing command name")?;
 
         let existing_commands = self.discord_http.get_guild_commands(guild_id).await?;
 
-        let Some(existing_cmd) = existing_commands
-            .into_iter()
-            .find(|cmd| cmd.name == cmd_name)
-        else {
+        let Some(existing_cmd) = find_command(existing_commands, &cmd_data) else {
             return self.create_guild_command(ctx, guild_id, cmd_data).await;
         };
 
@@ -436,31 +426,162 @@ impl Protocol for Server {
     }
 }
 
+/// The existing command with the same name and type as `cmd_data`. Discord allows a slash and a
+/// user command to share a name, and it ignores type changes in an edit.
+fn find_command(commands: Vec<Command>, cmd_data: &serde_json::Value) -> Option<Command> {
+    let name = cmd_data.get("name")?.as_str()?;
+    let kind = cmd_data.get("type").and_then(|v| v.as_u64()).unwrap_or(1);
+    commands
+        .into_iter()
+        .find(|cmd| cmd.name == name && u64::from(u8::from(cmd.kind)) == kind)
+}
+
+/// Whether Discord's copy of a command differs from what a plugin sends.
 fn command_changed(
     existing_cmd: &Command,
     cmd_data: &serde_json::Value,
 ) -> Result<bool, DiscordApiError> {
-    let description_changed = {
-        let cmd_description = cmd_data.get("description").and_then(|v| v.as_str());
-        cmd_description.is_some_and(|desc| existing_cmd.description != desc)
+    let existing =
+        serde_json::to_value(existing_cmd).map_err(|e| DiscordApiError(e.to_string()))?;
+    // Compared even when not sent, so dropping every option counts as a change
+    let mut cmd_data = cmd_data.clone();
+    if let Some(fields) = cmd_data.as_object_mut() {
+        fields.entry("options").or_insert(serde_json::json!([]));
+    }
+    Ok(!same_json(&cmd_data, &existing, false))
+}
+
+/// Compares what we send (`ours`) to what Discord has (`theirs`). At the top level only our keys
+/// count, since Discord adds its own (`id`, `version`, `integration_types`...). Below it (options,
+/// choices) keys from both sides count, so removing a field is a change. Missing, `null`, `false`
+/// and empty values are alike: that's how Discord leaves out defaults.
+fn same_json(ours: &serde_json::Value, theirs: &serde_json::Value, strict: bool) -> bool {
+    use serde_json::Value::{Array, Bool, Null, Number, Object};
+
+    let is_default = |value: &serde_json::Value| match value {
+        Null | Bool(false) => true,
+        Array(items) => items.is_empty(),
+        Object(fields) => fields.is_empty(),
+        _ => false,
     };
 
-    let opts_changed = 'opts_changed: {
-        let existing_opts = &existing_cmd.options;
-        let Some(cmd_opts) = cmd_data.get("options") else {
-            break 'opts_changed !existing_opts.is_empty();
+    match (ours, theirs) {
+        (Object(ours), Object(theirs)) => {
+            ours.keys()
+                .chain(theirs.keys().filter(|_| strict))
+                .all(|key| {
+                    let ours = ours.get(key).unwrap_or(&Null);
+                    let theirs = theirs.get(key).unwrap_or(&Null);
+                    same_json(ours, theirs, true)
+                })
+        }
+        (Array(ours), Array(theirs)) => {
+            ours.len() == theirs.len()
+                && ours
+                    .iter()
+                    .zip(theirs)
+                    .all(|(ours, theirs)| same_json(ours, theirs, true))
+        }
+        // `5` and `5.0` are the same bound
+        (Number(ours), Number(theirs)) => ours.as_f64() == theirs.as_f64(),
+        _ => ours == theirs || (is_default(ours) && is_default(theirs)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// What Discord returns for `/tldr`: its own fields, defaults left out
+    fn discord_tldr() -> Value {
+        json!({
+            "id": "1", "application_id": "2", "version": "3", "guild_id": "4",
+            "type": 1, "name": "tldr", "description": "Summarize",
+            "default_member_permissions": null, "dm_permission": true, "nsfw": false,
+            "integration_types": [0], "contexts": null,
+            "options": [{
+                "type": 4, "name": "messages", "description": "How many",
+                "min_value": 5, "max_value": 200
+            }]
+        })
+    }
+
+    /// What the plugin sends for `/tldr`
+    fn ours_tldr() -> Value {
+        json!({
+            "type": 1, "name": "tldr", "description": "Summarize",
+            "options": [{
+                "type": 4, "name": "messages", "description": "How many", "required": false,
+                "min_value": 5, "max_value": 200
+            }]
+        })
+    }
+
+    fn changed(discord: Value, ours: Value) -> bool {
+        let existing = serde_json::from_value::<Command>(discord).unwrap();
+        command_changed(&existing, &ours).unwrap()
+    }
+
+    #[test]
+    fn same_command_is_unchanged() {
+        assert!(!changed(discord_tldr(), ours_tldr()));
+    }
+
+    #[test]
+    fn detects_changes() {
+        let mut ours = ours_tldr();
+        ours["description"] = json!("Summarize recent messages");
+        assert!(changed(discord_tldr(), ours), "description");
+
+        let mut ours = ours_tldr();
+        ours["options"][0]["max_value"] = json!(100);
+        assert!(changed(discord_tldr(), ours), "option bound");
+
+        let mut ours = ours_tldr();
+        ours["options"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("min_value");
+        assert!(changed(discord_tldr(), ours), "removed option field");
+
+        let mut ours = ours_tldr();
+        ours.as_object_mut().unwrap().remove("options");
+        assert!(changed(discord_tldr(), ours), "removed every option");
+    }
+
+    #[test]
+    fn detects_handler_change() {
+        let discord = json!({
+            "id": "1", "application_id": "2", "version": "3",
+            "type": 4, "name": "launch", "description": "Play", "handler": 2
+        });
+        let ours = json!({ "type": 4, "name": "launch", "description": "Play", "handler": 1 });
+        assert!(changed(discord.clone(), ours.clone()));
+
+        let mut same = ours;
+        same["handler"] = json!(2);
+        assert!(!changed(discord, same));
+    }
+
+    #[test]
+    fn finds_command_by_name_and_type() {
+        let command = |kind: u8| {
+            serde_json::from_value::<Command>(json!({
+                "id": kind.to_string(), "application_id": "2", "version": "3",
+                "type": kind, "name": "crossword", "description": ""
+            }))
+            .unwrap()
         };
-        let cmd_opts = Vec::<CommandOption>::deserialize(cmd_opts)
-            .map_err(|e| DiscordApiError(e.to_string()))?;
+        let commands = || vec![command(1), command(4)];
 
-        cmd_opts.len() != existing_opts.len()
-            || cmd_opts.iter().any(|opt| {
-                let Some(o) = existing_opts.iter().find(|o| o.name == opt.name) else {
-                    return true;
-                };
-                serde_json::to_string(o).unwrap() != serde_json::to_string(opt).unwrap()
-            })
-    };
+        let found = find_command(commands(), &json!({ "type": 4, "name": "crossword" }));
+        assert_eq!(found.map(|cmd| cmd.id.get()), Some(4));
 
-    Ok(description_changed || opts_changed)
+        // No type means a slash command
+        let found = find_command(commands(), &json!({ "name": "crossword" }));
+        assert_eq!(found.map(|cmd| cmd.id.get()), Some(1));
+
+        assert!(find_command(commands(), &json!({ "type": 2, "name": "crossword" })).is_none());
+    }
 }

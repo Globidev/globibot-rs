@@ -1,6 +1,9 @@
 use globibot_core::{
+    interaction::CommandCtx,
     rpc,
-    serenity::all::{CommandInteraction, Message, UserId},
+    serenity::all::{
+        CommandInteraction, CreateAllowedMentions, EditInteractionResponse, Message, UserId,
+    },
 };
 use itertools::Itertools;
 
@@ -8,7 +11,6 @@ use crate::{
     LlmPlugin,
     cooldown::cooldown_message,
     openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart},
-    respond_ephemeral,
 };
 
 const LOST_TRAIN_OF_THOUGHT: &str = "Sorry, I lost my train of thought.";
@@ -45,28 +47,18 @@ impl LlmPlugin {
     /// `/roast` and `/hype`
     pub async fn vibe_check(
         &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
+        ctx: &CommandCtx<'_>,
+        target_id: UserId,
         vibe: Vibe,
     ) -> anyhow::Result<()> {
-        let Some(target_id) = interaction
-            .data
-            .options
-            .iter()
-            .find(|opt| opt.name == "user")
-            .and_then(|opt| opt.value.as_user_id())
-        else {
-            return Ok(());
-        };
-
-        if let Err(remaining) = self.cooldowns.try_start(interaction.user.id) {
-            return respond_ephemeral(&rpc, interaction, cooldown_message(remaining)).await;
+        if let Err(remaining) = self.cooldowns.try_start(ctx.interaction.user.id) {
+            return Ok(ctx.reply_ephemeral(cooldown_message(remaining)).await?);
         }
 
-        defer_response(&rpc, interaction, false).await?;
+        ctx.defer().await?;
 
-        let target_name = resolved_display_name(interaction, target_id);
-        let requester_id = interaction.user.id;
+        let target_name = resolved_display_name(ctx.interaction, target_id);
+        let requester_id = ctx.interaction.user.id;
         let prompt = match vibe {
             Vibe::Roast => format!(
                 "<@{requester_id}> asked you to roast {target_name} (<@{target_id}>). \
@@ -87,32 +79,23 @@ impl LlmPlugin {
             LOST_TRAIN_OF_THOUGHT.to_string()
         });
 
-        edit_deferred_response(&rpc, interaction, answer).await
+        ctx.edit_with(answer_edit(answer)).await?;
+        Ok(())
     }
 
     /// `/tldr`: summarizes recent messages from the channel's chat context, only for the caller
-    pub async fn tldr(
-        &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<()> {
+    pub async fn tldr(&self, ctx: &CommandCtx<'_>, messages: Option<i64>) -> anyhow::Result<()> {
         const DEFAULT_MESSAGE_COUNT: usize = 50;
         const MAX_MESSAGE_COUNT: usize = 200;
 
-        let message_count = interaction
-            .data
-            .options
-            .iter()
-            .find(|opt| opt.name == "messages")
-            .and_then(|opt| opt.value.as_i64())
-            .map_or(DEFAULT_MESSAGE_COUNT, |count| {
-                count.clamp(1, MAX_MESSAGE_COUNT as i64) as usize
-            });
+        let message_count = messages.map_or(DEFAULT_MESSAGE_COUNT, |count| {
+            count.clamp(1, MAX_MESSAGE_COUNT as i64) as usize
+        });
 
         let transcript = {
             let contexts_by_channel = self.contexts_by_channel.lock();
             contexts_by_channel
-                .get(&interaction.channel_id)
+                .get(&ctx.interaction.channel_id)
                 .map(|context| {
                     let skip = context.messages.len().saturating_sub(message_count);
                     context
@@ -127,14 +110,14 @@ impl LlmPlugin {
 
         if transcript.trim().is_empty() {
             let content = "I haven't seen any messages in this channel since I last started";
-            return respond_ephemeral(&rpc, interaction, content.to_string()).await;
+            return Ok(ctx.reply_ephemeral(content.to_string()).await?);
         }
 
-        if let Err(remaining) = self.cooldowns.try_start(interaction.user.id) {
-            return respond_ephemeral(&rpc, interaction, cooldown_message(remaining)).await;
+        if let Err(remaining) = self.cooldowns.try_start(ctx.interaction.user.id) {
+            return Ok(ctx.reply_ephemeral(cooldown_message(remaining)).await?);
         }
 
-        defer_response(&rpc, interaction, true).await?;
+        ctx.defer_ephemeral().await?;
 
         let prompt = format!(
             "Summarize these recent messages from this channel for someone who is catching up. \
@@ -146,7 +129,8 @@ impl LlmPlugin {
             LOST_TRAIN_OF_THOUGHT.to_string()
         });
 
-        edit_deferred_response(&rpc, interaction, answer).await
+        ctx.edit_with(answer_edit(answer)).await?;
+        Ok(())
     }
 
     /// Replies in character to a new post in the Starboard channel
@@ -198,43 +182,11 @@ pub fn sanitize_llm_output(text: &str) -> String {
     truncated
 }
 
-/// Acknowledges an interaction with a "thinking…" state, to be completed with
-/// [`edit_deferred_response`]. Needed for anything slower than Discord's 3 second response limit
-async fn defer_response(
-    rpc: &rpc::ProtocolClient,
-    interaction: &CommandInteraction,
-    ephemeral: bool,
-) -> anyhow::Result<()> {
-    let flags = if ephemeral { 64 } else { 0 };
-    rpc.create_interaction_response(
-        rpc::context::current(),
-        interaction.id,
-        interaction.token.clone(),
-        serde_json::json!({
-            "type": 5,
-            "data": { "flags": flags }
-        }),
-    )
-    .await??;
-    Ok(())
-}
-
-async fn edit_deferred_response(
-    rpc: &rpc::ProtocolClient,
-    interaction: &CommandInteraction,
-    content: String,
-) -> anyhow::Result<()> {
-    rpc.edit_interaction_response(
-        rpc::context::current(),
-        interaction.token.clone(),
-        serde_json::json!({
-            "content": content,
-            // Ping users the answer mentions, never roles or @everyone
-            "allowed_mentions": { "parse": ["users"] }
-        }),
-    )
-    .await??;
-    Ok(())
+/// An LLM answer for a deferred interaction: pings users it mentions, never roles or @everyone
+fn answer_edit(answer: String) -> EditInteractionResponse {
+    EditInteractionResponse::new()
+        .content(answer)
+        .allowed_mentions(CreateAllowedMentions::new().all_users(true))
 }
 
 fn resolved_display_name(interaction: &CommandInteraction, user_id: UserId) -> String {
@@ -310,6 +262,18 @@ mod tests {
         let sanitized = sanitize_llm_output(&"a".repeat(5_000));
         assert_eq!(sanitized.chars().count(), 1_990);
         assert!(sanitized.ends_with('…'));
+    }
+
+    #[test]
+    fn answer_edit_only_pings_users() {
+        assert_eq!(
+            serde_json::to_value(answer_edit("hi".to_string())).unwrap(),
+            serde_json::json!({
+                "content": "hi",
+                // Serenity adds the empty lists, as in its own requests
+                "allowed_mentions": { "parse": ["users"], "users": [], "roles": [] }
+            })
+        );
     }
 
     #[test]

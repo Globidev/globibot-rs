@@ -3,17 +3,39 @@ use common::{
     imageops::{self, Avatar, GifBuilder},
 };
 use globibot_core::{
+    bot_choices, bot_command,
+    command::{self, Command},
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
-        all::CommandId,
-        model::application::{CommandDataOptionValue, CommandInteraction},
+        all::{CommandInteraction, UserId},
         prelude::Mentionable,
     },
 };
 use rand::Rng;
 use std::time::Instant;
+
+bot_command! {
+    #[slash(scope = guild, name = "slap", description = "Slap someone you don't like")]
+    struct Slap {
+        #[option(name = "target", description = "The user to slap")]
+        target: UserId,
+        #[option(name = "flavor", description = "The way you want to slap them")]
+        flavor: Option<SlapFlavor>,
+    }
+}
+
+bot_choices! {
+    /// Values are indices into the slap scenarios
+    enum SlapFlavor: i64 {
+        #[choice(name = "HD static slap", value = 0)]
+        Static,
+        #[choice(name = "Animated slap", value = 1)]
+        Animated,
+    }
+}
 
 pub mod scenario {
     pub mod animated_slap;
@@ -44,8 +66,6 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let guild_id = std::env::var("SLAP_INSTALL_COMMAND_GUILD_ID")?.parse()?;
-    let desired_command: serde_json::Value =
-        serde_json::from_str(include_str!("../slap-slash-command.json"))?;
 
     let endpoints =
         common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
@@ -56,14 +76,9 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     let plugin = SlapPlugin::connect_init(endpoints, async |rpc| {
-        let command = rpc
-            .upsert_guild_command(rpc_context(), guild_id, desired_command)
-            .await??;
+        command::register::<Slap>(rpc, Some(guild_id)).await?;
 
-        anyhow::Ok(SlapPlugin {
-            command_id: command.id,
-            slap_scenarios,
-        })
+        anyhow::Ok(SlapPlugin { slap_scenarios })
     })
     .await?;
 
@@ -73,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 struct SlapPlugin {
-    command_id: CommandId,
     slap_scenarios: Vec<SlapScenario>,
 }
 
@@ -129,37 +143,26 @@ impl HandleEvents for SlapPlugin {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+            Event::InteractionCreate { interaction } => {
+                let Slap {
+                    target: user_id_to_slap,
+                    flavor,
+                } = match Slap::parse(&interaction) {
+                    Some(Ok(slap)) => slap,
+                    Some(Err(err)) => {
+                        tracing::warn!("Invalid slap interaction: {err}");
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                };
+                let descriptor_idx = flavor.map(|flavor| flavor.value() as usize);
+
+                let ctx = interaction.ctx(&rpc);
                 let CommandInteraction {
-                    id,
-                    token,
-                    data: command,
                     channel_id,
                     user: author,
                     ..
-                } = *interaction;
-                let user_id_to_slap = match command
-                    .options
-                    .iter()
-                    .find(|opt| opt.name == "target")
-                    .map(|opt| &opt.value)
-                {
-                    Some(&CommandDataOptionValue::User(user_id)) => user_id,
-                    _ => return Ok(()),
-                };
-
-                let descriptor_idx = match command
-                    .options
-                    .iter()
-                    .find(|opt| opt.name == "flavor")
-                    .map(|opt| &opt.value)
-                {
-                    Some(&CommandDataOptionValue::Integer(flavor_idx)) => {
-                        Some(flavor_idx.try_into().unwrap_or(0))
-                    }
-                    None => None,
-                    _ => return Ok(()),
-                };
+                } = &*interaction;
 
                 let slapper_avatar_url = author
                     .avatar_url()
@@ -170,28 +173,19 @@ impl HandleEvents for SlapPlugin {
                     .avatar_url()
                     .unwrap_or_else(|| user_to_slap.default_avatar_url());
 
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    id,
-                    token,
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!(
-                                "{} walks angrily towards {}",
-                                author.mention(), user_to_slap.mention()
-                            )
-                        }
-                    }),
-                )
-                .await??;
+                ctx.reply(format!(
+                    "{} walks angrily towards {}",
+                    author.mention(),
+                    user_to_slap.mention()
+                ))
+                .await?;
 
                 let gif = self
                     .generate_slapping_gif(&slapper_avatar_url, &slapped_avatar_url, descriptor_idx)
                     .await?;
                 tracing::info!("Sending gif of {} bytes", gif.len());
 
-                rpc.send_file(rpc_context(), channel_id, gif, "slap.gif".to_owned())
+                rpc.send_file(rpc_context(), *channel_id, gif, "slap.gif".to_owned())
                     .await??;
             }
             _ => (),

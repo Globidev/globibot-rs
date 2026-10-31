@@ -8,13 +8,17 @@ use std::{
 };
 
 use globibot_core::{
+    interaction::CommandCtx,
     rpc,
-    serenity::all::{ChannelId, CommandInteraction, Message, UserId},
+    serenity::all::{
+        ChannelId, CreateAllowedMentions, CreateInteractionResponse,
+        CreateInteractionResponseMessage, Message, UserId,
+    },
 };
 use parking_lot::Mutex;
 use rand::seq::IndexedRandom;
 
-use crate::{LlmPlugin, respond_ephemeral};
+use crate::LlmPlugin;
 
 const ROUND_DURATION: Duration = Duration::from_secs(60);
 const REDACTED: &str = "███";
@@ -35,12 +39,8 @@ struct Round {
 
 impl LlmPlugin {
     /// `/lore-trivia`: posts someone's lore with their name hidden, the first to name them wins
-    pub async fn start_lore_trivia(
-        &self,
-        rpc: rpc::ProtocolClient,
-        interaction: &CommandInteraction,
-    ) -> anyhow::Result<()> {
-        let channel_id = interaction.channel_id;
+    pub async fn start_lore_trivia(&self, ctx: &CommandCtx<'_>) -> anyhow::Result<()> {
+        let channel_id = ctx.interaction.channel_id;
 
         let pick = {
             let lore_book = self.lore_book.read();
@@ -59,7 +59,7 @@ impl LlmPlugin {
         };
         let Some((answer_id, answer_name, lore)) = pick else {
             let content = "Nobody has any lore yet! Add some with /add-user-context";
-            return respond_ephemeral(&rpc, interaction, content.to_string()).await;
+            return Ok(ctx.reply_ephemeral(content.to_string()).await?);
         };
 
         let round_id = self.trivia.next_round_id.fetch_add(1, Ordering::Relaxed);
@@ -76,29 +76,23 @@ impl LlmPlugin {
         };
         if !started {
             let content = "A lore trivia round is already running in this channel";
-            return respond_ephemeral(&rpc, interaction, content.to_string()).await;
+            return Ok(ctx.reply_ephemeral(content.to_string()).await?);
         }
 
         let clue = redact(&lore, &format!("<@{answer_id}>"), &answer_name);
-        rpc.create_interaction_response(
-            rpc::context::current(),
-            interaction.id,
-            interaction.token.clone(),
-            serde_json::json!({
-                "type": 4,
-                "data": {
-                    "content": format!(
-                        "🔍 **Lore trivia!** Whose lore is this?\n> {clue}\n\
-                        Reply with their name or mention them within {} seconds!",
-                        ROUND_DURATION.as_secs()
-                    ),
-                    // Lore can mention people, don't ping anyone with the clue
-                    "allowed_mentions": { "parse": [] }
-                }
-            }),
-        )
-        .await??;
+        ctx.respond(CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content(format!(
+                    "🔍 **Lore trivia!** Whose lore is this?\n> {clue}\n\
+                    Reply with their name or mention them within {} seconds!",
+                    ROUND_DURATION.as_secs()
+                ))
+                // Lore can mention people, don't ping anyone with the clue
+                .allowed_mentions(CreateAllowedMentions::new()),
+        ))
+        .await?;
 
+        let rpc = ctx.rpc.clone();
         let by_channel = Arc::clone(&self.trivia.by_channel);
         tokio::spawn(async move {
             tokio::time::sleep(ROUND_DURATION).await;

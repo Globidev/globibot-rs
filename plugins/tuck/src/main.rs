@@ -1,13 +1,15 @@
-use std::{convert::TryInto, error::Error, path::PathBuf, time::Instant};
+use std::{error::Error, path::PathBuf, time::Instant};
 
 use common::image::RgbaImage;
 use globibot_core::{
+    bot_choices, bot_command,
+    command::{self, Command},
     events::{Event, EventType},
+    interaction::CommandInteractionExt,
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
-        all::CommandId,
-        model::application::{CommandDataOptionValue, CommandInteraction},
+        all::{CommandInteraction, UserId},
         prelude::Mentionable,
     },
 };
@@ -17,6 +19,31 @@ use globibot_plugin_tuck::{
 use rand::Rng;
 
 type PluginError = Box<dyn Error + Send + Sync>;
+
+bot_command! {
+    #[slash(scope = global, name = "tuck",
+            description = "Tuck someone you like to help them have a good night's sleep")]
+    struct Tuck {
+        #[option(name = "target", description = "The user to tuck")]
+        target: UserId,
+        #[option(name = "flavor", description = "The way you want to tuck them")]
+        flavor: Option<TuckFlavor>,
+    }
+}
+
+bot_choices! {
+    /// Values are indices into the tuck GIFs
+    enum TuckFlavor: i64 {
+        #[choice(name = "eyebleach kitty 1", value = 0)]
+        EyebleachKitty1,
+        #[choice(name = "peach kitties", value = 1)]
+        PeachKitties,
+        #[choice(name = "eyebleach kitty 2", value = 2)]
+        EyebleachKitty2,
+        #[choice(name = "anime kitty", value = 3)]
+        AnimeKitty,
+    }
+}
 
 #[derive(Debug, Clone)]
 struct TuckGifDescriptor {
@@ -103,18 +130,10 @@ async fn main() -> common::anyhow::Result<()> {
     let endpoints =
         common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
-    let desired_command: serde_json::Value =
-        serde_json::from_str(include_str!("../tuck-slash-command.json"))?;
-
     let plugin = TuckPlugin::connect_init(endpoints, async |rpc| {
-        let command = rpc
-            .upsert_global_command(rpc_context(), desired_command)
-            .await??;
+        command::register::<Tuck>(rpc, None).await?;
 
-        common::anyhow::Ok(TuckPlugin {
-            command_id: command.id,
-            tuck_gifs,
-        })
+        common::anyhow::Ok(TuckPlugin { tuck_gifs })
     })
     .await?;
 
@@ -124,7 +143,6 @@ async fn main() -> common::anyhow::Result<()> {
 }
 
 struct TuckPlugin<const GIF_COUNT: usize> {
-    command_id: CommandId,
     tuck_gifs: [(TuckGifDescriptor, Vec<RgbaImage>); GIF_COUNT],
 }
 
@@ -171,36 +189,26 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+            Event::InteractionCreate { interaction } => {
+                let Tuck {
+                    target: user_id_to_tuck,
+                    flavor,
+                } = match Tuck::parse(&interaction) {
+                    Some(Ok(tuck)) => tuck,
+                    Some(Err(err)) => {
+                        tracing::warn!("Invalid tuck interaction: {err}");
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                };
+                let gif_idx = flavor.map(|flavor| flavor.value() as usize);
+
+                let ctx = interaction.ctx(&rpc);
                 let CommandInteraction {
-                    id,
-                    token,
-                    data: command,
                     channel_id,
                     user: author,
                     ..
-                } = *interaction;
-                let user_id_to_tuck = match command
-                    .options
-                    .iter()
-                    .find(|opt| opt.name == "target")
-                    .map(|opt| &opt.value)
-                {
-                    Some(&CommandDataOptionValue::User(user_id)) => user_id,
-                    _ => return Ok(()),
-                };
-                let gif_idx = match command
-                    .options
-                    .iter()
-                    .find(|opt| opt.name == "flavor")
-                    .map(|opt| &opt.value)
-                {
-                    Some(&CommandDataOptionValue::Integer(flavor_idx)) => {
-                        Some(flavor_idx.try_into().unwrap_or(0))
-                    }
-                    None => None,
-                    _ => return Ok(()),
-                };
+                } = &*interaction;
 
                 let tucker_avatar_url = author
                     .avatar_url()
@@ -211,28 +219,19 @@ impl<const GIF_COUNT: usize> HandleEvents for TuckPlugin<GIF_COUNT> {
                     .avatar_url()
                     .unwrap_or_else(|| user_to_tuck.default_avatar_url());
 
-                rpc.create_interaction_response(
-                    rpc_context(),
-                    id,
-                    token.clone(),
-                    serde_json::json!({
-                        "type": 4,
-                        "data": {
-                            "content": format!(
-                                "{} is fetching some blankets for {}",
-                                author.mention(), user_id_to_tuck.mention()
-                            )
-                        }
-                    }),
-                )
-                .await??;
+                ctx.reply(format!(
+                    "{} is fetching some blankets for {}",
+                    author.mention(),
+                    user_id_to_tuck.mention()
+                ))
+                .await?;
 
                 let gif = self
                     .generate_tucking_gif(&tucker_avatar_url, &tucked_avatar_url, gif_idx)
                     .await?;
                 tracing::info!("Sending gif of {} bytes", gif.len());
 
-                rpc.send_file(rpc_context(), channel_id, gif, "tuck.gif".to_owned())
+                rpc.send_file(rpc_context(), *channel_id, gif, "tuck.gif".to_owned())
                     .await??;
             }
             _ => (),
