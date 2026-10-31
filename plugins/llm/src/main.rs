@@ -200,6 +200,7 @@ impl WebServer {
             .route("/personality", axum::routing::post(update_llm_personality))
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
+            .route("/credits", axum::routing::get(llm_credits))
             .route("/tools", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
@@ -234,6 +235,20 @@ struct WebLLMSettings {
 
 async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
     Json(llm_plugin.llm_client.usage())
+}
+
+async fn llm_credits(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    match llm_plugin.llm_client.credits().await {
+        Ok(credits) => Json(credits).into_response(),
+        Err(err) => {
+            tracing::warn!("Failed to get OpenRouter credits: {err:#}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Couldn't get the credits from OpenRouter",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn llm_tool_traces(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {

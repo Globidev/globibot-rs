@@ -52,6 +52,16 @@
 
   let usagePromise = loadUsage();
 
+  type Credits = { total_credits: number; total_usage: number };
+
+  async function loadCredits(): Promise<Credits> {
+    const res = await fetch('/plugin-api/llm/credits');
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  let creditsPromise = loadCredits();
+
   function emptyTotals(): Totals {
     return {
       requests: 0,
@@ -157,7 +167,7 @@
     </div>
 
     <!-- KPI row -->
-    <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div class="grid grid-cols-2 gap-3 md:grid-cols-5">
       {@render tile('Cost', formatCost(stats.total.cost), `last ${range} days`)}
       {@render tile(
         'Per month',
@@ -174,6 +184,22 @@
         percent(hitRate(stats.total)),
         `${compact.format(stats.total.cached_tokens)} of ${compact.format(stats.total.prompt_tokens)} input tokens`
       )}
+      <div class="col-span-2 md:col-span-1">
+        {#await creditsPromise}
+          {@render tile('Credits left', '…', 'on OpenRouter')}
+        {:then credits}
+          {@const left = credits.total_credits - credits.total_usage}
+          {@const perDay = trackedDays ? stats.total.cost / trackedDays : 0}
+          {@render tile(
+            'Credits left',
+            formatCost(left),
+            `of ${formatCost(credits.total_credits)}` +
+              (perDay > 0 ? `, about ${Math.floor(left / perDay)} days at this rate` : '')
+          )}
+        {:catch}
+          {@render tile('Credits left', '?', "couldn't reach OpenRouter")}
+        {/await}
+      </div>
     </div>
 
     <!-- Cost per day -->

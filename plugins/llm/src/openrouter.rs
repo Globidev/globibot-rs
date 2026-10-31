@@ -289,6 +289,30 @@ impl Client {
             media_type: image.media_type.unwrap_or_else(|| "image/png".to_string()),
         })
     }
+
+    /// The account's credits. The docs say this needs a management key, but a normal one works
+    pub async fn credits(&self) -> anyhow::Result<Credits> {
+        #[derive(Deserialize)]
+        struct CreditsResponse {
+            data: Credits,
+        }
+
+        let response = self
+            .http_client
+            .get(CREDITS_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<CreditsResponse>().await?.data)
+    }
+}
+
+/// In dollars, since the account was created
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Credits {
+    pub total_credits: f64,
+    pub total_usage: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +363,7 @@ pub struct ToolCompletion {
 
 const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const IMAGES_ENDPOINT: &str = "https://openrouter.ai/api/v1/images";
+const CREDITS_ENDPOINT: &str = "https://openrouter.ai/api/v1/credits";
 
 #[derive(Debug, Clone, Serialize)]
 struct Request<'tools> {
