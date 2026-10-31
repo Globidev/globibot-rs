@@ -2,11 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{self, IntoResponse, Response},
 };
-use axum_extra::extract::{PrivateCookieJar, cookie::Cookie};
+use axum_extra::extract::{
+    PrivateCookieJar,
+    cookie::{Cookie, SameSite},
+};
 use globibot_core::{
     serenity,
     storage::{DiscordProfile, DiscordSession},
@@ -32,17 +35,58 @@ pub struct Config {
     pub oauth_authorize_link: String,
 }
 
-async fn authorize(State(config): State<Arc<Config>>) -> impl IntoResponse {
-    response::Redirect::temporary(&config.oauth_authorize_link)
+/// Holds the `state` sent to Discord, checked when the user comes back to log in
+const STATE_COOKIE: &str = "discord_oauth_state";
+
+#[derive(serde::Deserialize)]
+struct AuthorizeParams {
+    /// Set to `consent` to always show Discord's authorization screen
+    prompt: Option<String>,
+}
+
+/// Sends the user to Discord. With `prompt=none`, users who already authorized the app skip
+/// Discord's authorization screen and come straight back.
+async fn authorize(
+    State(config): State<Arc<Config>>,
+    Query(params): Query<AuthorizeParams>,
+    jar: PrivateCookieJar,
+) -> impl IntoResponse {
+    let state = uuid::Uuid::new_v4().to_string();
+    let prompt = match params.prompt.as_deref() {
+        Some("consent") => "consent",
+        _ => "none",
+    };
+
+    let mut url = url::Url::parse(&config.oauth_authorize_link)
+        .expect("Invalid Discord OAuth authorize link");
+    url.query_pairs_mut()
+        .append_pair("prompt", prompt)
+        .append_pair("state", &state);
+
+    let jar = jar.add(
+        Cookie::build((STATE_COOKIE, state))
+            .path("/")
+            .http_only(true)
+            .secure(true)
+            // Sent back on the redirect from Discord, a top-level navigation
+            .same_site(SameSite::Lax)
+            .max_age(time::Duration::minutes(10)),
+    );
+    (jar, response::Redirect::temporary(url.as_str()))
 }
 
 #[derive(serde::Deserialize)]
 struct OAuthCallbackParams {
     code: String,
+    state: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum OauthCallbackError {
+    /// No login started from this browser in the last 10 minutes, or a forged callback
+    #[error("Login expired or invalid, please try again")]
+    InvalidState,
+
     #[error("HTTP request error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
@@ -52,8 +96,11 @@ enum OauthCallbackError {
 
 impl IntoResponse for OauthCallbackError {
     fn into_response(self) -> response::Response {
-        let error_msg = format!("OAuth callback error: {self}");
-        (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response()
+        let status = match self {
+            Self::InvalidState => StatusCode::BAD_REQUEST,
+            Self::Reqwest(_) | Self::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, format!("OAuth callback error: {self}")).into_response()
     }
 }
 
@@ -62,6 +109,15 @@ async fn login(
     jar: PrivateCookieJar,
     Json(params): Json<OAuthCallbackParams>,
 ) -> Result<impl IntoResponse, OauthCallbackError> {
+    // The login must have started from this browser (CSRF protection)
+    let state_matches = jar
+        .get(STATE_COOKIE)
+        .is_some_and(|cookie| cookie.value() == params.state);
+    if !state_matches {
+        return Err(OauthCallbackError::InvalidState);
+    }
+    let jar = jar.remove(Cookie::build(STATE_COOKIE).path("/"));
+
     let config = &web_server.oauth_config;
     let now = time::OffsetDateTime::now_utc();
 

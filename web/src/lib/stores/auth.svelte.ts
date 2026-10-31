@@ -20,13 +20,13 @@ class AuthStore {
     }
   }
 
-  async login(code: string): Promise<DiscordMember> {
+  async login(code: string, state: string): Promise<DiscordMember> {
     this.isLoggingIn = true;
     try {
       const response = await fetch('/api/discord/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code })
+        body: JSON.stringify({ code, state })
       });
       if (!response.ok) {
         throw new Error(await response.text());
@@ -49,6 +49,22 @@ class AuthStore {
 }
 
 export const authStore = new AuthStore();
+
+const RETURN_PATH_KEY = 'login_return_path';
+
+/** Remembers the current page, to come back to it after logging in with Discord */
+export function rememberReturnPath() {
+  const { pathname, search, hash } = window.location;
+  sessionStorage.setItem(RETURN_PATH_KEY, pathname + search + hash);
+}
+
+/** The page to go back to after logging in, once. Only paths of this site */
+export function takeReturnPath(): string {
+  const path = sessionStorage.getItem(RETURN_PATH_KEY);
+  sessionStorage.removeItem(RETURN_PATH_KEY);
+  const isLocal = path?.startsWith('/') && !path.startsWith('//') && !path.startsWith('/oauth');
+  return isLocal ? path! : '/';
+}
 
 export interface DiscordMember {
   user_id: string;
