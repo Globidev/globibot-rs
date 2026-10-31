@@ -1,6 +1,6 @@
 <script lang="ts">
   import { clickOutside } from '../actions/clickOutside';
-  import { authStore } from '$lib/stores/auth.svelte';
+  import { authStore, rememberReturnPath } from '$lib/stores/auth.svelte';
 
   import discordIcon from '$lib/assets/discord-icon.svg';
 
@@ -23,6 +23,7 @@
       {:else}
         <a
           href="/api/discord/authorize"
+          onclick={rememberReturnPath}
           class="bg-primary hover:bg-primary-hover rounded-md border border-gray-300 px-4 py-2 text-sm hover:bg-gray-100 hover:text-black"
         >
           <div class="flex flex-row items-center gap-2">

@@ -1,12 +1,36 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { authStore } from '../../lib/stores/auth.svelte';
+  import { authStore, takeReturnPath } from '../../lib/stores/auth.svelte';
 
-  onMount(() => {
-    // Immediately replace the URL with just "/oauth"
-    // effectively deleting the ?code=... from history
+  // Set when Discord refused to skip its authorization screen, to retry once with it
+  const CONSENT_RETRY_KEY = 'login_consent_retry';
+
+  onMount(async () => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const error = params.get('error');
+
+    // Remove the ?code=... from the URL and history
     goto('/oauth', { replaceState: true, keepFocus: true, noScroll: true });
+
+    if (code != null && state != null) {
+      sessionStorage.removeItem(CONSENT_RETRY_KEY);
+      try {
+        await authStore.login(code, state);
+        goto(takeReturnPath(), { replaceState: true });
+      } catch {
+        // The error is shown below
+      }
+    } else if (error === 'access_denied') {
+      // Cancelled on Discord's screen
+      goto(takeReturnPath(), { replaceState: true });
+    } else if (error != null && sessionStorage.getItem(CONSENT_RETRY_KEY) == null) {
+      // `prompt=none` can fail for users who never authorized the app: show the screen this time
+      sessionStorage.setItem(CONSENT_RETRY_KEY, '1');
+      window.location.href = '/api/discord/authorize?prompt=consent';
+    }
   });
 </script>
 

@@ -2,11 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{self, IntoResponse, Response},
 };
-use axum_extra::extract::{PrivateCookieJar, cookie::Cookie};
+use axum_extra::extract::{
+    PrivateCookieJar,
+    cookie::{Cookie, SameSite},
+};
 use globibot_core::{
     serenity,
     storage::{DiscordProfile, DiscordSession},
@@ -32,19 +35,60 @@ pub struct Config {
     pub oauth_authorize_link: String,
 }
 
-async fn authorize(State(config): State<Arc<Config>>) -> impl IntoResponse {
-    response::Redirect::temporary(&config.oauth_authorize_link)
+/// Holds the `state` sent to Discord, checked when the user comes back to log in
+const STATE_COOKIE: &str = "discord_oauth_state";
+
+#[derive(serde::Deserialize)]
+struct AuthorizeParams {
+    /// Set to `consent` to always show Discord's authorization screen
+    prompt: Option<String>,
+}
+
+/// Sends the user to Discord. With `prompt=none`, users who already authorized the app skip
+/// Discord's authorization screen and come straight back.
+async fn authorize(
+    State(config): State<Arc<Config>>,
+    Query(params): Query<AuthorizeParams>,
+    jar: PrivateCookieJar,
+) -> impl IntoResponse {
+    let state = uuid::Uuid::new_v4().to_string();
+    let prompt = match params.prompt.as_deref() {
+        Some("consent") => "consent",
+        _ => "none",
+    };
+
+    let mut url = url::Url::parse(&config.oauth_authorize_link)
+        .expect("Invalid Discord OAuth authorize link");
+    url.query_pairs_mut()
+        .append_pair("prompt", prompt)
+        .append_pair("state", &state);
+
+    let jar = jar.add(
+        Cookie::build((STATE_COOKIE, state))
+            .path("/")
+            .http_only(true)
+            .secure(true)
+            // Sent back on the redirect from Discord, a top-level navigation
+            .same_site(SameSite::Lax)
+            .max_age(time::Duration::minutes(10)),
+    );
+    (jar, response::Redirect::temporary(url.as_str()))
 }
 
 #[derive(serde::Deserialize)]
 struct OAuthCallbackParams {
     code: String,
+    state: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum OauthCallbackError {
-    #[error("HTTP request error: {0}")]
-    Reqwest(#[from] reqwest::Error),
+    /// No login started from this browser in the last 10 minutes, or a forged callback
+    #[error("Login expired or invalid, please try again")]
+    InvalidState,
+
+    #[error("Discord token error: {0}")]
+    Token(#[from] TokenError),
 
     #[error("Storage error: {0}")]
     Storage(#[from] globibot_core::storage::StorageError),
@@ -52,8 +96,13 @@ enum OauthCallbackError {
 
 impl IntoResponse for OauthCallbackError {
     fn into_response(self) -> response::Response {
-        let error_msg = format!("OAuth callback error: {self}");
-        (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response()
+        let status = match self {
+            Self::InvalidState | Self::Token(TokenError::Rejected(_)) => StatusCode::BAD_REQUEST,
+            Self::Token(TokenError::Request(_)) | Self::Storage(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        (status, format!("OAuth callback error: {self}")).into_response()
     }
 }
 
@@ -62,11 +111,16 @@ async fn login(
     jar: PrivateCookieJar,
     Json(params): Json<OAuthCallbackParams>,
 ) -> Result<impl IntoResponse, OauthCallbackError> {
+    // The login must have started from this browser (CSRF protection)
+    let state_matches = jar
+        .get(STATE_COOKIE)
+        .is_some_and(|cookie| cookie.value() == params.state);
+    if !state_matches {
+        return Err(OauthCallbackError::InvalidState);
+    }
+    let jar = jar.remove(Cookie::build(STATE_COOKIE).path("/"));
+
     let config = &web_server.oauth_config;
-    let now = time::OffsetDateTime::now_utc();
-
-    let client = reqwest::Client::new();
-
     let authorize_url = url::Url::parse(&config.oauth_authorize_link)
         .expect("Invalid Discord OAuth authorize link");
     let redirect_uri = authorize_url
@@ -74,6 +128,73 @@ async fn login(
         .find_map(|(k, v)| (k == "redirect_uri").then_some(v))
         .expect("redirect_uri not found in Discord OAuth authorize link");
 
+    tracing::info!("Exchanging OAuth code for token...");
+    let session = request_token(
+        config,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &params.code),
+            ("redirect_uri", &redirect_uri),
+        ],
+    )
+    .await?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    save_session(&mut web_server.storage, &session_id, &session).await?;
+    tracing::info!("Session stored");
+
+    let jar = jar.add(session_cookie(session_id));
+    Ok(profile(State(web_server), jar).await)
+}
+
+/// The `discord_session` cookie holds a session ID, the session itself (Discord tokens) is in
+/// Redis. Both last 30 days from the last visit: every `/profile` call extends them.
+const SESSION_COOKIE: &str = "discord_session";
+const SESSION_LIFETIME: time::Duration = time::Duration::days(30);
+
+/// How long a Discord profile is reused before asking Discord again. Plugins read it to
+/// identify users, so it's also how long a membership change takes to apply.
+const PROFILE_CACHE_SECS: i64 = 24 * 3_600;
+
+fn session_cookie(session_id: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, session_id))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(SESSION_LIFETIME)
+        .build()
+}
+
+fn session_cookie_removal() -> Cookie<'static> {
+    Cookie::build(SESSION_COOKIE).path("/").build()
+}
+
+async fn save_session(
+    storage: &mut globibot_core::storage::RedisStorage,
+    session_id: &str,
+    session: &DiscordSession,
+) -> Result<(), globibot_core::storage::StorageError> {
+    storage.set(session_id, session).await?;
+    storage
+        .expire::<DiscordSession>(session_id, SESSION_LIFETIME.whole_seconds())
+        .await
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TokenError {
+    /// The code or refresh token is invalid, expired or revoked
+    #[error("rejected by Discord ({0})")]
+    Rejected(reqwest::StatusCode),
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+}
+
+/// Calls Discord's token endpoint, for a login code or a refresh token
+async fn request_token(
+    config: &Config,
+    form: &[(&str, &str)],
+) -> Result<DiscordSession, TokenError> {
     #[derive(serde::Deserialize)]
     struct DiscordToken {
         access_token: String,
@@ -81,148 +202,152 @@ async fn login(
         refresh_token: String,
     }
 
-    tracing::info!("Exchanging OAuth code for token...");
-
-    let DiscordToken {
-        access_token,
-        expires_in,
-        refresh_token,
-    } = client
+    let response = reqwest::Client::new()
         .post("https://discord.com/api/v10/oauth2/token")
         .basic_auth(config.app_id, Some(&config.app_secret))
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", &params.code),
-            ("redirect_uri", &redirect_uri),
-        ])
+        .form(form)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
+    // Discord answers 400 `invalid_grant` for bad codes and refresh tokens
+    if matches!(response.status().as_u16(), 400 | 401) {
+        return Err(TokenError::Rejected(response.status()));
+    }
+    let token = response.error_for_status()?.json::<DiscordToken>().await?;
 
-    tracing::info!("OAuth token received, storing session...");
-
-    let session_id = uuid::Uuid::new_v4();
-
-    let expiry_date = now + time::Duration::seconds(expires_in);
-    let expires_at_ts = expiry_date.unix_timestamp();
-
-    let discord_session = DiscordSession {
-        access_token,
-        refresh_token,
-        expires_at_ts,
-    };
-    web_server.storage.set(session_id, &discord_session).await?;
-
-    tracing::info!("Session stored, setting cookie...");
-
-    let jar = jar.add(
-        Cookie::build(("discord_session", session_id.to_string()))
-            .path("/")
-            .http_only(true)
-            .secure(true)
-            .expires(expiry_date), // 🔶 Might not be needed when supporting automatic token refreshes
-    );
-
-    Ok(profile(State(web_server), jar).await)
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    Ok(DiscordSession {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        expires_at_ts: now + token.expires_in,
+    })
 }
 
-async fn logout(
-    State(mut web_server): State<WebServer>,
-    jar: PrivateCookieJar,
-) -> impl IntoResponse {
-    let Some(cookie) = jar.get("discord_session") else {
-        return (StatusCode::BAD_REQUEST, "No session").into_response();
-    };
+async fn logout(State(mut web_server): State<WebServer>, jar: PrivateCookieJar) -> Response {
+    if let Some(cookie) = jar.get(SESSION_COOKIE) {
+        delete_session(&mut web_server, cookie.value()).await;
+    }
+    // Logged out in this browser even if the session couldn't be deleted
+    (jar.remove(session_cookie_removal()), "Logged out").into_response()
+}
 
-    match web_server
-        .storage
-        .del::<DiscordSession>(cookie.value())
-        .await
-    {
-        Ok(_) => {
-            let jar = jar.remove(
-                Cookie::build("discord_session")
-                    .path("/")
-                    .http_only(true)
-                    .secure(true),
-            );
-            (jar, "Logged out").into_response()
-        }
-        Err(err) => {
-            tracing::warn!("Failed to delete Discord session from storage: {err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to log out").into_response()
-        }
+/// Deletes the session and its cached profile: plugins identify users from the profile
+async fn delete_session(web_server: &mut WebServer, session_id: &str) {
+    let storage = &mut web_server.storage;
+    if let Err(err) = storage.del::<DiscordSession>(session_id).await {
+        tracing::warn!("Failed to delete Discord session: {err}");
+    }
+    if let Err(err) = storage.del::<DiscordProfile>(session_id).await {
+        tracing::warn!("Failed to delete Discord profile: {err}");
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ProfileError {
+    /// The session can't be used anymore: the user has to log in again
+    #[error("{1}")]
+    LoggedOut(StatusCode, &'static str),
+    /// Discord or Redis failed, the session may still be fine
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+impl From<globibot_core::storage::StorageError> for ProfileError {
+    fn from(err: globibot_core::storage::StorageError) -> Self {
+        Self::Unavailable(format!("Storage error: {err}"))
     }
 }
 
 async fn profile(State(mut server): State<WebServer>, jar: PrivateCookieJar) -> Response {
-    tracing::info!("Fetching Discord profile...");
-
-    let Some(cookie) = jar.get("discord_session") else {
-        return (StatusCode::BAD_REQUEST, "No session").into_response();
+    let Some(session_id) = jar
+        .get(SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string())
+    else {
+        return (StatusCode::UNAUTHORIZED, "No session").into_response();
     };
 
-    let session_id = cookie.value();
-
-    macro_rules! bad_request {
-        ($text:expr) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                jar.remove(
-                    Cookie::build("discord_session")
-                        .path("/")
-                        .http_only(true)
-                        .secure(true),
-                ),
-                $text,
+    match load_profile(&mut server, &session_id).await {
+        // Sent again to extend it
+        Ok(profile) => (jar.add(session_cookie(session_id)), Json(profile)).into_response(),
+        Err(ProfileError::LoggedOut(status, reason)) => {
+            delete_session(&mut server, &session_id).await;
+            (status, jar.remove(session_cookie_removal()), reason).into_response()
+        }
+        Err(ProfileError::Unavailable(err)) => {
+            tracing::warn!("Failed to load Discord profile: {err}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "Couldn't reach Discord, try again later",
             )
                 .into_response()
-        };
+        }
+    }
+}
+
+async fn load_profile(
+    server: &mut WebServer,
+    session_id: &str,
+) -> Result<DiscordProfile, ProfileError> {
+    let storage = &mut server.storage;
+
+    let Some(mut session) = storage.get_opt::<DiscordSession>(session_id).await? else {
+        return Err(ProfileError::LoggedOut(
+            StatusCode::UNAUTHORIZED,
+            "Session expired",
+        ));
+    };
+    storage
+        .expire::<DiscordSession>(session_id, SESSION_LIFETIME.whole_seconds())
+        .await?;
+
+    if let Some(profile) = storage.get_opt::<DiscordProfile>(session_id).await? {
+        return Ok(profile);
     }
 
-    tracing::info!("Retrieving profile from cache...");
+    // Discord access tokens last a week, the session can outlive them
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if session.expires_at_ts <= now + 60 {
+        tracing::info!("Refreshing Discord access token...");
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", session.refresh_token.as_str()),
+        ];
+        session = match request_token(&server.oauth_config, &form).await {
+            Ok(session) => session,
+            Err(TokenError::Rejected(_)) => {
+                return Err(ProfileError::LoggedOut(
+                    StatusCode::UNAUTHORIZED,
+                    "Discord authorization expired or was revoked",
+                ));
+            }
+            Err(err) => return Err(ProfileError::Unavailable(err.to_string())),
+        };
+        save_session(storage, session_id, &session).await?;
+    }
 
-    match server.storage.get::<DiscordProfile>(session_id).await {
-        Ok(profile) => return (jar, Json(profile)).into_response(),
-        Err(_) => {
-            tracing::info!("No cached profile found, fetching from Discord API...");
-        }
-    };
-
-    tracing::info!("Retrieving session from storage...");
-
-    let session = match server.storage.get::<DiscordSession>(session_id).await {
-        Ok(session) => session,
-        Err(err) => {
-            tracing::warn!("Failed to get Discord session from storage: {err}");
-            bad_request!("Invalid session");
-        }
-    };
-
-    tracing::info!("Session retrieved, fetching user profile from Discord...");
-
+    tracing::info!("Fetching Discord profile...");
     let http = serenity::http::Http::new(&format!("Bearer {}", session.access_token));
-
     let member = match http
         .get_current_user_guild_member(server.oauth_config.guild_id)
         .await
     {
-        Ok(user) => user,
-        Err(serenity::Error::Http(err))
-            if err
-                .status_code()
-                .is_some_and(|status| status.as_u16() == 404) =>
-        {
-            bad_request!("You are not a member of the required Discord guild");
-        }
-        Err(err) => {
-            bad_request!(format!("Failed to get user: {err}"));
-        }
+        Ok(member) => member,
+        Err(serenity::Error::Http(err)) => match err.status_code().map(|status| status.as_u16()) {
+            Some(404) => {
+                return Err(ProfileError::LoggedOut(
+                    StatusCode::FORBIDDEN,
+                    "You are not a member of the required Discord guild",
+                ));
+            }
+            Some(401) => {
+                return Err(ProfileError::LoggedOut(
+                    StatusCode::UNAUTHORIZED,
+                    "Discord authorization was revoked",
+                ));
+            }
+            _ => return Err(ProfileError::Unavailable(err.to_string())),
+        },
+        Err(err) => return Err(ProfileError::Unavailable(err.to_string())),
     };
-
-    tracing::info!("User profile fetched successfully.");
 
     let profile = DiscordProfile {
         user_id: member.user.id,
@@ -230,16 +355,16 @@ async fn profile(State(mut server): State<WebServer>, jar: PrivateCookieJar) -> 
         avatar_url: member.avatar_url().or(member.user.avatar_url()),
     };
 
-    if let Err(err) = server.storage.set(session_id, &profile).await {
+    let storage = &mut server.storage;
+    if let Err(err) = storage.set(session_id, &profile).await {
         tracing::warn!("Failed to cache Discord profile: {err}");
     }
-    if let Err(err) = server
-        .storage
-        .expire::<DiscordProfile>(session_id, 24 * 3_600)
+    if let Err(err) = storage
+        .expire::<DiscordProfile>(session_id, PROFILE_CACHE_SECS)
         .await
     {
         tracing::warn!("Failed to set expiration for Discord profile: {err}");
     }
 
-    (jar, Json(profile)).into_response()
+    Ok(profile)
 }
