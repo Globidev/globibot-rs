@@ -4,7 +4,8 @@ See README.md for the architecture. Private deploy/infra notes, if present, are 
 
 ## Code map
 - Plugin entry: `Plugin::connect_init(endpoints, |rpc| ...)` returns `ConnectedPlugin { inner: Arc<T>, rpc }`; then `plugin.handle_events()`. Endpoints from env via `common::endpoints::tcp_from_env` (`RPC_ADDR`, `SUBSCRIBER_ADDR`).
-- RPC methods plugins can call: `globibot-core/src/rpc.rs`. Text-only `send_message`; `send_file` has no text; `create_interaction_response` takes raw JSON.
+- RPC methods plugins can call: `globibot-core/src/rpc.rs`. Text-only `send_message`; `send_file` has no text.
+- Answering commands: `interaction.ctx(&rpc)` gives a `globibot_core::interaction::CommandCtx` (`reply`, `reply_ephemeral`, `defer`, `edit`, `respond` with serenity builders). Handlers take `ctx: &CommandCtx<'_>`. Builder attachments aren't sent: the RPC carries JSON only.
 - The bot forwards only slash/command interactions to plugins (`globibot-bot/src/discord.rs`). Button/component clicks are dropped.
 - Plugin web API: `rpc.register_web_api(advertise_addr)` makes the bot add a Caddy route `/<plugin id>/*` (prefix stripped). Publicly: `https://globibot.com/plugin-api/<plugin id>/...`. Logged-in users are checked via the `discord_session` private cookie + `COOKIE_SECRET` (copy from the llm plugin).
 - Storage: `RedisStorage::from_env()` (`REDIS_URL`), values implement `StorageValue` with a `REDIS_NS`.

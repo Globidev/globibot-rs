@@ -101,6 +101,16 @@ impl From<&'_ str> for DiscordApiError {
     }
 }
 
+/// Either way a Discord call through the RPC can fail: the RPC itself, or Discord. Lets
+/// `rpc.method(..).await??` be used in functions returning it.
+#[derive(Debug, thiserror::Error)]
+pub enum CallError {
+    #[error(transparent)]
+    Rpc(#[from] client::RpcError),
+    #[error(transparent)]
+    Discord(#[from] DiscordApiError),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     pub id: String,

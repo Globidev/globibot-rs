@@ -202,9 +202,7 @@ pub enum RegisterError {
     #[error("command `{0}` is guild-scoped but no guild ID was given")]
     MissingGuildId(String),
     #[error(transparent)]
-    Rpc(#[from] tarpc::client::RpcError),
-    #[error(transparent)]
-    Discord(#[from] crate::rpc::DiscordApiError),
+    Call(#[from] crate::rpc::CallError),
 }
 
 /// Implemented by every [`bot_command!`] type.
@@ -451,21 +449,31 @@ pub mod __private {
         definitions: Vec<(Scope, Value)>,
     ) -> Result<(), RegisterError> {
         for (scope, definition) in definitions {
-            let ctx = crate::rpc::context::current();
-            match scope {
-                Scope::Global => {
-                    rpc.upsert_global_command(ctx, definition).await??;
-                }
-                Scope::Guild => {
-                    let Some(guild_id) = guild_id else {
-                        let name = definition["name"].as_str().unwrap_or_default();
-                        return Err(RegisterError::MissingGuildId(name.to_string()));
-                    };
-                    rpc.upsert_guild_command(ctx, guild_id, definition)
-                        .await??;
-                }
-            }
+            let guild_id = match scope {
+                Scope::Global => None,
+                Scope::Guild => Some(guild_id.ok_or_else(|| {
+                    let name = definition["name"].as_str().unwrap_or_default();
+                    RegisterError::MissingGuildId(name.to_string())
+                })?),
+            };
+            upsert(rpc, guild_id, definition).await?;
         }
+        Ok(())
+    }
+
+    async fn upsert(
+        rpc: &crate::rpc::ProtocolClient,
+        guild_id: Option<GuildId>,
+        definition: Value,
+    ) -> Result<(), crate::rpc::CallError> {
+        let ctx = crate::rpc::context::current();
+        match guild_id {
+            None => rpc.upsert_global_command(ctx, definition).await??,
+            Some(guild_id) => {
+                rpc.upsert_guild_command(ctx, guild_id, definition)
+                    .await??
+            }
+        };
         Ok(())
     }
 }

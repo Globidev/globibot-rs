@@ -1,5 +1,6 @@
 pub mod command;
 pub mod events;
+pub mod interaction;
 pub mod plugin;
 pub mod rpc;
 pub mod storage;
