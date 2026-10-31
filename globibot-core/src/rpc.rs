@@ -41,6 +41,14 @@ pub trait Protocol {
         data: Vec<u8>,
         name: String,
     ) -> DiscordApiResult<Message>;
+    /// A message with text and files, replying to `reply_to` if given. Files travel as JSON
+    /// arrays of numbers (about 3.5x their size) in frames of at most 32MB.
+    async fn send_message_with_files(
+        chan_id: ChannelId,
+        content: String,
+        reply_to: Option<MessageId>,
+        files: Vec<FileAttachment>,
+    ) -> DiscordApiResult<Message>;
     async fn content_safe(content: String, guild_id: Option<GuildId>) -> DiscordApiResult<String>;
 
     async fn start_typing(chan_id: ChannelId) -> DiscordApiResult<TypingKey>;
@@ -91,6 +99,13 @@ pub trait Protocol {
         public_only: bool,
         search: MessageSearch,
     ) -> DiscordApiResult<MessageSearchResults>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAttachment {
+    /// With its extension, which Discord uses to show it: `image.png`
+    pub name: String,
+    pub data: Vec<u8>,
 }
 
 /// Filters of Discord's message search. Empty lists and `None`s don't filter.
