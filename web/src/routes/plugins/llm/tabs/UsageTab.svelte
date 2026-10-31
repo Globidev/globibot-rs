@@ -3,6 +3,7 @@
 
   type Totals = {
     requests: number;
+    images: number;
     prompt_tokens: number;
     cached_tokens: number;
     completion_tokens: number;
@@ -10,7 +11,7 @@
     cost: number;
   };
 
-  type Kind = 'chat' | 'command' | 'starboard' | 'summary';
+  type Kind = 'chat' | 'command' | 'starboard' | 'summary' | 'caption';
 
   type Usage = {
     /** Keyed by UTC day number (days since the Unix epoch) */
@@ -23,7 +24,8 @@
     { id: 'chat', name: 'Chat replies', color: '#3987e5' },
     { id: 'command', name: 'Commands', color: '#d95926' },
     { id: 'starboard', name: 'Starboard', color: '#199e70' },
-    { id: 'summary', name: 'Summaries', color: '#c98500' }
+    { id: 'summary', name: 'Summaries', color: '#c98500' },
+    { id: 'caption', name: 'Image captions', color: '#d55181' }
   ];
   const HIT_RATE_COLOR = '#9085e9';
   const KIND_NAMES = Object.fromEntries(KINDS.map((k) => [k.id, k.name])) as Record<Kind, string>;
@@ -44,6 +46,7 @@
   function emptyTotals(): Totals {
     return {
       requests: 0,
+      images: 0,
       prompt_tokens: 0,
       cached_tokens: 0,
       completion_tokens: 0,
@@ -54,7 +57,7 @@
 
   function add(into: Totals, other: Totals | undefined) {
     if (!other) return;
-    for (const key of Object.keys(into) as (keyof Totals)[]) into[key] += other[key];
+    for (const key of Object.keys(into) as (keyof Totals)[]) into[key] += other[key] ?? 0;
   }
 
   /** Every day of the range, oldest first, including days without requests */
@@ -208,6 +211,7 @@
             <tr class="border-b border-gray-700">
               <th class="py-2 text-left font-medium">Kind</th>
               <th class="py-2 text-right font-medium">Requests</th>
+              <th class="py-2 text-right font-medium">Images</th>
               <th class="py-2 text-right font-medium">Input tokens</th>
               <th class="py-2 text-right font-medium">Cached</th>
               <th class="py-2 text-right font-medium">Output tokens</th>
@@ -228,6 +232,7 @@
                   </span>
                 </td>
                 <td class="py-2 text-right">{full.format(totals.requests)}</td>
+                <td class="py-2 text-right">{full.format(totals.images)}</td>
                 <td class="py-2 text-right">{compact.format(totals.prompt_tokens)}</td>
                 <td class="py-2 text-right">{percent(hitRate(totals))}</td>
                 <td class="py-2 text-right">{compact.format(totals.completion_tokens)}</td>
@@ -295,7 +300,16 @@
               {#each [...usage.recent].reverse() as request}
                 <tr class="border-b border-gray-700/50">
                   <td class="py-1.5 whitespace-nowrap text-gray-400">{time(request.at)}</td>
-                  <td class="py-1.5">{KIND_NAMES[request.kind]}</td>
+                  <td class="py-1.5 whitespace-nowrap">
+                    {KIND_NAMES[request.kind]}
+                    {#if request.images}
+                      <span
+                        class="ml-1 text-xs text-gray-400"
+                        title="{request.images} image{request.images > 1 ? 's' : ''} sent"
+                        >🖼 {request.images}</span
+                      >
+                    {/if}
+                  </td>
                   <td class="max-w-48 truncate py-1.5 font-mono text-xs text-gray-400">
                     {request.model}
                   </td>

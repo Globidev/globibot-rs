@@ -105,7 +105,7 @@ impl LlmPlugin {
                         .messages
                         .iter()
                         .skip(skip)
-                        .map(transcript_line)
+                        .map(|context_message| transcript_line(&context_message.message))
                         .join("\n")
                 })
                 .unwrap_or_default()

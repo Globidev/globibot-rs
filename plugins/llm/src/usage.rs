@@ -23,6 +23,8 @@ pub enum UsageKind {
     Starboard,
     /// Summaries of dropped context
     Summary,
+    /// Descriptions of posted images
+    Caption,
 }
 
 /// The `usage` object of an OpenRouter response
@@ -47,8 +49,11 @@ struct CompletionTokensDetails {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)] // Stats saved before a field existed
 pub struct Totals {
     pub requests: u64,
+    /// Images sent, each costing about a thousand input tokens
+    pub images: u64,
     /// Includes cached tokens
     pub prompt_tokens: u64,
     pub cached_tokens: u64,
@@ -59,9 +64,10 @@ pub struct Totals {
 }
 
 impl Totals {
-    fn from_report(report: &UsageReport) -> Self {
+    fn from_report(report: &UsageReport, images: u64) -> Self {
         Self {
             requests: 1,
+            images,
             prompt_tokens: report.prompt_tokens.unwrap_or_default(),
             cached_tokens: report
                 .prompt_tokens_details
@@ -80,6 +86,7 @@ impl Totals {
 
     fn add(&mut self, other: &Self) {
         self.requests += other.requests;
+        self.images += other.images;
         self.prompt_tokens += other.prompt_tokens;
         self.cached_tokens += other.cached_tokens;
         self.completion_tokens += other.completion_tokens;
@@ -113,8 +120,15 @@ impl StorageValue for UsageStats {
 }
 
 impl UsageStats {
-    pub fn record(&mut self, at: u64, kind: UsageKind, model: &str, report: &UsageReport) {
-        let totals = Totals::from_report(report);
+    pub fn record(
+        &mut self,
+        at: u64,
+        kind: UsageKind,
+        model: &str,
+        images: u64,
+        report: &UsageReport,
+    ) {
+        let totals = Totals::from_report(report, images);
         let day = at / 86_400;
 
         self.days
@@ -156,9 +170,9 @@ mod tests {
     #[test]
     fn adds_up_per_day_and_kind() {
         let mut stats = UsageStats::default();
-        stats.record(86_400 * 10 + 5, UsageKind::Chat, "m", &report());
-        stats.record(86_400 * 10 + 9, UsageKind::Chat, "m", &report());
-        stats.record(86_400 * 10 + 9, UsageKind::Summary, "m", &report());
+        stats.record(86_400 * 10 + 5, UsageKind::Chat, "m", 0, &report());
+        stats.record(86_400 * 10 + 9, UsageKind::Chat, "m", 0, &report());
+        stats.record(86_400 * 10 + 9, UsageKind::Summary, "m", 0, &report());
 
         let day = &stats.days[&10];
         let chat = day[&UsageKind::Chat];
@@ -179,7 +193,7 @@ mod tests {
         }))
         .unwrap();
         let mut stats = UsageStats::default();
-        stats.record(0, UsageKind::Chat, "m", &report);
+        stats.record(0, UsageKind::Chat, "m", 0, &report);
         assert_eq!(stats.days[&0][&UsageKind::Chat].prompt_tokens, 10);
         assert_eq!(stats.days[&0][&UsageKind::Chat].cached_tokens, 0);
     }
@@ -188,7 +202,7 @@ mod tests {
     fn keeps_recent_days_and_requests() {
         let mut stats = UsageStats::default();
         for day in 0..200 {
-            stats.record(day * 86_400, UsageKind::Chat, "m", &report());
+            stats.record(day * 86_400, UsageKind::Chat, "m", 0, &report());
         }
         assert_eq!(stats.days.len(), KEPT_DAYS as usize);
         assert_eq!(*stats.days.keys().next().unwrap(), 200 - KEPT_DAYS);
@@ -197,13 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn loads_stats_saved_before_images_were_counted() {
+        let json = serde_json::json!({
+            "days": { "0": { "chat": { "requests": 1, "prompt_tokens": 5, "cached_tokens": 0,
+                "completion_tokens": 1, "reasoning_tokens": 0, "cost": 0.1 } } },
+            "recent": []
+        });
+        let stats = serde_json::from_value::<UsageStats>(json).unwrap();
+        assert_eq!(stats.days[&0][&UsageKind::Chat].images, 0);
+    }
+
+    #[test]
     fn round_trips_as_json() {
         let mut stats = UsageStats::default();
-        stats.record(0, UsageKind::Starboard, "m", &report());
+        stats.record(0, UsageKind::Starboard, "m", 2, &report());
         let json = serde_json::to_value(&stats).unwrap();
         assert_eq!(json["days"]["0"]["starboard"]["requests"], 1);
         assert_eq!(json["recent"][0]["kind"], "starboard");
         assert_eq!(json["recent"][0]["prompt_tokens"], 1000);
+        assert_eq!(json["recent"][0]["images"], 2);
         let parsed = serde_json::from_value::<UsageStats>(json).unwrap();
         assert_eq!(parsed.days[&0][&UsageKind::Starboard].requests, 1);
     }

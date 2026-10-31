@@ -2,12 +2,17 @@
 
 See README.md for the architecture. Private deploy/infra notes, if present, are in CLAUDE.local.md.
 
+## Design principles
+- **Few dependencies.** Before adding a crate or npm package, check whether the standard library, an existing dependency or a short hand-written version does the job. Add one only when it replaces a lot of non-trivial code. Examples: the llm Usage charts are a small SVG component (`web/src/lib/components/StackedBars.svelte`), not a chart library; `CommandCtx` takes serenity's existing builders instead of defining its own message types.
+- **Explicit over magic.** Spell things out at the use site, even if it's more verbose, rather than inferring them from conventions. The command macros are `macro_rules!` only (no proc macros), and every command states its `name` and `scope`; nothing is derived from Rust identifiers. Prefer a plain field to `Deref` or other implicit forwarding (`ctx.interaction.user`, not `ctx.user`).
+
 ## Code map
 - Plugin entry: `Plugin::connect_init(endpoints, |rpc| ...)` returns `ConnectedPlugin { inner: Arc<T>, rpc }`; then `plugin.handle_events()`. Endpoints from env via `common::endpoints::tcp_from_env` (`RPC_ADDR`, `SUBSCRIBER_ADDR`).
 - RPC methods plugins can call: `globibot-core/src/rpc.rs`. Text-only `send_message`; `send_file` has no text.
 - Answering commands: `interaction.ctx(&rpc)` gives a `globibot_core::interaction::CommandCtx` (`reply`, `reply_ephemeral`, `defer`, `edit`, `respond` with serenity builders). Handlers take `ctx: &CommandCtx<'_>`. Builder attachments aren't sent: the RPC carries JSON only.
 - The bot forwards only slash/command interactions to plugins (`globibot-bot/src/discord.rs`). Button/component clicks are dropped.
 - Plugin web API: `rpc.register_web_api(advertise_addr)` makes the bot add a Caddy route `/<plugin id>/*` (prefix stripped). Publicly: `https://globibot.com/plugin-api/<plugin id>/...`. Logged-in users are checked via the `discord_session` private cookie + `COOKIE_SECRET` (copy from the llm plugin).
+- Images for the LLM must be downloaded and sent inline as base64 data URLs: providers get a 403 from Discord's CDN. Discord's media proxy (`proxy_url` + `width`/`height`/`format=webp`) resizes and turns GIFs into a still frame (`plugins/llm/src/images.rs`).
 - Storage: `RedisStorage::from_env()` (`REDIS_URL`), values implement `StorageValue` with a `REDIS_NS`.
 
 ## Slash commands
