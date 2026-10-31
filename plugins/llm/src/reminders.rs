@@ -1,0 +1,395 @@
+//! Reminders the model sets with tools, sent by a task that sleeps until the next one is due.
+//! ponytail: all of them in one JSON value, loaded at start and saved on each change. A sorted
+//! set if there are ever thousands.
+
+use std::{sync::Arc, time::Duration};
+
+use globibot_core::{
+    rpc,
+    serenity::all::{ChannelId, Message, MessageId, UserId},
+    storage::{self, StorageValue},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::{LlmPlugin, message_search::days_from_civil, unix_now};
+
+pub const REMINDERS_KEY: &str = "latest";
+const MAX_PER_USER: usize = 10;
+const MAX_AHEAD_SECS: u64 = 366 * 86_400;
+/// Sent with a note when the bot was down at the time
+const LATE_AFTER_SECS: u64 = 120;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Reminder {
+    pub id: u64,
+    pub user_id: UserId,
+    pub channel_id: ChannelId,
+    /// The message asking for it, replied to when it's due
+    pub message_id: MessageId,
+    /// Unix seconds
+    pub due: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Reminders {
+    next_id: u64,
+    pending: Vec<Reminder>,
+}
+
+impl StorageValue for Reminders {
+    type Format = storage::JsonFormat;
+
+    const REDIS_NS: &'static str = "llm_reminders";
+}
+
+impl Reminders {
+    fn add(&mut self, mut reminder: Reminder) -> Result<u64, String> {
+        let user_count = self.of_user(reminder.user_id).count();
+        if user_count >= MAX_PER_USER {
+            return Err(format!(
+                "They already have {user_count} reminders, the limit is {MAX_PER_USER}: cancel one first"
+            ));
+        }
+        self.next_id += 1;
+        reminder.id = self.next_id;
+        self.pending.push(reminder);
+        Ok(self.next_id)
+    }
+
+    fn of_user(&self, user_id: UserId) -> impl Iterator<Item = &Reminder> {
+        self.pending.iter().filter(move |r| r.user_id == user_id)
+    }
+
+    /// Only the user's own reminders can be cancelled
+    fn cancel(&mut self, user_id: UserId, id: u64) -> bool {
+        let before = self.pending.len();
+        self.pending
+            .retain(|r| !(r.id == id && r.user_id == user_id));
+        self.pending.len() < before
+    }
+
+    /// Removes and returns the reminders due at `now`
+    fn take_due(&mut self, now: u64) -> Vec<Reminder> {
+        let (due, pending) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|r| r.due <= now);
+        self.pending = pending;
+        due
+    }
+
+    fn next_due(&self) -> Option<u64> {
+        self.pending.iter().map(|r| r.due).min()
+    }
+}
+
+pub fn definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "set_reminder",
+                "description": "Remind the person asking of something later: at that time, a reply to their \
+                    message pings them with `message`. Write `message` as what you'll say then, in your voice. Give \
+                    either `in_minutes` or `at`. Clock times without a timezone are Europe/Paris. Only for the \
+                    person asking, never for someone else. Show the time in your answer as given in the result: \
+                    Discord shows it in each reader's timezone.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" },
+                        "in_minutes": { "type": "integer", "description": "From now" },
+                        "at": { "type": "string", "description": "UTC time, YYYY-MM-DD HH:MM" }
+                    },
+                    "required": ["message"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "list_reminders",
+                "description": "The pending reminders of the person asking",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "cancel_reminder",
+                "description": "Cancel one of the reminders of the person asking, by id (see list_reminders)",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "id": { "type": "integer" } },
+                    "required": ["id"]
+                }
+            }
+        }),
+    ]
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetReminder {
+    message: String,
+    in_minutes: Option<u64>,
+    at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CancelReminder {
+    id: u64,
+}
+
+impl LlmPlugin {
+    pub async fn set_reminder(&self, asked: &Message, args: SetReminder) -> String {
+        let now = unix_now();
+        let due = match (args.in_minutes, args.at.as_deref()) {
+            (Some(minutes), _) => now + minutes * 60,
+            (None, Some(at)) => match parse_utc(at) {
+                Some(due) => due,
+                None => return format!("Invalid time {at:?}, expected YYYY-MM-DD HH:MM"),
+            },
+            (None, None) => return "Give either in_minutes or at".to_string(),
+        };
+        if due <= now {
+            return "That time is in the past".to_string();
+        }
+        if due > now + MAX_AHEAD_SECS {
+            return "At most a year ahead".to_string();
+        }
+        let text = crate::context::clamp_chars(args.message.trim(), 1000);
+        if text.is_empty() {
+            return "The message is empty".to_string();
+        }
+
+        let added = self.reminders.lock().add(Reminder {
+            id: 0,
+            user_id: asked.author.id,
+            channel_id: asked.channel_id,
+            message_id: asked.id,
+            due,
+            text,
+        });
+        match added {
+            Ok(id) => {
+                tracing::info!(user_id = %asked.author.id, id, due, "Reminder set");
+                self.reminders_changed().await;
+                format!("Set, id {id}, due <t:{due}:f> (<t:{due}:R>)")
+            }
+            Err(why) => why,
+        }
+    }
+
+    pub fn list_reminders(&self, user_id: UserId) -> String {
+        let reminders = self.reminders.lock();
+        let lines = reminders
+            .of_user(user_id)
+            .map(|r| format!("id {}: due <t:{}:f>: {}", r.id, r.due, r.text))
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            "No pending reminders".to_string()
+        } else {
+            lines.join("\n")
+        }
+    }
+
+    pub async fn cancel_reminder(&self, user_id: UserId, args: CancelReminder) -> String {
+        if !self.reminders.lock().cancel(user_id, args.id) {
+            return format!("They have no reminder with id {}", args.id);
+        }
+        self.reminders_changed().await;
+        "Cancelled".to_string()
+    }
+
+    /// Saves the reminders and wakes the sending task, which may now sleep less
+    async fn reminders_changed(&self) {
+        let reminders = self.reminders.lock().clone();
+        if let Err(err) = self.storage.clone().set(REMINDERS_KEY, &reminders).await {
+            tracing::error!("Failed to save reminders: {err:?}");
+        }
+        self.reminders_wakeup.notify_one();
+    }
+}
+
+/// Sends reminders when they're due, forever
+pub async fn send_when_due(plugin: Arc<LlmPlugin>, rpc: rpc::ProtocolClient) {
+    loop {
+        let now = unix_now();
+        let due = plugin.reminders.lock().take_due(now);
+        if !due.is_empty() {
+            for reminder in &due {
+                send(&rpc, reminder, now).await;
+            }
+            plugin.reminders_changed().await;
+        }
+
+        // Woken early when one is added. Never more than an hour: the clock can jump
+        let next_due = plugin.reminders.lock().next_due();
+        let sleep = next_due.map_or(3600, |due| due.saturating_sub(unix_now()).min(3600));
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(sleep)) => {}
+            _ = plugin.reminders_wakeup.notified() => {}
+        }
+    }
+}
+
+async fn send(rpc: &rpc::ProtocolClient, reminder: &Reminder, now: u64) {
+    let late = if now > reminder.due + LATE_AFTER_SECS {
+        format!(" (late: due <t:{}:R>, I was down)", reminder.due)
+    } else {
+        String::new()
+    };
+    // Written by the model: no @everyone, @here or role pings, like its answers
+    let text = crate::fun::sanitize_llm_output(&format!(
+        "<@{}> ⏰ {}{late}",
+        reminder.user_id, reminder.text
+    ));
+
+    let replied = rpc
+        .send_reply(
+            rpc::context::current(),
+            reminder.channel_id,
+            text.clone(),
+            reminder.message_id,
+        )
+        .await;
+    if matches!(replied, Ok(Ok(_))) {
+        return;
+    }
+    // The message may be deleted
+    let sent = rpc
+        .send_message(rpc::context::current(), reminder.channel_id, text)
+        .await;
+    if !matches!(sent, Ok(Ok(_))) {
+        tracing::warn!(
+            id = reminder.id,
+            "Failed to send a reminder: {sent:?}, dropping it"
+        );
+    }
+}
+
+/// "YYYY-MM-DD HH:MM" (or with a T) in UTC, as unix seconds
+fn parse_utc(at: &str) -> Option<u64> {
+    let (date, time) = at.trim().split_once([' ', 'T'])?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (Some(Ok(year)), Some(Ok(month)), Some(Ok(day))) = (date.next(), date.next(), date.next())
+    else {
+        return None;
+    };
+    let mut time = time
+        .trim_end_matches('Z')
+        .splitn(3, ':')
+        .map(str::parse::<i64>);
+    let (Some(Ok(hour)), Some(Ok(minute))) = (time.next(), time.next()) else {
+        return None;
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    let secs = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60;
+    u64::try_from(secs).ok()
+}
+
+/// Like "Saturday 2026-10-31 19:48 UTC", for the model to work out times from
+pub fn format_utc(unix: u64) -> String {
+    const WEEKDAYS: [&str; 7] = [
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+    ];
+    let days = (unix / 86_400) as i64;
+    let secs = unix % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{} {year}-{month:02}-{day:02} {:02}:{:02} UTC",
+        WEEKDAYS[(days % 7) as usize],
+        secs / 3600,
+        secs % 3600 / 60
+    )
+}
+
+/// The inverse of `days_from_civil` (Howard Hinnant's algorithm)
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 {
+        month_from_march + 3
+    } else {
+        month_from_march - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reminder(user: u64, due: u64) -> Reminder {
+        Reminder {
+            id: 0,
+            user_id: UserId::new(user),
+            channel_id: ChannelId::new(1),
+            message_id: MessageId::new(1),
+            due,
+            text: "x".to_string(),
+        }
+    }
+
+    #[test]
+    fn due_reminders_are_taken_once() {
+        let mut reminders = Reminders::default();
+        let first = reminders.add(reminder(1, 100)).unwrap();
+        reminders.add(reminder(1, 200)).unwrap();
+        assert_eq!(reminders.next_due(), Some(100));
+        assert_eq!(
+            reminders
+                .take_due(150)
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            [first]
+        );
+        assert!(reminders.take_due(150).is_empty());
+        assert_eq!(reminders.next_due(), Some(200));
+    }
+
+    #[test]
+    fn only_owners_cancel_and_users_are_capped() {
+        let mut reminders = Reminders::default();
+        let id = reminders.add(reminder(1, 100)).unwrap();
+        assert!(!reminders.cancel(UserId::new(2), id));
+        assert!(reminders.cancel(UserId::new(1), id));
+        for _ in 0..MAX_PER_USER {
+            reminders.add(reminder(1, 100)).unwrap();
+        }
+        assert!(reminders.add(reminder(1, 100)).is_err());
+        assert!(reminders.add(reminder(2, 100)).is_ok());
+    }
+
+    #[test]
+    fn utc_times_round_trip() {
+        // 2026-10-31 19:48 UTC
+        let at = parse_utc("2026-10-31 19:48").unwrap();
+        assert_eq!(at, 1_793_476_080);
+        assert_eq!(parse_utc("2026-10-31T19:48:00Z"), Some(at));
+        assert_eq!(format_utc(at), "Saturday 2026-10-31 19:48 UTC");
+        assert_eq!(format_utc(0), "Thursday 1970-01-01 00:00 UTC");
+        assert_eq!(
+            format_utc(parse_utc("2028-02-29 00:00").unwrap()),
+            "Tuesday 2028-02-29 00:00 UTC"
+        );
+        assert!(parse_utc("2026-13-01 10:00").is_none() && parse_utc("tomorrow").is_none());
+    }
+}
