@@ -17,6 +17,8 @@ pub const USAGE_KEY: &str = "latest";
 pub enum UsageKind {
     /// Replies when mentioned
     Chat,
+    /// Replies in direct messages
+    DirectMessage,
     /// `/roast`, `/hype`, `/tldr`
     Command,
     /// Comments on Starboard posts

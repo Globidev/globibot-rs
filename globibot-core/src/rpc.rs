@@ -81,6 +81,8 @@ pub trait Protocol {
     async fn get_channel(channel_id: ChannelId) -> DiscordApiResult<Channel>;
 
     async fn list_guild_members(guild_id: GuildId) -> DiscordApiResult<Vec<Member>>;
+    /// `None` if the user isn't in the guild
+    async fn get_member(guild_id: GuildId, user_id: UserId) -> DiscordApiResult<Option<Member>>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
