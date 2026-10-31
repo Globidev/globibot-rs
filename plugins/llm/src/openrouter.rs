@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use itertools::Itertools;
+use anyhow::Context;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -45,66 +45,157 @@ impl Client {
         parts: Parts,
     ) -> impl Future<Output = anyhow::Result<String>> + Send + use<Parts, SessionId> {
         let mut messages = vec![Message::text(Role::System, system_prompt)];
-
         messages.extend(parts);
-        let images = messages
+
+        let req = Request {
+            model: model.to_string(),
+            messages,
+            session_id: session_id.into(),
+            tools: None,
+            tool_choice: None,
+        };
+        let client = self.clone();
+
+        async move {
+            let message = client.send(kind, &req).await?;
+            Ok(message.content.unwrap_or_default())
+        }
+    }
+
+    /// Like `complete`, but the model can call `tools`: each call is answered with
+    /// `run_tool(name, json_arguments)` until the model answers in text
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "same arguments as complete, plus the tools"
+    )]
+    pub async fn complete_with_tools(
+        &self,
+        kind: UsageKind,
+        model: String,
+        session_id: String,
+        system_prompt: String,
+        parts: Vec<Message>,
+        tools: &[serde_json::Value],
+        mut run_tool: impl FnMut(&str, &str) -> String + Send,
+    ) -> anyhow::Result<String> {
+        const MAX_TOOL_ROUNDS: usize = 5;
+
+        let mut messages = vec![Message::text(Role::System, system_prompt)];
+        messages.extend(parts);
+        let mut req = Request {
+            model,
+            messages,
+            session_id: Some(session_id),
+            tools: Some(tools),
+            tool_choice: None,
+        };
+
+        for round in 1..=MAX_TOOL_ROUNDS {
+            // Out of rounds: the model must answer with what it has
+            if round == MAX_TOOL_ROUNDS {
+                req.tool_choice = Some("none");
+            }
+
+            let message = self.send(kind, &req).await?;
+            if message.tool_calls.is_empty() {
+                return Ok(message.content.unwrap_or_default());
+            }
+
+            let results = message
+                .tool_calls
+                .iter()
+                .map(|call| Message {
+                    role: Role::Tool,
+                    content: vec![ContentPart::Text(TextContentPart {
+                        text: run_tool(&call.function.name, &call.function.arguments),
+                    })],
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(call.id.clone()),
+                })
+                .collect::<Vec<_>>();
+            req.messages.push(Message {
+                role: Role::Assistant,
+                content: message
+                    .content
+                    .filter(|text| !text.is_empty())
+                    .map(|text| ContentPart::Text(TextContentPart { text }))
+                    .into_iter()
+                    .collect(),
+                tool_calls: message.tool_calls,
+                tool_call_id: None,
+            });
+            req.messages.extend(results);
+        }
+
+        anyhow::bail!("The model kept calling tools after {MAX_TOOL_ROUNDS} rounds")
+    }
+
+    /// Sends one request and records its usage
+    async fn send(&self, kind: UsageKind, req: &Request<'_>) -> anyhow::Result<ReponseMessage> {
+        let images = req
+            .messages
             .iter()
             .flat_map(|message| &message.content)
             .filter(|part| matches!(part, ContentPart::Image(_)))
             .count() as u64;
 
-        let req = Request {
-            model,
-            messages,
-            session_id: session_id.into(),
-        };
-
-        let request = self
+        let response = self
             .http_client
             .post(COMPLETE_ENDPOINT)
             .bearer_auth(&self.api_key)
-            .json(&req);
-        let usage = Arc::clone(&self.usage);
-        let model = model.to_string();
-
-        async move {
-            let response = request.send().await?.error_for_status()?;
-            tracing::debug!("OpenRouter response: {response:?}");
-
-            let chat_response: serde_json::Value = response.json().await?;
-            tracing::debug!("OpenRouter chat response JSON: {chat_response:?}");
-
-            let chat_response: Response = serde_json::from_value(chat_response)?;
-
-            match &chat_response.usage {
-                Some(report) => {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-                    // The model that actually answered, in case OpenRouter picked a fallback
-                    let model = chat_response.model.as_deref().unwrap_or(&model);
-                    usage.lock().record(now, kind, model, images, report);
-                }
-                None => tracing::warn!("OpenRouter response has no usage"),
-            }
-
-            let answer = chat_response
-                .choices
-                .into_iter()
-                .map(|c| c.message.content.unwrap_or_default())
-                .join("");
-
-            Ok(answer)
+            .json(req)
+            .send()
+            .await?;
+        tracing::debug!("OpenRouter response: {response:?}");
+        let status = response.status();
+        if !status.is_success() {
+            // OpenRouter says what's wrong in the body, e.g. a model without tool support
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter returned {status}: {body}");
         }
+
+        let chat_response: serde_json::Value = response.json().await?;
+        tracing::debug!("OpenRouter chat response JSON: {chat_response:?}");
+
+        let chat_response: Response = serde_json::from_value(chat_response)?;
+
+        match &chat_response.usage {
+            Some(report) => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                // The model that actually answered, in case OpenRouter picked a fallback
+                let model = chat_response.model.as_deref().unwrap_or(&req.model);
+                self.usage.lock().record(now, kind, model, images, report);
+            }
+            None => tracing::warn!("OpenRouter response has no usage"),
+        }
+
+        let mut choices = chat_response.choices.into_iter();
+        let mut message = choices
+            .next()
+            .context("OpenRouter response has no choices")?
+            .message;
+        for choice in choices {
+            let content = message.content.get_or_insert_default();
+            content.push_str(&choice.message.content.unwrap_or_default());
+            message.tool_calls.extend(choice.message.tool_calls);
+        }
+
+        Ok(message)
     }
 }
 
 const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 #[derive(Debug, Clone, Serialize)]
-struct Request<'model> {
-    model: &'model str,
+struct Request<'tools> {
+    model: String,
     messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'tools [serde_json::Value]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,12 +214,35 @@ struct Choice {
 struct ReponseMessage {
     // role: String,
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    // An assistant turn that only calls tools has no content
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ContentPart>,
+    // Defaulted so that contexts stored before tools existed still load
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// JSON encoded, as the model wrote it
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +251,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +283,8 @@ impl Message {
         Self {
             role,
             content: vec![ContentPart::Text(TextContentPart { text })],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 }
@@ -188,6 +305,8 @@ mod tests {
                     },
                 }),
             ],
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         };
         let json = serde_json::json!({
             "role": "user",
@@ -199,5 +318,47 @@ mod tests {
         assert_eq!(serde_json::to_value(&message).unwrap(), json);
         let parsed = serde_json::from_value::<Message>(json).unwrap();
         assert!(matches!(&parsed.content[0], ContentPart::Text(part) if part.text == "hi"));
+        assert!(parsed.tool_calls.is_empty() && parsed.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn tool_turns_use_openrouter_format() {
+        let call = Message {
+            role: Role::Assistant,
+            content: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".into(),
+                r#type: "function".into(),
+                function: FunctionCall {
+                    name: "get_lore".into(),
+                    arguments: r#"{"user_ids":["1"]}"#.into(),
+                },
+            }],
+            tool_call_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&call).unwrap(),
+            serde_json::json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "get_lore", "arguments": "{\"user_ids\":[\"1\"]}" }
+                }]
+            })
+        );
+
+        let result = Message {
+            tool_call_id: Some("call_1".into()),
+            ..Message::text(Role::Tool, "Likes cats".into())
+        };
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({
+                "role": "tool",
+                "content": [{ "type": "text", "text": "Likes cats" }],
+                "tool_call_id": "call_1"
+            })
+        );
     }
 }

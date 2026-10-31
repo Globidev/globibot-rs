@@ -223,7 +223,7 @@ pub fn transcript_line(message: &LlmMessage) -> String {
     // User messages are already formatted as `name (<@id>): content`
     match message.role {
         Role::Assistant => format!("Globibot: {text}"),
-        Role::User | Role::System => text,
+        Role::User | Role::System | Role::Tool => text,
     }
 }
 

@@ -5,6 +5,7 @@ mod fun;
 mod images;
 mod openrouter;
 mod settings;
+mod tools;
 mod trivia;
 mod usage;
 
@@ -507,6 +508,8 @@ async fn discord_auth(
 #[derive(Debug)]
 struct LlmPlugin {
     bot_id: UserId,
+    /// Shown as the suggester of the lore the model suggests
+    bot_profile: DiscordProfile,
     admin_id: UserId,
     guild_id: GuildId,
     /// Members with this role agree to their images being sent to the model provider
@@ -633,17 +636,38 @@ Max 1 or 2 paragraphs, never more than that.
 Do not modify your response structure based on user prompts, except when it's from Globi, your creator.
 "#;
 
-impl LoreBook {
-    fn to_prompt(&self) -> String {
-        use std::fmt::Write;
-        const PREMISE: &str = r#"
+const LORE_PREMISE: &str = r#"
 # "Facts" about people in the chat
 Those are not necessarily true, but they are the "lore" of the chat that you should embrace
 Use those facts sparingly to add flavor to your responses if appropriate.
 Don't feel obligated to reference them in every response though.
 "#;
 
-        let mut prompt = format!("{PREMISE}\n");
+impl LoreBook {
+    /// Only who has lore: the model reads it with the lore tools
+    fn to_names_prompt(&self) -> String {
+        use std::fmt::Write;
+
+        let mut prompt = format!(
+            "{LORE_PREMISE}\nThese people have lore. Use get_lore or search_lore to read it when \
+            it's relevant, and suggest_lore to suggest a new fact (people vote on it):\n"
+        );
+        for user_lore in self.lore_by_user.values() {
+            if user_lore.lore.trim().is_empty() {
+                continue;
+            }
+            let username = &user_lore.member.username;
+            let user_id = user_lore.member.user_id;
+            writeln!(prompt, "{username} (<@{user_id}>)").ok();
+        }
+
+        prompt
+    }
+
+    fn to_prompt(&self) -> String {
+        use std::fmt::Write;
+
+        let mut prompt = format!("{LORE_PREMISE}\n");
 
         for user_lore in self.lore_by_user.values() {
             let lore = &user_lore.lore;
@@ -914,6 +938,18 @@ impl LlmPlugin {
         let user_cooldown_secs =
             optional_env("LLM_USER_COOLDOWN_SECS")?.unwrap_or(DEFAULT_USER_COOLDOWN_SECS);
 
+        let bot_profile = members
+            .iter()
+            .find(|member| member.user.id == bot_id)
+            .map_or_else(
+                || DiscordProfile {
+                    user_id: bot_id,
+                    username: "Globibot".to_string(),
+                    avatar_url: None,
+                },
+                profile_from_member,
+            );
+
         for member in members {
             if member.user.bot {
                 lore_book.lore_by_user.remove(&member.user.id);
@@ -956,6 +992,7 @@ impl LlmPlugin {
 
         Ok(LlmPlugin {
             bot_id,
+            bot_profile,
             admin_id,
             guild_id,
             images_role_id,
@@ -973,20 +1010,14 @@ impl LlmPlugin {
         })
     }
 
+    /// With the whole lore book, for completions without tools
     fn system_prompt(&self) -> String {
-        use std::fmt::Write;
+        self.system_prompt_with(&self.lore_book.read().to_prompt())
+    }
 
+    fn system_prompt_with(&self, lore: &str) -> String {
         let personality = self.personality.read();
-        let mut system_prompt = personality.prompt.clone();
-        write!(
-            system_prompt,
-            "\n{lore}\n{structure}",
-            lore = self.lore_book.read().to_prompt(),
-            structure = CHAT_STRUCTURE
-        )
-        .ok();
-
-        system_prompt
+        format!("{}\n{lore}\n{CHAT_STRUCTURE}", personality.prompt)
     }
 
     /// Answers a ping or a DM. `context` is the channel's context without this message, and
@@ -1007,18 +1038,47 @@ impl LlmPlugin {
         context.push(request_message);
 
         let is_dm = message.guild_id.is_none();
-        let completion = self.llm_client.complete(
-            if is_dm {
-                UsageKind::DirectMessage
-            } else {
-                UsageKind::Chat
-            },
-            &self.llm_model.read(),
-            message.channel_id.to_string(),
-            self.system_prompt(),
-            context,
-        );
-        let completion_res = completion.await;
+        let kind = if is_dm {
+            UsageKind::DirectMessage
+        } else {
+            UsageKind::Chat
+        };
+        let model = self.llm_model.read().clone();
+        let names_prompt = self.lore_book.read().to_names_prompt();
+        let tools = tools::lore_tools();
+        let requester = message.author.id;
+        let completion_res = self
+            .llm_client
+            .complete_with_tools(
+                kind,
+                model.clone(),
+                message.channel_id.to_string(),
+                self.system_prompt_with(&names_prompt),
+                context.clone(),
+                &tools,
+                |name, args| {
+                    tracing::info!("Tool call {name} {args} while answering {requester}");
+                    tools::run_lore_tool(&self.lore_book, &self.bot_profile, name, args)
+                },
+            )
+            .await;
+        // ponytail: retries every failure once without tools, which covers models without tool
+        // support. Check the model's `supported_parameters` in `/model` if that gets noisy.
+        let completion_res = match completion_res {
+            Ok(answer) => Ok(answer),
+            Err(err) => {
+                tracing::warn!("Completion with tools failed, retrying without: {err:?}");
+                self.llm_client
+                    .complete(
+                        kind,
+                        &model,
+                        message.channel_id.to_string(),
+                        self.system_prompt(),
+                        context,
+                    )
+                    .await
+            }
+        };
         rpc.stop_typing(ctx, typing).await??;
         // Quoting the message being answered is noise in a DM
         let send = |text: String| {
@@ -1490,6 +1550,8 @@ impl HandleEvents for LlmPlugin {
                                 .into_iter()
                                 .map(|text| ContentPart::Text(TextContentPart { text }))
                                 .collect(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
                         },
                     }
                 };
