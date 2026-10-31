@@ -129,6 +129,9 @@
 //! LlmCommands::parse(&interaction)                      // on each interaction
 //! ```
 //!
+//! A plugin with a single command can skip the set: `command::register::<Slap>(&rpc, None)` and
+//! `Slap::parse(&interaction)`.
+//!
 //! # Option types
 //!
 //! A field's type decides its option `type` and `required` through [`OptionValue`]:
@@ -163,7 +166,7 @@
 use serde_json::{Map, Value};
 use serenity::all::{
     AttachmentId, ChannelId, CommandData, CommandDataOption, CommandDataOptionValue,
-    CommandInteraction, Message, ResolvedTarget, RoleId, User, UserId,
+    CommandInteraction, GuildId, Message, ResolvedTarget, RoleId, User, UserId,
 };
 
 /// Which upsert RPC a command is registered with.
@@ -221,6 +224,15 @@ pub trait Command: Sized {
     fn parse(interaction: &CommandInteraction) -> Option<Result<Self, ParseError>> {
         Self::parse_data(&interaction.data)
     }
+}
+
+/// Registers a single command with its scope's RPC. Guild commands need `guild_id`. For several
+/// commands, use a [`bot_commands!`] set's `register`.
+pub async fn register<C: Command>(
+    rpc: &crate::rpc::ProtocolClient,
+    guild_id: Option<GuildId>,
+) -> Result<(), RegisterError> {
+    __private::register(rpc, guild_id, vec![(C::SCOPE, C::definition())]).await
 }
 
 /// Implemented by [`bot_subcommands!`] enums and `#[slash]` enums.
@@ -375,7 +387,10 @@ pub mod __private {
     }
 
     pub fn choice<T: serde::Serialize>(name: &str, value: T) -> Value {
-        Value::Object(object(vec![("name", name.into()), ("value", to_json(value))]))
+        Value::Object(object(vec![
+            ("name", name.into()),
+            ("value", to_json(value)),
+        ]))
     }
 
     pub fn parse_option<T: OptionValue>(
@@ -446,7 +461,8 @@ pub mod __private {
                         let name = definition["name"].as_str().unwrap_or_default();
                         return Err(RegisterError::MissingGuildId(name.to_string()));
                     };
-                    rpc.upsert_guild_command(ctx, guild_id, definition).await??;
+                    rpc.upsert_guild_command(ctx, guild_id, definition)
+                        .await??;
                 }
             }
         }
@@ -1109,7 +1125,10 @@ mod tests {
             "id": "1", "name": "add-user-context", "type": 1,
             "options": [{ "name": "user", "type": 6, "value": "42" }]
         })));
-        assert_eq!(parsed.unwrap().unwrap_err(), ParseError::MissingOption("context"));
+        assert_eq!(
+            parsed.unwrap().unwrap_err(),
+            ParseError::MissingOption("context")
+        );
     }
 
     #[test]
@@ -1221,7 +1240,10 @@ mod tests {
 
     #[test]
     fn context_menu_and_entry_point() {
-        assert_eq!(ShowArt::definition(), json!({ "name": "show art 🎨", "type": 2 }));
+        assert_eq!(
+            ShowArt::definition(),
+            json!({ "name": "show art 🎨", "type": 2 })
+        );
         let parsed = ShowArt::parse_data(&data(json!({
             "id": "1", "name": "show art 🎨", "type": 2, "target_id": "42"
         })));
@@ -1242,10 +1264,16 @@ mod tests {
         assert_eq!(scopes[1], ("slap".to_string(), Scope::Global));
         assert_eq!(scopes[3], ("lore-trivia".to_string(), Scope::Guild));
 
-        let trivia = TestCommands::parse_data(&data(json!({ "id": "1", "name": "lore-trivia", "type": 1 })));
-        assert!(matches!(trivia, Some(Ok(TestCommands::LoreTrivia(LoreTrivia)))));
+        let trivia = TestCommands::parse_data(&data(
+            json!({ "id": "1", "name": "lore-trivia", "type": 1 }),
+        ));
+        assert!(matches!(
+            trivia,
+            Some(Ok(TestCommands::LoreTrivia(LoreTrivia)))
+        ));
 
-        let unknown = TestCommands::parse_data(&data(json!({ "id": "1", "name": "roast", "type": 1 })));
+        let unknown =
+            TestCommands::parse_data(&data(json!({ "id": "1", "name": "roast", "type": 1 })));
         assert!(unknown.is_none());
     }
 

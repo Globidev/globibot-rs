@@ -115,4 +115,3 @@ bot_command! {
     #[slash(scope = guild, name = "lore-trivia", description = "Guess whose lore this is")]
     pub struct LoreTrivia;
 }
-

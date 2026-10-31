@@ -4,16 +4,13 @@ use std::{
 };
 
 use globibot_core::{
+    bot_command,
+    command::{self, Command},
     events::{Event, EventType},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, context::current as rpc_context},
     serenity::{
-        all::CommandId,
-        model::{
-            application::{CommandDataOptionValue, CommandInteraction},
-            id::UserId,
-            mention::Mentionable,
-        },
+        model::{application::CommandInteraction, id::UserId, mention::Mentionable},
         utils::parse_user_mention,
     },
 };
@@ -23,6 +20,14 @@ use rand::{Rng, SeedableRng};
 use rate::Rate;
 
 type PluginError = Box<dyn Error + Send + Sync>;
+
+bot_command! {
+    #[slash(scope = global, name = "rate", description = "Rate someone's appearance")]
+    struct RateCommand {
+        #[option(name = "target", description = "The user to rate. Defaults to yourself if omitted")]
+        target: Option<UserId>,
+    }
+}
 
 #[tokio::main]
 async fn main() -> common::anyhow::Result<()> {
@@ -35,19 +40,13 @@ async fn main() -> common::anyhow::Result<()> {
     let endpoints =
         common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
 
-    let desired_command: serde_json::Value =
-        serde_json::from_str(include_str!("../rateme-slash-command.json"))?;
-
     let plugin = RatemePlugin::connect_init(endpoints, async |rpc| {
-        let command = rpc
-            .upsert_global_command(rpc_context(), desired_command)
-            .await??;
+        command::register::<RateCommand>(rpc, None).await?;
 
         common::anyhow::Ok(RatemePlugin {
             rng: rand::rngs::StdRng::from_os_rng().into(),
             rating_images_small,
             rating_images_medium,
-            command_id: command.id,
         })
     })
     .await?;
@@ -66,7 +65,6 @@ struct RatemePlugin<R: Rng> {
     rng: parking_lot::Mutex<R>,
     rating_images_small: Vec<common::image::DynamicImage>,
     rating_images_medium: Vec<common::image::DynamicImage>,
-    command_id: CommandId,
 }
 
 impl<R: Rng> Plugin for RatemePlugin<R> {
@@ -107,18 +105,26 @@ impl<R: Rng + Send + 'static> HandleEvents for RatemePlugin<R> {
     async fn on_event(&self, rpc: rpc::ProtocolClient, event: Event) -> Result<(), Self::Err> {
         match event {
             Event::MessageCreate { message: _ } => {}
-            Event::InteractionCreate { interaction } if interaction.data.id == self.command_id => {
+            Event::InteractionCreate { interaction } => {
+                let RateCommand { target } = match RateCommand::parse(&interaction) {
+                    Some(Ok(rate)) => rate,
+                    Some(Err(err)) => {
+                        tracing::warn!("Invalid rate interaction: {err}");
+                        return Ok(());
+                    }
+                    None => return Ok(()),
+                };
+
                 let CommandInteraction {
                     id,
-                    data: command,
                     token,
                     channel_id,
                     user: author,
                     ..
                 } = *interaction;
 
-                let (target, user_to_rate) = match command.options.first().map(|opt| &opt.value) {
-                    Some(&CommandDataOptionValue::User(user_id)) => {
+                let (target, user_to_rate) = match target {
+                    Some(user_id) => {
                         let user = rpc.get_user(rpc_context(), user_id).await??;
                         (RateTarget::User(user_id), user)
                     }
