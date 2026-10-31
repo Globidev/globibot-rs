@@ -99,6 +99,13 @@ pub trait Protocol {
         public_only: bool,
         search: MessageSearch,
     ) -> DiscordApiResult<MessageSearchResults>;
+
+    /// Whether `user_id` can see and post in `channel_id`, a channel or public thread of the guild
+    async fn can_send_in(
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        user_id: UserId,
+    ) -> DiscordApiResult<bool>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

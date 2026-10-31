@@ -478,6 +478,43 @@ impl Protocol for Server {
         }
     }
 
+    async fn can_send_in(
+        self,
+        ctx: Context,
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        user_id: UserId,
+    ) -> DiscordApiResult<bool> {
+        let Some(member) = self.clone().get_member(ctx, guild_id, user_id).await? else {
+            return Ok(false);
+        };
+        let guild = self
+            .discord_cache
+            .guild(guild_id)
+            .ok_or("The server isn't in the cache")?;
+        let allowed = match guild.channels.get(&channel_id) {
+            Some(channel) => {
+                channel.kind != ChannelType::Category
+                    && guild
+                        .user_permissions_in(channel, &member)
+                        .contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+            }
+            // Threads aren't in the channels, and take their permissions from their parent.
+            // Private ones also need being added to them: left out.
+            None => guild
+                .threads
+                .iter()
+                .find(|thread| thread.id == channel_id && thread.kind == ChannelType::PublicThread)
+                .and_then(|thread| guild.channels.get(&thread.parent_id?))
+                .is_some_and(|parent| {
+                    guild
+                        .user_permissions_in(parent, &member)
+                        .contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES_IN_THREADS)
+                }),
+        };
+        Ok(allowed)
+    }
+
     async fn search_guild_messages(
         self,
         ctx: Context,
