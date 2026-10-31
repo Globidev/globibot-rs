@@ -3,18 +3,18 @@
 use std::{collections::BTreeMap, fmt::Write};
 
 use globibot_core::{
-    rpc,
+    rpc::{self, FileAttachment},
     serenity::all::{Message, UserId},
     storage::DiscordProfile,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
     LlmPlugin, LoreBook,
     context::clamp_chars,
-    images,
+    image_generation, images,
     message_search::{self, parse_id},
     openrouter::ToolOutput,
     tool_traces::{self, Outcome, ToolTrace, ToolTraces},
@@ -31,11 +31,15 @@ const MAX_ANSWERS: usize = 20;
 const MAX_CALL_CHARS: usize = 300;
 
 /// The tool definitions sent to OpenRouter
-pub fn tool_definitions() -> Vec<Value> {
+/// `generate_image` only when it's turned on, so the model doesn't try it for nothing
+pub fn tool_definitions(images_enabled: bool) -> Vec<Value> {
     let mut definitions = lore_tools();
     definitions.extend(usage_tools());
     definitions.push(message_search::definition());
     definitions.extend(avatar_tools());
+    if images_enabled {
+        definitions.push(image_generation::definition());
+    }
     definitions
 }
 
@@ -95,11 +99,12 @@ fn usage_tools() -> Vec<Value> {
 
 impl LlmPlugin {
     /// Runs the tool `name` with the model's JSON `args`, while answering `asked`. Errors are
-    /// returned as text for the model.
+    /// returned as text for the model. Generated images go to `files`, the answer's attachments.
     pub async fn run_tool(
         &self,
         rpc: &rpc::ProtocolClient,
         asked: &Message,
+        files: &Mutex<Vec<FileAttachment>>,
         name: &str,
         args: &str,
     ) -> ToolOutput {
@@ -111,6 +116,13 @@ impl LlmPlugin {
         match name {
             "get_avatars" => match parse_args(args) {
                 Ok(GetAvatars { user_ids }) => self.avatars(rpc, asked.author.id, &user_ids).await,
+                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
+            },
+            "generate_image" => match parse_args(args) {
+                Ok(generate) => {
+                    self.generate_image(rpc, asked.author.id, files, generate)
+                        .await
+                }
                 Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
             },
             _ => ToolOutput::text(self.run_text_tool(rpc, asked, name, args).await),
@@ -179,7 +191,7 @@ impl LlmPlugin {
 
     /// A link to each avatar, and the image itself when its owner consents, like images in
     /// messages: asking about your own avatar shares it, others need the images role
-    async fn avatars(
+    pub async fn avatars(
         &self,
         rpc: &rpc::ProtocolClient,
         requester: UserId,
@@ -339,6 +351,7 @@ fn kind_name(kind: UsageKind) -> &'static str {
         UsageKind::Starboard => "Starboard comments",
         UsageKind::Summary => "summaries of older messages",
         UsageKind::Caption => "image captions",
+        UsageKind::ImageGeneration => "generated images",
     }
 }
 

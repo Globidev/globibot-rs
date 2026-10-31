@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
+use base64::Engine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -211,6 +212,102 @@ impl Client {
 
         Ok((message, totals))
     }
+
+    /// Makes one image with an image model, from a prompt and optional reference images (data
+    /// URLs). Records its usage as `ImageGeneration`.
+    pub async fn generate_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        aspect_ratio: Option<&str>,
+        references: Vec<String>,
+    ) -> anyhow::Result<GeneratedImage> {
+        #[derive(Deserialize)]
+        struct ImagesResponse {
+            data: Vec<ImageData>,
+            usage: Option<UsageReport>,
+        }
+        #[derive(Deserialize)]
+        struct ImageData {
+            b64_json: String,
+            media_type: Option<String>,
+        }
+
+        let reference_count = references.len() as u64;
+        let mut req = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            // Discord shows them small anyway, and bigger ones cost more
+            "resolution": "1K",
+            "input_references": references
+                .into_iter()
+                .map(|url| serde_json::json!({ "type": "image_url", "image_url": { "url": url } }))
+                .collect::<Vec<_>>(),
+        });
+        if let Some(aspect_ratio) = aspect_ratio {
+            req["aspect_ratio"] = aspect_ratio.into();
+        }
+
+        let response = self
+            .http_client
+            .post(IMAGES_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .json(&req)
+            .send()
+            .await?;
+        // Not the body: it's megabytes of base64
+        tracing::debug!("OpenRouter image response status: {}", response.status());
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter returned {status}: {body}");
+        }
+
+        let found: ImagesResponse = response.json().await?;
+        match &found.usage {
+            Some(report) => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                self.usage.lock().record(
+                    now,
+                    UsageKind::ImageGeneration,
+                    model,
+                    reference_count,
+                    report,
+                );
+            }
+            None => tracing::warn!("OpenRouter image response has no usage"),
+        }
+
+        let image = found
+            .data
+            .into_iter()
+            .next()
+            .context("OpenRouter returned no image")?;
+        Ok(GeneratedImage {
+            data: base64::engine::general_purpose::STANDARD.decode(image.b64_json)?,
+            media_type: image.media_type.unwrap_or_else(|| "image/png".to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedImage {
+    pub data: Vec<u8>,
+    /// `image/png`, `image/jpeg`, ...
+    pub media_type: String,
+}
+
+impl GeneratedImage {
+    /// A file name with the right extension, so Discord shows it inline
+    pub fn file_name(&self) -> String {
+        let extension = match self.media_type.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        format!("image.{extension}")
+    }
 }
 
 /// What a tool answers: text, and images to show the model
@@ -241,6 +338,7 @@ pub struct ToolCompletion {
 }
 
 const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
+const IMAGES_ENDPOINT: &str = "https://openrouter.ai/api/v1/images";
 
 #[derive(Debug, Clone, Serialize)]
 struct Request<'tools> {

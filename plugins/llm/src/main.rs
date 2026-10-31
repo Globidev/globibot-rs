@@ -2,6 +2,7 @@ mod commands;
 mod context;
 mod cooldown;
 mod fun;
+mod image_generation;
 mod images;
 mod message_search;
 mod openrouter;
@@ -27,6 +28,7 @@ use commands::{
 use context::{ChannelContext, ContextMessage, SavedContext};
 use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
+use image_generation::{DailyCounts, ImageSettings};
 use images::{Consent, MessageImages};
 use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
 use parking_lot::{Mutex, RwLock};
@@ -50,7 +52,7 @@ use globibot_core::{
     events::{Event, EventType},
     interaction::{CommandCtx, CommandInteractionExt},
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
-    rpc,
+    rpc::{self, FileAttachment},
     serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, RoleId, UserId},
     storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
@@ -216,6 +218,9 @@ impl WebServer {
 struct WebLLMSettings {
     model: String,
     context_window_size: usize,
+    image_model: String,
+    image_generation_enabled: bool,
+    images_per_user_per_day: u32,
 
     #[serde(skip_deserializing)]
     prompt: String,
@@ -278,10 +283,14 @@ async fn llm_settings(
             .collect()
     };
 
+    let image_settings = llm_plugin.image_settings.read().clone();
     let settings = WebLLMSettings {
         model,
         prompt: llm_plugin.system_prompt(),
         context_window_size,
+        image_model: image_settings.model,
+        image_generation_enabled: image_settings.enabled,
+        images_per_user_per_day: image_settings.per_user_per_day,
         context_windows_by_channel,
         allowed_to_edit: Some(llm_plugin.admin_id == profile.user_id),
     };
@@ -306,6 +315,11 @@ async fn update_llm_settings(
     llm_plugin
         .context_window_size
         .store(settings.context_window_size, Ordering::Relaxed);
+    *llm_plugin.image_settings.write() = ImageSettings {
+        model: settings.image_model.trim().to_string(),
+        enabled: settings.image_generation_enabled,
+        per_user_per_day: settings.images_per_user_per_day,
+    };
     llm_plugin.save_settings().await;
 
     llm_settings(State(llm_plugin), Extension(profile))
@@ -559,6 +573,9 @@ struct LlmPlugin {
     lore_book: RwLock<LoreBook>,
     trivia: TriviaRounds,
     tool_traces: Mutex<ToolTraces>,
+
+    image_settings: RwLock<ImageSettings>,
+    image_counts: Mutex<DailyCounts>,
 }
 
 /// Reads an optional environment variable, treating an empty value as unset
@@ -1020,6 +1037,10 @@ impl LlmPlugin {
             .map_or(DEFAULT_CONTEXT_WINDOW_SIZE, |settings| {
                 settings.context_window_size
             });
+        let image_settings = match saved_settings.and_then(|settings| settings.images) {
+            Some(saved) => saved,
+            None => ImageSettings::defaults(optional_env("LLM_DEFAULT_IMAGE_MODEL_ID")?),
+        };
 
         Ok(LlmPlugin {
             bot_id,
@@ -1039,6 +1060,8 @@ impl LlmPlugin {
             lore_book: RwLock::new(lore_book),
             trivia: TriviaRounds::default(),
             tool_traces: Mutex::new(tool_traces),
+            image_settings: RwLock::new(image_settings),
+            image_counts: Mutex::new(DailyCounts::default()),
         })
     }
 
@@ -1078,11 +1101,13 @@ impl LlmPlugin {
         };
         let model = self.llm_model.read().clone();
         let names_prompt = self.lore_book.read().to_names_prompt();
-        let tools = tools::tool_definitions();
+        let tools = tools::tool_definitions(self.image_settings.read().enabled);
         let started = Instant::now();
-        // Filled by each tool run, which can't borrow the closure that starts it
+        // Filled by each tool run, which can't borrow the closure that starts it: the calls for
+        // the trace, and the generated images to attach to the answer
         let calls = Mutex::new(Vec::new());
-        let (calls_ref, rpc_ref) = (&calls, &rpc);
+        let files = Mutex::new(Vec::new());
+        let (calls_ref, files_ref, rpc_ref) = (&calls, &files, &rpc);
         let completion_res = self
             .llm_client
             .complete_with_tools(
@@ -1093,7 +1118,9 @@ impl LlmPlugin {
                 context.clone(),
                 &tools,
                 move |name, args| async move {
-                    let output = self.run_tool(rpc_ref, message, &name, &args).await;
+                    let output = self
+                        .run_tool(rpc_ref, message, files_ref, &name, &args)
+                        .await;
                     // Traces keep text only: the images are noted
                     let result = match output.images.len() {
                         0 => output.text.clone(),
@@ -1109,6 +1136,8 @@ impl LlmPlugin {
             )
             .await;
         let calls = calls.into_inner();
+        // Sent with whichever answer comes, even the retry without tools: they're paid for
+        let files = files.into_inner();
 
         let outcome = match &completion_res {
             Ok(completion) => Outcome::Answered {
@@ -1160,21 +1189,27 @@ impl LlmPlugin {
             Err(err) => tracing::warn!("Failed to stop typing: {err}"),
         }
         // Quoting the message being answered is noise in a DM
-        let send = |text: String| {
+        let reply_to = (!is_dm).then_some(message.id);
+        let send = |text: String, files: Vec<FileAttachment>| {
             let rpc = rpc.clone();
             async move {
                 let ctx = rpc::context::current();
-                if is_dm {
-                    rpc.send_message(ctx, message.channel_id, text).await
-                } else {
-                    rpc.send_reply(ctx, message.channel_id, text, message.id)
-                        .await
+                match (files.is_empty(), reply_to) {
+                    (true, None) => rpc.send_message(ctx, message.channel_id, text).await,
+                    (true, Some(reply_to)) => {
+                        rpc.send_reply(ctx, message.channel_id, text, reply_to)
+                            .await
+                    }
+                    (false, _) => {
+                        rpc.send_message_with_files(ctx, message.channel_id, text, reply_to, files)
+                            .await
+                    }
                 }
             }
         };
         if let Ok(answer) = completion_res {
             let answer = sanitize_llm_output(&answer);
-            send(answer.clone()).await??;
+            send(answer.clone(), files).await??;
 
             let bot_message = ContextMessage {
                 id: None,
@@ -1184,7 +1219,7 @@ impl LlmPlugin {
             self.register_message(rpc, message, bot_message).await?;
         } else {
             tracing::error!("Failed to get LLM completion: {:?}", completion_res.err());
-            send("Sorry, I lost my train of thought.".to_string()).await??;
+            send("Sorry, I lost my train of thought.".to_string(), files).await??;
         }
 
         Ok(())
