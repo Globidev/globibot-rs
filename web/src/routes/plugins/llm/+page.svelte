@@ -8,6 +8,7 @@
   import ContributorsTab from './tabs/ContributorsTab.svelte';
   import UsageTab from './tabs/UsageTab.svelte';
   import ToolsTab from './tabs/ToolsTab.svelte';
+  import RemindersTab from './tabs/RemindersTab.svelte';
 
   const tabs = [
     { id: 'general_settings', label: '⚙️ General settings', component: GeneralSettingsTab },
@@ -15,6 +16,7 @@
     { id: 'lore_book', label: '📓 Lore book', component: LoreBookTab },
     { id: 'usage', label: '📊 Usage', component: UsageTab },
     { id: 'tools', label: '🔧 Tools', component: ToolsTab },
+    { id: 'reminders', label: '⏰ Reminders', component: RemindersTab },
     { id: 'contributors', label: '❤️ Contributors', component: ContributorsTab }
   ] as const;
 

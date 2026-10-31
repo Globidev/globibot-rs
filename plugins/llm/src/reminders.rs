@@ -2,12 +2,18 @@
 //! ponytail: all of them in one JSON value, loaded at start and saved on each change. A sorted
 //! set if there are ever thousands.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use axum::{
+    Extension, Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use globibot_core::{
     rpc,
     serenity::all::{ChannelId, Message, MessageId, UserId},
-    storage::{self, StorageValue},
+    storage::{self, DiscordProfile, StorageValue},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,6 +36,13 @@ pub struct Reminder {
     /// Unix seconds
     pub due: u64,
     pub text: String,
+    /// For the website. Defaults for reminders set before it showed them
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub message_url: String,
+    #[serde(default)]
+    pub in_dm: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,6 +94,10 @@ impl Reminders {
 
     fn next_due(&self) -> Option<u64> {
         self.pending.iter().map(|r| r.due).min()
+    }
+
+    fn owner(&self, id: u64) -> Option<UserId> {
+        self.pending.iter().find(|r| r.id == id).map(|r| r.user_id)
     }
 }
 
@@ -170,6 +187,13 @@ impl LlmPlugin {
             message_id: asked.id,
             due,
             text,
+            user_name: asked
+                .member
+                .as_ref()
+                .and_then(|member| member.nick.clone())
+                .unwrap_or_else(|| asked.author.display_name().to_string()),
+            message_url: asked.link(),
+            in_dm: asked.guild_id.is_none(),
         });
         match added {
             Ok(id) => {
@@ -195,11 +219,19 @@ impl LlmPlugin {
     }
 
     pub async fn cancel_reminder(&self, user_id: UserId, args: CancelReminder) -> String {
-        if !self.reminders.lock().cancel(user_id, args.id) {
-            return format!("They have no reminder with id {}", args.id);
+        if self.cancel_reminder_of(user_id, args.id).await {
+            "Cancelled".to_string()
+        } else {
+            format!("They have no reminder with id {}", args.id)
         }
-        self.reminders_changed().await;
-        "Cancelled".to_string()
+    }
+
+    async fn cancel_reminder_of(&self, user_id: UserId, id: u64) -> bool {
+        let cancelled = self.reminders.lock().cancel(user_id, id);
+        if cancelled {
+            self.reminders_changed().await;
+        }
+        cancelled
     }
 
     /// Saves the reminders and wakes the sending task, which may now sleep less
@@ -209,6 +241,91 @@ impl LlmPlugin {
             tracing::error!("Failed to save reminders: {err:?}");
         }
         self.reminders_wakeup.notify_one();
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebReminders {
+    reminders: Vec<WebReminder>,
+    is_admin: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WebReminder {
+    id: u64,
+    due: u64,
+    text: String,
+    user_name: String,
+    channel_name: String,
+    message_url: String,
+    mine: bool,
+}
+
+/// Your own reminders. The admin also sees everyone's, except those set in DMs
+pub async fn web_list(
+    State(plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+) -> Json<WebReminders> {
+    let is_admin = plugin.admin_id == profile.user_id;
+    let channel_names = plugin
+        .contexts_by_channel
+        .lock()
+        .iter()
+        .map(|(id, context)| (*id, crate::channel_label(&context.channel)))
+        .collect::<HashMap<_, _>>();
+    let mut reminders = plugin
+        .reminders
+        .lock()
+        .pending
+        .iter()
+        .filter(|r| r.user_id == profile.user_id || (is_admin && !r.in_dm))
+        .map(|r| WebReminder {
+            id: r.id,
+            due: r.due,
+            text: r.text.clone(),
+            user_name: r.user_name.clone(),
+            channel_name: channel_names
+                .get(&r.channel_id)
+                .cloned()
+                .unwrap_or_else(|| if r.in_dm { "DM" } else { "unknown channel" }.to_string()),
+            message_url: r.message_url.clone(),
+            mine: r.user_id == profile.user_id,
+        })
+        .collect::<Vec<_>>();
+    reminders.sort_by_key(|r| r.due);
+    Json(WebReminders {
+        reminders,
+        is_admin,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WebCancel {
+    id: u64,
+}
+
+/// Your own reminders, or anyone's for the admin
+pub async fn web_cancel(
+    State(plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(WebCancel { id }): Json<WebCancel>,
+) -> Response {
+    let owner = plugin.reminders.lock().owner(id);
+    match owner {
+        None => (
+            StatusCode::NOT_FOUND,
+            "No such reminder, it may have been sent",
+        )
+            .into_response(),
+        Some(owner) if owner != profile.user_id && plugin.admin_id != profile.user_id => (
+            StatusCode::FORBIDDEN,
+            "You can only cancel your own reminders",
+        )
+            .into_response(),
+        Some(owner) => {
+            plugin.cancel_reminder_of(owner, id).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
     }
 }
 
@@ -344,6 +461,9 @@ mod tests {
             message_id: MessageId::new(1),
             due,
             text: "x".to_string(),
+            user_name: String::new(),
+            message_url: String::new(),
+            in_dm: false,
         }
     }
 

@@ -213,6 +213,11 @@ impl WebServer {
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
             .route("/credits", axum::routing::get(llm_credits))
+            .route("/reminders", axum::routing::get(reminders::web_list))
+            .route(
+                "/reminders/cancel",
+                axum::routing::post(reminders::web_cancel),
+            )
             .route("/tools", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
@@ -243,6 +248,21 @@ struct WebLLMSettings {
 
     #[serde(skip_deserializing)]
     allowed_to_edit: Option<bool>,
+}
+
+/// "#general", or "DM with someone"
+fn channel_label(channel: &Channel) -> String {
+    match channel {
+        Channel::Guild(channel) => format!("#{}", channel.name),
+        Channel::Private(channel) => {
+            let user = &channel.recipient;
+            format!(
+                "DM with {}",
+                user.global_name.as_ref().unwrap_or(&user.name)
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 async fn llm_usage(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
@@ -294,17 +314,7 @@ async fn llm_settings(
         contexts_by_channel
             .values()
             .map(|ctx| ChannelContextWindow {
-                channel_name: match &ctx.channel {
-                    Channel::Guild(channel) => format!("#{}", channel.name),
-                    Channel::Private(channel) => {
-                        let user = &channel.recipient;
-                        format!(
-                            "DM with {}",
-                            user.global_name.as_ref().unwrap_or(&user.name)
-                        )
-                    }
-                    _ => String::new(),
-                },
+                channel_name: channel_label(&ctx.channel),
                 size: ctx.messages.len(),
             })
             .collect()
