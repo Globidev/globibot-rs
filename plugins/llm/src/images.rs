@@ -89,7 +89,7 @@ impl MessageImages {
     }
 }
 
-fn is_image(attachment: &Attachment) -> bool {
+pub fn is_image(attachment: &Attachment) -> bool {
     attachment
         .content_type
         .as_deref()

@@ -910,6 +910,47 @@ enum SuggestionVote {
     Down,
 }
 
+/// Says which message `message` replies to, with the start of it: it may be outside the context.
+/// Attachments are only counted: whether the model sees the images is up to `images_to_show`
+fn reply_line(replied_to: &Message, bot_id: UserId) -> String {
+    let author = &replied_to.author;
+    let who = if author.id == bot_id {
+        "you".to_string()
+    } else {
+        format!("{} (<@{}>)", author.display_name(), author.id)
+    };
+    let text = replied_to
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let images = replied_to
+        .attachments
+        .iter()
+        .filter(|a| images::is_image(a))
+        .count();
+    let files = replied_to.attachments.len() - images;
+    let attached = [(images, "image"), (files, "file")]
+        .into_iter()
+        .filter(|&(count, _)| count > 0)
+        .map(|(count, what)| format!("{count} {what}{}", if count > 1 { "s" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(" and ");
+
+    match (text.is_empty(), attached.is_empty()) {
+        (true, true) => format!("[Replying to a message from {who} with no text]"),
+        (true, false) => format!("[Replying to a message from {who} with {attached}]"),
+        (false, true) => format!(
+            "[Replying to {who}: \"{}\"]",
+            context::clamp_chars(&text, 300)
+        ),
+        (false, false) => format!(
+            "[Replying to {who}: \"{}\", with {attached}]",
+            context::clamp_chars(&text, 300)
+        ),
+    }
+}
+
 fn suggested_addition_reply(for_user_id: UserId) -> String {
     format!(
         "Suggested an addition to <@{for_user_id}>'s lore. \
@@ -1656,6 +1697,9 @@ impl HandleEvents for LlmPlugin {
                     .flatten();
                 let stored_message = {
                     let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];
+                    if let Some(replied_to) = &message.referenced_message {
+                        texts.push(reply_line(replied_to, self.bot_id));
+                    }
                     texts.extend(
                         images::gif_descriptions(&message.content)
                             .into_iter()
@@ -1735,6 +1779,50 @@ impl HandleEvents for LlmPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_say_who_and_what() {
+        let mut replied_to = Message::default();
+        replied_to.author.id = UserId::new(7);
+        replied_to.author.name = "alice".to_string();
+        replied_to.content = "first line\n  second".to_string();
+        let bot_id = UserId::new(1);
+        assert_eq!(
+            reply_line(&replied_to, bot_id),
+            "[Replying to alice (<@7>): \"first line second\"]"
+        );
+
+        replied_to.author.id = bot_id;
+        replied_to.content = String::new();
+        assert_eq!(
+            reply_line(&replied_to, bot_id),
+            "[Replying to a message from you with no text]"
+        );
+
+        let attachment = |name: &str, content_type: &str| {
+            serde_json::from_value::<globibot_core::serenity::all::Attachment>(serde_json::json!({
+                "id": "1", "filename": name, "size": 1, "url": "", "proxy_url": "",
+                "content_type": content_type, "width": 10, "height": 10
+            }))
+            .unwrap()
+        };
+        replied_to.attachments = vec![attachment("a.png", "image/png")];
+        assert_eq!(
+            reply_line(&replied_to, bot_id),
+            "[Replying to a message from you with 1 image]"
+        );
+        replied_to.content = "look".to_string();
+        replied_to
+            .attachments
+            .push(attachment("b.png", "image/png"));
+        replied_to
+            .attachments
+            .push(attachment("c.pdf", "application/pdf"));
+        assert_eq!(
+            reply_line(&replied_to, bot_id),
+            "[Replying to you: \"look\", with 2 images and 1 file]"
+        );
+    }
 
     #[test]
     fn chat_structure_explains_the_summary_tag() {
