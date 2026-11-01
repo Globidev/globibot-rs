@@ -16,11 +16,12 @@ use globibot_core::{
     storage::{self, DiscordProfile, StorageValue},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::{
     LlmPlugin,
     message_search::{days_from_civil, parse_id},
+    openrouter::ToolOutput,
+    tool::{Tool, ToolCtx, llm_tool},
     unix_now,
 };
 
@@ -118,67 +119,57 @@ impl Reminders {
     }
 }
 
-pub fn definitions() -> Vec<Value> {
-    vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "set_reminder",
-                "description": "Remind the person asking of something later: at that time, a reply to their \
-                    message pings them with `message`, or a message in `channel` if they want it somewhere else. \
-                    Write `message` as what you'll say then, in your voice. Give either `in_minutes` or `at`. Clock times without a timezone are Europe/Paris. Only for the \
-                    person asking, never for someone else. Show the time in your answer as given in the result: \
-                    Discord shows it in each reader's timezone.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string" },
-                        "in_minutes": { "type": "integer", "description": "From now" },
-                        "at": { "type": "string", "description": "UTC time, YYYY-MM-DD HH:MM" },
-                        "channel": {
-                            "type": "string",
-                            "description": "Only to post it somewhere else: a channel of the server, as its id or \
-                                <#id>, or \"dm\" to DM them"
-                        }
-                    },
-                    "required": ["message"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "list_reminders",
-                "description": "The pending reminders of the person asking",
-                "parameters": { "type": "object", "properties": {} }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "cancel_reminder",
-                "description": "Cancel one of the reminders of the person asking, by id (see list_reminders)",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "id": { "type": "integer" } },
-                    "required": ["id"]
-                }
-            }
-        }),
-    ]
+llm_tool! {
+    #[tool(name = "set_reminder",
+           description = "Remind the person asking of something later: at that time, a reply to their \
+               message pings them with `message`, or a message in `channel` if they want it somewhere else. \
+               Write `message` as what you'll say then, in your voice. Give either `in_minutes` or `at`. Clock times without a timezone are Europe/Paris. Only for the \
+               person asking, never for someone else. Show the time in your answer as given in the result: \
+               Discord shows it in each reader's timezone.")]
+    pub struct SetReminder {
+        #[param(name = "message")]
+        message: String,
+        #[param(name = "in_minutes", description = "From now")]
+        in_minutes: Option<u64>,
+        #[param(name = "at", description = "UTC time, YYYY-MM-DD HH:MM")]
+        at: Option<String>,
+        #[param(name = "channel",
+                description = "Only to post it somewhere else: a channel of the server, as its id or \
+                    <#id>, or \"dm\" to DM them")]
+        channel: Option<String>,
+    }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SetReminder {
-    message: String,
-    in_minutes: Option<u64>,
-    at: Option<String>,
-    channel: Option<String>,
+impl Tool for SetReminder {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(ctx.plugin.set_reminder(ctx.rpc, ctx.asked, self).await)
+    }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CancelReminder {
-    id: u64,
+llm_tool! {
+    #[tool(name = "list_reminders", description = "The pending reminders of the person asking")]
+    pub struct ListReminders {}
+}
+
+impl Tool for ListReminders {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(ctx.plugin.list_reminders(ctx.asked.author.id))
+    }
+}
+
+llm_tool! {
+    #[tool(name = "cancel_reminder",
+           description = "Cancel one of the reminders of the person asking, by id (see list_reminders)")]
+    pub struct CancelReminder {
+        #[param(name = "id")]
+        id: u64,
+    }
+}
+
+impl Tool for CancelReminder {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(ctx.plugin.cancel_reminder(ctx.asked.author.id, self).await)
+    }
 }
 
 impl LlmPlugin {

@@ -23,13 +23,37 @@
     outcome: Outcome;
   };
 
+  /** A JSON schema, as much of it as the plugin uses */
+  type Param = { type: string; description?: string; enum?: string[]; items?: Param };
+
+  /** As sent to OpenRouter */
+  type ToolDefinition = {
+    function: {
+      name: string;
+      description: string;
+      parameters: { properties: Record<string, Param>; required?: string[] };
+    };
+  };
+
   async function loadTraces(): Promise<{ traces: Trace[] }> {
+    const res = await fetch('/plugin-api/llm/tool-traces');
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  async function loadTools(): Promise<ToolDefinition[]> {
     const res = await fetch('/plugin-api/llm/tools');
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   }
 
   let tracesPromise = loadTraces();
+  let toolsPromise = loadTools();
+
+  function paramType(param: Param): string {
+    const type = param.items ? `${paramType(param.items)}[]` : param.type;
+    return param.enum ? `${type}: ${param.enum.join(' | ')}` : type;
+  }
 
   let onlyWithCalls = $state(false);
 
@@ -103,7 +127,7 @@
   {@const shown = [...traces].reverse().filter((t) => !onlyWithCalls || t.calls.length > 0)}
   <div class="flex w-full flex-col gap-8">
     <p class="text-left text-xs text-gray-500">
-      Answers to pings and DMs from the last 3 days, where the model could look up and suggest lore.
+      Answers to pings and DMs from the last 3 days, where the model could call the tools below.
     </p>
 
     <!-- KPI row -->
@@ -151,6 +175,49 @@
           </tbody>
         </table>
       {/if}
+    </section>
+
+    <!-- Available tools -->
+    <section class="text-left">
+      <h3 class="mb-3 text-sm font-medium text-gray-300">Available tools</h3>
+      {#await toolsPromise}
+        <div class="text-sm text-gray-400">Loading tools...</div>
+      {:then tools}
+        <div class="flex flex-col gap-2">
+          {#each tools as { function: tool }}
+            {@const params = Object.entries(tool.parameters.properties)}
+            <details class="rounded-lg bg-gray-900 text-sm">
+              <summary class="cursor-pointer px-3 py-2">
+                <span class="font-mono text-xs text-indigo-300">{tool.name}</span>
+                <span class="ml-2 text-xs text-gray-500">
+                  {params.length} parameter{params.length === 1 ? '' : 's'}
+                </span>
+              </summary>
+              <div class="flex flex-col gap-3 border-t border-gray-700/50 px-3 py-3">
+                <p class="text-gray-300">{tool.description}</p>
+                {#if params.length > 0}
+                  <ul class="flex flex-col gap-1 text-xs">
+                    {#each params as [name, param]}
+                      <li>
+                        <span class="font-mono text-gray-200">{name}</span>
+                        <span class="font-mono text-gray-500">{paramType(param)}</span>
+                        {#if !tool.parameters.required?.includes(name)}
+                          <span class="text-gray-500">(optional)</span>
+                        {/if}
+                        {#if param.description}
+                          <span class="text-gray-400">: {param.description}</span>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            </details>
+          {/each}
+        </div>
+      {:catch err}
+        <div class="text-red-500">Error loading tools: {err.message}</div>
+      {/await}
     </section>
 
     <!-- Latest answers -->

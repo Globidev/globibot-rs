@@ -8,6 +8,7 @@ mod message_search;
 mod openrouter;
 mod reminders;
 mod settings;
+mod tool;
 mod tool_traces;
 mod tools;
 mod trivia;
@@ -31,12 +32,14 @@ use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
 use image_generation::{DailyCounts, ImageSettings};
 use images::{Consent, MessageImages};
-use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart};
+use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart, ToolOutput};
 use parking_lot::{Mutex, RwLock};
 use reminders::{REMINDERS_KEY, Reminders};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
+use tool::ToolCtx;
 use tool_traces::{Outcome, TOOL_TRACES_KEY, ToolCallRecord, ToolTrace, ToolTraces};
+use tools::LlmTool;
 use trivia::TriviaRounds;
 use usage::{USAGE_KEY, UsageKind, UsageStats};
 
@@ -218,7 +221,8 @@ impl WebServer {
                 "/reminders/cancel",
                 axum::routing::post(reminders::web_cancel),
             )
-            .route("/tools", axum::routing::get(llm_tool_traces))
+            .route("/tools", axum::routing::get(llm_tools))
+            .route("/tool-traces", axum::routing::get(llm_tool_traces))
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .route("/lore/accept", axum::routing::post(llm_lore_accept))
@@ -281,6 +285,12 @@ async fn llm_credits(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoRespo
                 .into_response()
         }
     }
+}
+
+/// The tools the model can call right now, as sent to OpenRouter
+async fn llm_tools(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
+    let images_enabled = llm_plugin.image_settings.read().enabled;
+    Json(tools::tool_definitions(images_enabled))
 }
 
 async fn llm_tool_traces(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
@@ -1208,9 +1218,16 @@ impl LlmPlugin {
                 context.clone(),
                 &tools,
                 move |name, args| async move {
-                    let output = self
-                        .run_tool(rpc_ref, message, files_ref, &name, &args)
-                        .await;
+                    let ctx = ToolCtx {
+                        plugin: self,
+                        rpc: rpc_ref,
+                        asked: message,
+                        files: files_ref,
+                    };
+                    let output = match LlmTool::parse(&name, &args) {
+                        Ok(tool) => tool.run(&ctx).await,
+                        Err(err) => ToolOutput::text(err),
+                    };
                     // Traces keep text only: the images are noted
                     let result = match output.images.len() {
                         0 => output.text.clone(),
