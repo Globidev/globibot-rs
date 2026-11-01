@@ -6,10 +6,13 @@ use globibot_core::{
     rpc::{self, MessageSearch, MessageSearchResults},
     serenity::all::{ChannelId, GuildId, Message, MessageId, UserId},
 };
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::context::clamp_chars;
+use crate::{
+    context::clamp_chars,
+    openrouter::ToolOutput,
+    tool::{Tool, ToolCtx, llm_tool},
+};
 
 const DEFAULT_LIMIT: u8 = 10;
 const MAX_LIMIT: u8 = 25;
@@ -17,69 +20,55 @@ const MAX_LIMIT: u8 = 25;
 const MAX_OFFSET: u32 = 9_975;
 const MAX_CONTENT_CHARS: usize = 200;
 
-pub fn definition() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "search_messages",
-            "description": "Search the server's messages, like Discord's search bar. Gives how many messages match in \
-                total, so it can count things (e.g. how many times someone said a word: use limit 1), and the \
-                matching messages with a link to each. Only searches channels the person asking can read, and \
-                when asked in a channel, only channels everyone can read.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Words to look for" },
-                    "author_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only messages from these users, as Discord user ids"
-                    },
-                    "mentions": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only messages that mention these users, as Discord user ids"
-                    },
-                    "channel_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only in these channels, as Discord channel ids"
-                    },
-                    "has": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": ["image", "sound", "video", "file", "sticker", "embed", "link", "poll"]
-                        },
-                        "description": "Only messages with these"
-                    },
-                    "after": { "type": "string", "description": "Only messages from this UTC day on, as YYYY-MM-DD" },
-                    "before": { "type": "string", "description": "Only messages before this UTC day, as YYYY-MM-DD" },
-                    "oldest_first": { "type": "boolean", "description": "Default: newest first" },
-                    "limit": {
-                        "type": "integer",
-                        "description": format!("Messages to show. Default {DEFAULT_LIMIT}, at most {MAX_LIMIT}")
-                    },
-                    "offset": { "type": "integer", "description": "Skip this many matches, to see the next ones" }
-                }
-            }
-        }
-    })
+llm_tool! {
+    #[tool(name = "search_messages",
+           description = "Search the server's messages, like Discord's search bar. Gives how many messages match in \
+               total, so it can count things (e.g. how many times someone said a word: use limit 1), and the \
+               matching messages with a link to each. Only searches channels the person asking can read, and \
+               when asked in a channel, only channels everyone can read.")]
+    pub struct SearchMessages {
+        #[param(name = "content", description = "Words to look for")]
+        content: Option<String>,
+        #[param(name = "author_ids", description = "Only messages from these users, as Discord user ids")]
+        author_ids: Option<Vec<String>>,
+        #[param(name = "mentions", description = "Only messages that mention these users, as Discord user ids")]
+        mentions: Option<Vec<String>>,
+        #[param(name = "channel_ids", description = "Only in these channels, as Discord channel ids")]
+        channel_ids: Option<Vec<String>>,
+        #[param(name = "has",
+                description = "Only messages with these",
+                items = json!({
+                    "type": "string",
+                    "enum": ["image", "sound", "video", "file", "sticker", "embed", "link", "poll"]
+                }))]
+        has: Option<Vec<String>>,
+        #[param(name = "after", description = "Only messages from this UTC day on, as YYYY-MM-DD")]
+        after: Option<String>,
+        #[param(name = "before", description = "Only messages before this UTC day, as YYYY-MM-DD")]
+        before: Option<String>,
+        #[param(name = "oldest_first", description = "Default: newest first")]
+        oldest_first: Option<bool>,
+        #[param(name = "limit",
+                description = format!("Messages to show. Default {DEFAULT_LIMIT}, at most {MAX_LIMIT}"))]
+        limit: Option<u8>,
+        #[param(name = "offset", description = "Skip this many matches, to see the next ones")]
+        offset: Option<u32>,
+    }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct SearchArgs {
-    content: Option<String>,
-    author_ids: Vec<String>,
-    mentions: Vec<String>,
-    channel_ids: Vec<String>,
-    has: Vec<String>,
-    after: Option<String>,
-    before: Option<String>,
-    oldest_first: bool,
-    limit: Option<u8>,
-    offset: Option<u32>,
+impl Tool for SearchMessages {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        // Results posted in a channel must only come from channels everyone can read
+        let public_only = ctx.asked.guild_id.is_some();
+        let found = run(
+            ctx.rpc,
+            ctx.plugin.guild_id,
+            ctx.asked.author.id,
+            public_only,
+            self,
+        );
+        ToolOutput::text(found.await)
+    }
 }
 
 /// Searches `guild_id` as `reader` and describes the results for the model. `public_only` when
@@ -89,7 +78,7 @@ pub async fn run(
     guild_id: GuildId,
     reader: UserId,
     public_only: bool,
-    args: SearchArgs,
+    args: SearchMessages,
 ) -> String {
     let search = match to_search(args) {
         Ok(search) => search,
@@ -113,9 +102,10 @@ pub async fn run(
     }
 }
 
-fn to_search(args: SearchArgs) -> Result<MessageSearch, String> {
-    let ids = |raw: &[String]| {
+fn to_search(args: SearchMessages) -> Result<MessageSearch, String> {
+    let ids = |raw: &Option<Vec<String>>| {
         raw.iter()
+            .flatten()
             .map(|id| parse_id(id).ok_or_else(|| format!("{id}: not a Discord id")))
             .collect::<Result<Vec<_>, _>>()
     };
@@ -137,12 +127,12 @@ fn to_search(args: SearchArgs) -> Result<MessageSearch, String> {
             .into_iter()
             .map(ChannelId::new)
             .collect(),
-        has: args.has,
+        has: args.has.unwrap_or_default(),
         // Ids are exclusive bounds: one before the day's first possible id
         min_id: day_id(&args.after, "after")?
             .map(|id| MessageId::new(id.get().saturating_sub(1).max(1))),
         max_id: day_id(&args.before, "before")?,
-        oldest_first: args.oldest_first,
+        oldest_first: args.oldest_first.unwrap_or(false),
         limit: args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: args.offset.unwrap_or(0).min(MAX_OFFSET),
     })
@@ -266,7 +256,7 @@ mod tests {
 
     #[test]
     fn arguments_become_a_search() {
-        let args: SearchArgs = serde_json::from_value(json!({
+        let args: SearchMessages = serde_json::from_value(json!({
             "content": "pizza",
             "author_ids": ["<@1>"],
             "after": "2015-01-02",
@@ -281,7 +271,8 @@ mod tests {
         assert_eq!(search.limit, MAX_LIMIT);
         assert!(search.channel_ids.is_empty());
 
-        let bad: SearchArgs = serde_json::from_value(json!({ "author_ids": ["alice"] })).unwrap();
+        let bad: SearchMessages =
+            serde_json::from_value(json!({ "author_ids": ["alice"] })).unwrap();
         assert_eq!(to_search(bad).unwrap_err(), "alice: not a Discord id");
     }
 

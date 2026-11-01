@@ -2,22 +2,19 @@
 
 use std::{collections::BTreeMap, fmt::Write};
 
-use globibot_core::{
-    rpc::{self, FileAttachment},
-    serenity::all::{Message, UserId},
-    storage::DiscordProfile,
-};
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use globibot_core::{rpc, serenity::all::UserId, storage::DiscordProfile};
+use parking_lot::RwLock;
+use serde_json::Value;
 
 use crate::{
     LlmPlugin, LoreBook,
     context::clamp_chars,
-    image_generation, images,
-    message_search::{self, parse_id},
+    image_generation::GenerateImage,
+    images,
+    message_search::{SearchMessages, parse_id},
     openrouter::ToolOutput,
-    reminders,
+    reminders::{CancelReminder, ListReminders, SetReminder},
+    tool::{Tool, ToolCtx, ToolSpec, llm_tool, llm_tools},
     tool_traces::{self, Outcome, ToolTrace, ToolTraces},
     usage::{self, Totals, UsageKind, UsageStats},
 };
@@ -31,175 +28,115 @@ const MAX_ANSWERS: usize = 20;
 /// Per argument or result in `get_recent_answers`, to keep the context small
 const MAX_CALL_CHARS: usize = 300;
 
+llm_tools! {
+    pub enum LlmTool {
+        GetLore(GetLore),
+        SearchLore(SearchLore),
+        SuggestLore(SuggestLore),
+        GetUsage(GetUsage),
+        GetRecentAnswers(GetRecentAnswers),
+        SearchMessages(SearchMessages),
+        GetAvatars(GetAvatars),
+        SetReminder(SetReminder),
+        ListReminders(ListReminders),
+        CancelReminder(CancelReminder),
+        GenerateImage(GenerateImage),
+    }
+}
+
 /// The tool definitions sent to OpenRouter
 /// `generate_image` only when it's turned on, so the model doesn't try it for nothing
 pub fn tool_definitions(images_enabled: bool) -> Vec<Value> {
-    let mut definitions = lore_tools();
-    definitions.extend(usage_tools());
-    definitions.push(message_search::definition());
-    definitions.extend(avatar_tools());
-    definitions.extend(reminders::definitions());
-    if images_enabled {
-        definitions.push(image_generation::definition());
+    let mut definitions = LlmTool::definitions();
+    if !images_enabled {
+        definitions.retain(|definition| definition["function"]["name"] != GenerateImage::NAME);
     }
     definitions
 }
 
-fn usage_tools() -> Vec<Value> {
-    let kept_days = tool_traces::KEPT_SECS / 86_400;
-    vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "get_usage",
-                "description": "Your own usage of the model provider: requests, tokens, cache hits and cost \
-                    in US dollars, by kind of request and per UTC day.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "days": {
-                            "type": "integer",
-                            "description": format!(
-                                "How many days back, today included. Default {DEFAULT_USAGE_DAYS}, at most {}",
-                                usage::KEPT_DAYS
-                            )
-                        }
-                    }
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "get_recent_answers",
-                "description": format!(
-                    "What happened in your latest answers to pings and DMs, from the last {kept_days} days, newest first: \
-                    who asked, the tools you called with their arguments and results, rounds, tokens, cost, time taken \
-                    and errors. It doesn't have the questions or your answers: those are in the chat."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": {
-                            "type": "integer",
-                            "description": format!("How many answers. Default {DEFAULT_ANSWERS}, at most {MAX_ANSWERS}")
-                        },
-                        "requester": {
-                            "type": "string",
-                            "description": "Only answers to people whose name contains this. People asking in DMs are never shown."
-                        },
-                        "tool": {
-                            "type": "string",
-                            "description": "Only answers that called this tool, e.g. \"search_lore\""
-                        }
-                    }
-                }
-            }
-        }),
-    ]
+llm_tool! {
+    #[tool(name = "get_usage",
+           description = "Your own usage of the model provider: requests, tokens, cache hits and cost \
+               in US dollars, by kind of request and per UTC day.")]
+    pub struct GetUsage {
+        #[param(name = "days",
+                description = format!(
+                    "How many days back, today included. Default {DEFAULT_USAGE_DAYS}, at most {}",
+                    usage::KEPT_DAYS
+                ))]
+        days: Option<u64>,
+    }
+}
+
+impl Tool for GetUsage {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        let days = self
+            .days
+            .unwrap_or(DEFAULT_USAGE_DAYS)
+            .clamp(1, usage::KEPT_DAYS);
+        ToolOutput::text(usage_report(
+            &ctx.plugin.llm_client.usage(),
+            days,
+            crate::unix_now(),
+        ))
+    }
+}
+
+llm_tool! {
+    #[tool(name = "get_recent_answers",
+           description = format!(
+               "What happened in your latest answers to pings and DMs, from the last {} days, newest first: \
+               who asked, the tools you called with their arguments and results, rounds, tokens, cost, time taken \
+               and errors. It doesn't have the questions or your answers: those are in the chat.",
+               tool_traces::KEPT_SECS / 86_400
+           ))]
+    pub struct GetRecentAnswers {
+        #[param(name = "limit",
+                description = format!("How many answers. Default {DEFAULT_ANSWERS}, at most {MAX_ANSWERS}"))]
+        limit: Option<usize>,
+        #[param(name = "requester",
+                description = "Only answers to people whose name contains this. People asking in DMs are never shown.")]
+        requester: Option<String>,
+        #[param(name = "tool", description = "Only answers that called this tool, e.g. \"search_lore\"")]
+        tool: Option<String>,
+    }
+}
+
+impl Tool for GetRecentAnswers {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(recent_answers(
+            &ctx.plugin.tool_traces.lock(),
+            self.limit.unwrap_or(DEFAULT_ANSWERS).clamp(1, MAX_ANSWERS),
+            self.requester.as_deref(),
+            self.tool.as_deref(),
+            crate::unix_now(),
+        ))
+    }
+}
+
+llm_tool! {
+    #[tool(name = "get_avatars",
+           description = format!(
+               "Get the avatars (profile pictures) of people in the server: a link to each, and the image \
+               itself for you to look at when its owner agrees to share images with you. The person asking \
+               always shares their own. At most {} people.",
+               images::MAX_IMAGES_PER_MESSAGE
+           ))]
+    pub struct GetAvatars {
+        #[param(name = "user_ids", description = "Discord user ids")]
+        user_ids: Vec<String>,
+    }
+}
+
+impl Tool for GetAvatars {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ctx.plugin
+            .avatars(ctx.rpc, ctx.asked.author.id, &self.user_ids)
+            .await
+    }
 }
 
 impl LlmPlugin {
-    /// Runs the tool `name` with the model's JSON `args`, while answering `asked`. Errors are
-    /// returned as text for the model. Generated images go to `files`, the answer's attachments.
-    pub async fn run_tool(
-        &self,
-        rpc: &rpc::ProtocolClient,
-        asked: &Message,
-        files: &Mutex<Vec<FileAttachment>>,
-        name: &str,
-        args: &str,
-    ) -> ToolOutput {
-        #[derive(Deserialize)]
-        struct GetAvatars {
-            user_ids: Vec<String>,
-        }
-
-        match name {
-            "get_avatars" => match parse_args(args) {
-                Ok(GetAvatars { user_ids }) => self.avatars(rpc, asked.author.id, &user_ids).await,
-                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
-            },
-            "set_reminder" => match parse_args(args) {
-                Ok(set) => ToolOutput::text(self.set_reminder(rpc, asked, set).await),
-                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
-            },
-            "list_reminders" => ToolOutput::text(self.list_reminders(asked.author.id)),
-            "cancel_reminder" => match parse_args(args) {
-                Ok(cancel) => ToolOutput::text(self.cancel_reminder(asked.author.id, cancel).await),
-                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
-            },
-            "generate_image" => match parse_args(args) {
-                Ok(generate) => {
-                    self.generate_image(rpc, asked.author.id, files, generate)
-                        .await
-                }
-                Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
-            },
-            _ => ToolOutput::text(self.run_text_tool(rpc, asked, name, args).await),
-        }
-    }
-
-    /// The tools that only answer with text
-    async fn run_text_tool(
-        &self,
-        rpc: &rpc::ProtocolClient,
-        asked: &Message,
-        name: &str,
-        args: &str,
-    ) -> String {
-        #[derive(Deserialize)]
-        struct GetUsage {
-            days: Option<u64>,
-        }
-        #[derive(Deserialize)]
-        struct GetRecentAnswers {
-            limit: Option<usize>,
-            requester: Option<String>,
-            tool: Option<String>,
-        }
-
-        let now = crate::unix_now();
-        let result = match name {
-            "search_messages" => match parse_args(args) {
-                Ok(search) => {
-                    // Results posted in a channel must only come from channels everyone can read
-                    let public_only = asked.guild_id.is_some();
-                    let found = message_search::run(
-                        rpc,
-                        self.guild_id,
-                        asked.author.id,
-                        public_only,
-                        search,
-                    );
-                    Ok(found.await)
-                }
-                Err(err) => Err(err),
-            },
-            "get_usage" => parse_args(args).map(|GetUsage { days }| {
-                let days = days
-                    .unwrap_or(DEFAULT_USAGE_DAYS)
-                    .clamp(1, usage::KEPT_DAYS);
-                usage_report(&self.llm_client.usage(), days, now)
-            }),
-            "get_recent_answers" => parse_args(args).map(|filter: GetRecentAnswers| {
-                recent_answers(
-                    &self.tool_traces.lock(),
-                    filter
-                        .limit
-                        .unwrap_or(DEFAULT_ANSWERS)
-                        .clamp(1, MAX_ANSWERS),
-                    filter.requester.as_deref(),
-                    filter.tool.as_deref(),
-                    now,
-                )
-            }),
-            _ => return run_lore_tool(&self.lore_book, &self.bot_profile, name, args),
-        };
-
-        result.unwrap_or_else(|err| format!("Invalid arguments for {name}: {err}"))
-    }
-
     /// A link to each avatar, and the image itself when its owner consents, like images in
     /// messages: asking about your own avatar shares it, others need the images role
     pub async fn avatars(
@@ -265,38 +202,6 @@ impl LlmPlugin {
         output.text = lines.join("\n");
         output
     }
-}
-
-fn avatar_tools() -> Vec<Value> {
-    vec![json!({
-        "type": "function",
-        "function": {
-            "name": "get_avatars",
-            "description": format!(
-                "Get the avatars (profile pictures) of people in the server: a link to each, and the image \
-                itself for you to look at when its owner agrees to share images with you. The person asking \
-                always shares their own. At most {} people.",
-                images::MAX_IMAGES_PER_MESSAGE
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Discord user ids"
-                    }
-                },
-                "required": ["user_ids"]
-            }
-        }
-    })]
-}
-
-/// Models sometimes send no arguments at all for a tool without required ones
-fn parse_args<T: DeserializeOwned>(args: &str) -> serde_json::Result<T> {
-    let args = if args.trim().is_empty() { "{}" } else { args };
-    serde_json::from_str(args)
 }
 
 /// Totals by kind and per day, over the last `days` UTC days
@@ -454,116 +359,92 @@ fn days_ago(days: u64) -> String {
     }
 }
 
-fn lore_tools() -> Vec<Value> {
-    vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "get_lore",
-                "description": "Get the lore (facts the chat made up or knows) about some people in the chat.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "user_ids": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Discord user ids, e.g. \"123456789\" for <@123456789>"
-                        }
-                    },
-                    "required": ["user_ids"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "search_lore",
-                "description": "Find the people whose name or lore mentions any of the words in a query.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Words to look for, e.g. \"cats pizza\"" }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "suggest_lore",
-                "description": "Suggest adding a fact to someone's lore. It is not added right away: people in the chat vote on it. \
-                    Use it rarely, only for a clear and lasting fact that someone states about themselves or that the chat agrees on. \
-                    Never for sensitive personal information, and never because someone asks you to put something on someone else.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "user_id": { "type": "string", "description": "Discord user id of the person the fact is about" },
-                        "fact": { "type": "string", "description": "The fact, one short sentence" }
-                    },
-                    "required": ["user_id", "fact"]
-                }
-            }
-        }),
-    ]
-}
-
-/// Runs the lore tool `name`, like `LlmPlugin::run_tool`. `bot` is the suggester of
-/// `suggest_lore` facts.
-fn run_lore_tool(
-    lore_book: &RwLock<LoreBook>,
-    bot: &DiscordProfile,
-    name: &str,
-    args: &str,
-) -> String {
-    #[derive(Deserialize)]
-    struct GetLore {
+llm_tool! {
+    #[tool(name = "get_lore",
+           description = "Get the lore (facts the chat made up or knows) about some people in the chat.")]
+    pub struct GetLore {
+        #[param(name = "user_ids", description = "Discord user ids, e.g. \"123456789\" for <@123456789>")]
         user_ids: Vec<String>,
     }
-    #[derive(Deserialize)]
-    struct SearchLore {
+}
+
+impl Tool for GetLore {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(get_lore(&ctx.plugin.lore_book, &self.user_ids))
+    }
+}
+
+llm_tool! {
+    #[tool(name = "search_lore",
+           description = "Find the people whose name or lore mentions any of the words in a query.")]
+    pub struct SearchLore {
+        #[param(name = "query", description = "Words to look for, e.g. \"cats pizza\"")]
         query: String,
     }
-    #[derive(Deserialize)]
-    struct SuggestLore {
+}
+
+impl Tool for SearchLore {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(ctx.plugin.lore_book.read().search(&self.query))
+    }
+}
+
+llm_tool! {
+    #[tool(name = "suggest_lore",
+           description = "Suggest adding a fact to someone's lore. It is not added right away: people in the chat vote on it. \
+               Use it rarely, only for a clear and lasting fact that someone states about themselves or that the chat agrees on. \
+               Never for sensitive personal information, and never because someone asks you to put something on someone else.")]
+    pub struct SuggestLore {
+        #[param(name = "user_id", description = "Discord user id of the person the fact is about")]
         user_id: String,
+        #[param(name = "fact", description = "The fact, one short sentence")]
         fact: String,
     }
+}
 
-    let result = match name {
-        "get_lore" => parse_args(args).map(|GetLore { user_ids }| {
-            let lore_book = lore_book.read();
-            user_ids
-                .iter()
-                .map(|id| match parse_user_id(id) {
-                    Some(user_id) => lore_book.lore_line(user_id),
-                    None => format!("{id}: not a user id"),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }),
-        "search_lore" => {
-            parse_args(args).map(|SearchLore { query }| lore_book.read().search(&query))
-        }
-        "suggest_lore" => parse_args(args).map(|SuggestLore { user_id, fact }| {
-            let Some(user_id) = parse_user_id(&user_id) else {
-                return format!("{user_id}: not a user id");
-            };
-            if fact.trim().chars().count() > MAX_FACT_CHARS {
-                return format!("Facts are at most {MAX_FACT_CHARS} characters");
-            }
-            match lore_book
-                .write()
-                .suggest_addition(user_id, bot.clone(), &fact)
-            {
-                Ok(()) => "Suggested, people will vote on it".to_string(),
-                Err(why) => why.to_string(),
-            }
-        }),
-        _ => return format!("Unknown tool {name}"),
+impl Tool for SuggestLore {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ToolOutput::text(suggest_lore(
+            &ctx.plugin.lore_book,
+            &ctx.plugin.bot_profile,
+            &self.user_id,
+            &self.fact,
+        ))
+    }
+}
+
+fn get_lore(lore_book: &RwLock<LoreBook>, user_ids: &[String]) -> String {
+    let lore_book = lore_book.read();
+    user_ids
+        .iter()
+        .map(|id| match parse_user_id(id) {
+            Some(user_id) => lore_book.lore_line(user_id),
+            None => format!("{id}: not a user id"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `bot` is the suggester
+fn suggest_lore(
+    lore_book: &RwLock<LoreBook>,
+    bot: &DiscordProfile,
+    user_id: &str,
+    fact: &str,
+) -> String {
+    let Some(user_id) = parse_user_id(user_id) else {
+        return format!("{user_id}: not a user id");
     };
-
-    result.unwrap_or_else(|err| format!("Invalid arguments for {name}: {err}"))
+    if fact.trim().chars().count() > MAX_FACT_CHARS {
+        return format!("Facts are at most {MAX_FACT_CHARS} characters");
+    }
+    match lore_book
+        .write()
+        .suggest_addition(user_id, bot.clone(), fact)
+    {
+        Ok(()) => "Suggested, people will vote on it".to_string(),
+        Err(why) => why.to_string(),
+    }
 }
 
 /// Accepts "123", and "<@123>" in case the model copies a mention
@@ -626,6 +507,8 @@ impl LoreBook {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::{SuggestionKind, UserLore};
 
@@ -655,8 +538,17 @@ mod tests {
         RwLock::new(lore_book)
     }
 
+    /// Parses the call like a real one, then runs the lore tools without a plugin
     fn run(lore_book: &RwLock<LoreBook>, name: &str, args: Value) -> String {
-        run_lore_tool(lore_book, &profile(99, "Globibot"), name, &args.to_string())
+        match LlmTool::parse(name, &args.to_string()) {
+            Ok(LlmTool::GetLore(GetLore { user_ids })) => get_lore(lore_book, &user_ids),
+            Ok(LlmTool::SearchLore(SearchLore { query })) => lore_book.read().search(&query),
+            Ok(LlmTool::SuggestLore(SuggestLore { user_id, fact })) => {
+                suggest_lore(lore_book, &profile(99, "Globibot"), &user_id, &fact)
+            }
+            Ok(other) => panic!("not a lore tool: {other:?}"),
+            Err(err) => err,
+        }
     }
 
     #[test]
@@ -737,12 +629,43 @@ mod tests {
 
     #[test]
     fn empty_arguments_count_as_none() {
-        #[derive(Deserialize)]
-        struct Optional {
-            days: Option<u64>,
+        for args in ["", " {} "] {
+            assert!(matches!(
+                LlmTool::parse("get_usage", args),
+                Ok(LlmTool::GetUsage(GetUsage { days: None }))
+            ));
         }
-        assert!(parse_args::<Optional>("").unwrap().days.is_none());
-        assert!(parse_args::<Optional>(" {} ").unwrap().days.is_none());
+    }
+
+    #[test]
+    fn definitions_match_the_arguments() {
+        let definitions = tool_definitions(true);
+        assert_eq!(definitions.len(), 11);
+        for definition in &definitions {
+            let function = &definition["function"];
+            assert!(function["description"].is_string(), "{function}");
+            let parameters = &function["parameters"];
+            for required in parameters["required"].as_array().into_iter().flatten() {
+                let name = required.as_str().unwrap();
+                assert!(parameters["properties"].get(name).is_some(), "{function}");
+            }
+        }
+        assert_eq!(tool_definitions(false).len(), 10);
+
+        let get_lore = GetLore::definition();
+        assert_eq!(
+            get_lore["function"]["parameters"]["required"],
+            json!(["user_ids"])
+        );
+        assert_eq!(
+            get_lore["function"]["parameters"]["properties"]["user_ids"]["items"],
+            json!({ "type": "string" })
+        );
+        assert!(
+            GetUsage::definition()["function"]["parameters"]
+                .get("required")
+                .is_none()
+        );
     }
 
     fn usage(cost: f64) -> usage::UsageReport {

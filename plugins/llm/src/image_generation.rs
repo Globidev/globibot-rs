@@ -9,11 +9,11 @@ use globibot_core::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::{
     LlmPlugin,
     openrouter::{ContentPart, ToolOutput},
+    tool::{Tool, ToolCtx, llm_tool},
 };
 
 pub const DEFAULT_IMAGE_MODEL: &str = "google/gemini-3.1-flash-image";
@@ -64,43 +64,30 @@ impl DailyCounts {
     }
 }
 
-pub fn definition() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": format!(
-                "Make an image from a description. It is attached to your answer: don't link it or say you can't send \
-                images. People's avatars can be used as references (e.g. to draw someone as a pirate), only when \
-                their owner agrees to share images with you. Each person can have a few images made per day. At \
-                most {MAX_PER_ANSWER} images per answer."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "A detailed description of the image, in English"
-                    },
-                    "reference_user_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Discord user ids whose avatars to use as references"
-                    },
-                    "aspect_ratio": { "type": "string", "enum": ASPECT_RATIOS }
-                },
-                "required": ["prompt"]
-            }
-        }
-    })
+llm_tool! {
+    #[tool(name = "generate_image",
+           description = format!(
+               "Make an image from a description. It is attached to your answer: don't link it or say you can't send \
+               images. People's avatars can be used as references (e.g. to draw someone as a pirate), only when \
+               their owner agrees to share images with you. Each person can have a few images made per day. At \
+               most {MAX_PER_ANSWER} images per answer."
+           ))]
+    pub struct GenerateImage {
+        #[param(name = "prompt", description = "A detailed description of the image, in English")]
+        prompt: String,
+        #[param(name = "reference_user_ids", description = "Discord user ids whose avatars to use as references")]
+        reference_user_ids: Option<Vec<String>>,
+        #[param(name = "aspect_ratio", enum = ASPECT_RATIOS)]
+        aspect_ratio: Option<String>,
+    }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GenerateImage {
-    prompt: String,
-    #[serde(default)]
-    reference_user_ids: Vec<String>,
-    aspect_ratio: Option<String>,
+impl Tool for GenerateImage {
+    async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
+        ctx.plugin
+            .generate_image(ctx.rpc, ctx.asked.author.id, ctx.files, self)
+            .await
+    }
 }
 
 impl LlmPlugin {
@@ -135,7 +122,8 @@ impl LlmPlugin {
             .filter(|ratio| ASPECT_RATIOS.contains(&ratio.as_str()));
 
         // The same consent rule as showing avatars to the chat model
-        let avatars = self.avatars(rpc, requester, &args.reference_user_ids).await;
+        let reference_user_ids = args.reference_user_ids.unwrap_or_default();
+        let avatars = self.avatars(rpc, requester, &reference_user_ids).await;
         let references = avatars
             .images
             .into_iter()
@@ -185,6 +173,8 @@ impl LlmPlugin {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -204,7 +194,7 @@ mod tests {
     fn arguments_parse_with_optional_fields() {
         let args: GenerateImage = serde_json::from_value(json!({ "prompt": "a cat" })).unwrap();
         assert_eq!(args.prompt, "a cat");
-        assert!(args.reference_user_ids.is_empty() && args.aspect_ratio.is_none());
+        assert!(args.reference_user_ids.is_none() && args.aspect_ratio.is_none());
     }
 
     #[test]
