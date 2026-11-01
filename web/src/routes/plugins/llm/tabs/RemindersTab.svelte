@@ -5,7 +5,10 @@
     due: number;
     text: string;
     user_name: string;
+    /** Where it will be posted */
     channel_name: string;
+    /** Where it was asked, when posted somewhere else */
+    asked_in_name: string | null;
     message_url: string;
     mine: boolean;
   };
@@ -95,15 +98,18 @@
             >
             <span class="text-xs text-gray-500">
               {#if !reminder.mine}{reminder.user_name || 'Someone'} ·{/if}
+              in <span class="text-gray-300">{reminder.channel_name}</span>
+              ·
               {#if reminder.message_url}
                 <a
                   href={reminder.message_url}
                   target="_blank"
                   rel="noreferrer"
-                  class="hover:text-indigo-300">{reminder.channel_name}</a
+                  class="hover:text-indigo-300"
+                  >asked {reminder.asked_in_name ? `in ${reminder.asked_in_name}` : 'here'} ↗</a
                 >
-              {:else}
-                {reminder.channel_name}
+              {:else if reminder.asked_in_name}
+                asked in {reminder.asked_in_name}
               {/if}
             </span>
           </div>

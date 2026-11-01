@@ -18,7 +18,11 @@ use globibot_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{LlmPlugin, message_search::days_from_civil, unix_now};
+use crate::{
+    LlmPlugin,
+    message_search::{days_from_civil, parse_id},
+    unix_now,
+};
 
 pub const REMINDERS_KEY: &str = "latest";
 const MAX_PER_USER: usize = 10;
@@ -30,9 +34,13 @@ const LATE_AFTER_SECS: u64 = 120;
 pub struct Reminder {
     pub id: u64,
     pub user_id: UserId,
+    /// Where it's posted
     pub channel_id: ChannelId,
-    /// The message asking for it, replied to when it's due
+    /// The message asking for it, replied to when it's due unless posted elsewhere
     pub message_id: MessageId,
+    /// In another channel than the one it was asked in: a message linking to the ask, not a reply
+    #[serde(default)]
+    pub elsewhere: bool,
     /// Unix seconds
     pub due: u64,
     pub text: String,
@@ -41,8 +49,17 @@ pub struct Reminder {
     pub user_name: String,
     #[serde(default)]
     pub message_url: String,
+    /// Asked in or posted to a DM: not shown to the admin on the website
     #[serde(default)]
     pub in_dm: bool,
+    /// Names when it was set: "#general", "DM with someone"
+    #[serde(default)]
+    pub channel_name: String,
+    /// `None` for reminders set before it was saved
+    #[serde(default)]
+    pub asked_in: Option<ChannelId>,
+    #[serde(default)]
+    pub asked_in_name: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -108,8 +125,8 @@ pub fn definitions() -> Vec<Value> {
             "function": {
                 "name": "set_reminder",
                 "description": "Remind the person asking of something later: at that time, a reply to their \
-                    message pings them with `message`. Write `message` as what you'll say then, in your voice. Give \
-                    either `in_minutes` or `at`. Clock times without a timezone are Europe/Paris. Only for the \
+                    message pings them with `message`, or a message in `channel` if they want it somewhere else. \
+                    Write `message` as what you'll say then, in your voice. Give either `in_minutes` or `at`. Clock times without a timezone are Europe/Paris. Only for the \
                     person asking, never for someone else. Show the time in your answer as given in the result: \
                     Discord shows it in each reader's timezone.",
                 "parameters": {
@@ -117,7 +134,12 @@ pub fn definitions() -> Vec<Value> {
                     "properties": {
                         "message": { "type": "string" },
                         "in_minutes": { "type": "integer", "description": "From now" },
-                        "at": { "type": "string", "description": "UTC time, YYYY-MM-DD HH:MM" }
+                        "at": { "type": "string", "description": "UTC time, YYYY-MM-DD HH:MM" },
+                        "channel": {
+                            "type": "string",
+                            "description": "Only to post it somewhere else: a channel of the server, as its id or \
+                                <#id>, or \"dm\" to DM them"
+                        }
                     },
                     "required": ["message"]
                 }
@@ -151,6 +173,7 @@ pub struct SetReminder {
     message: String,
     in_minutes: Option<u64>,
     at: Option<String>,
+    channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,7 +182,12 @@ pub struct CancelReminder {
 }
 
 impl LlmPlugin {
-    pub async fn set_reminder(&self, asked: &Message, args: SetReminder) -> String {
+    pub async fn set_reminder(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        asked: &Message,
+        args: SetReminder,
+    ) -> String {
         let now = unix_now();
         let due = match (args.in_minutes, args.at.as_deref()) {
             (Some(minutes), _) => now + minutes * 60,
@@ -180,11 +208,44 @@ impl LlmPlugin {
             return "The message is empty".to_string();
         }
 
+        let wants_dm = args
+            .channel
+            .as_deref()
+            .is_some_and(|channel| channel.trim().eq_ignore_ascii_case("dm"));
+        let channel_id = match args.channel.as_deref().map(parse_id) {
+            _ if wants_dm => match rpc
+                .dm_channel(rpc::context::current(), asked.author.id)
+                .await
+            {
+                Ok(Ok(channel_id)) => channel_id,
+                Ok(Err(err)) => return format!("Couldn't open a DM with them: {err}"),
+                Err(err) => return format!("Couldn't open a DM with them: {err}"),
+            },
+            None => asked.channel_id,
+            Some(Some(id)) if id == asked.channel_id.get() => asked.channel_id,
+            Some(Some(id)) => {
+                let channel_id = ChannelId::new(id);
+                // ponytail: checked when set, not again when sent
+                if let Err(why) = self.check_can_post(rpc, channel_id, asked.author.id).await {
+                    return why;
+                }
+                channel_id
+            }
+            Some(None) => return "Invalid channel, expected its id, <#id> or \"dm\"".to_string(),
+        };
+        let asked_in_name = self.channel_name(rpc, asked.channel_id).await;
+        let channel_name = if channel_id == asked.channel_id {
+            asked_in_name.clone()
+        } else {
+            self.channel_name(rpc, channel_id).await
+        };
+
         let added = self.reminders.lock().add(Reminder {
             id: 0,
             user_id: asked.author.id,
-            channel_id: asked.channel_id,
+            channel_id,
             message_id: asked.id,
+            elsewhere: channel_id != asked.channel_id,
             due,
             text,
             user_name: asked
@@ -193,23 +254,68 @@ impl LlmPlugin {
                 .and_then(|member| member.nick.clone())
                 .unwrap_or_else(|| asked.author.display_name().to_string()),
             message_url: asked.link(),
-            in_dm: asked.guild_id.is_none(),
+            in_dm: asked.guild_id.is_none() || wants_dm,
+            channel_name,
+            asked_in: Some(asked.channel_id),
+            asked_in_name,
         });
         match added {
             Ok(id) => {
                 tracing::info!(user_id = %asked.author.id, id, due, "Reminder set");
                 self.reminders_changed().await;
-                format!("Set, id {id}, due <t:{due}:f> (<t:{due}:R>)")
+                format!("Set, id {id}, due <t:{due}:f> (<t:{due}:R>) in <#{channel_id}>")
             }
             Err(why) => why,
         }
+    }
+
+    /// From the channel contexts, else asked to Discord
+    async fn channel_name(&self, rpc: &rpc::ProtocolClient, channel_id: ChannelId) -> String {
+        let known = self
+            .contexts_by_channel
+            .lock()
+            .get(&channel_id)
+            .map(|context| crate::channel_label(&context.channel));
+        if let Some(name) = known {
+            return name;
+        }
+        match rpc.get_channel(rpc::context::current(), channel_id).await {
+            Ok(Ok(channel)) => crate::channel_label(&channel),
+            _ => String::new(),
+        }
+    }
+
+    /// Both the asker and the bot must be able to post there
+    async fn check_can_post(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        channel_id: ChannelId,
+        user_id: UserId,
+    ) -> Result<(), String> {
+        for (who, id) in [("They", user_id), ("You", self.bot_id)] {
+            let can = rpc
+                .can_send_in(rpc::context::current(), self.guild_id, channel_id, id)
+                .await;
+            match can {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => return Err(format!("{who} can't post in <#{channel_id}>")),
+                Ok(Err(err)) => return Err(format!("Couldn't check <#{channel_id}>: {err}")),
+                Err(err) => return Err(format!("Couldn't check <#{channel_id}>: {err}")),
+            }
+        }
+        Ok(())
     }
 
     pub fn list_reminders(&self, user_id: UserId) -> String {
         let reminders = self.reminders.lock();
         let lines = reminders
             .of_user(user_id)
-            .map(|r| format!("id {}: due <t:{}:f>: {}", r.id, r.due, r.text))
+            .map(|r| {
+                format!(
+                    "id {}: due <t:{}:f> in <#{}>: {}",
+                    r.id, r.due, r.channel_id, r.text
+                )
+            })
             .collect::<Vec<_>>();
         if lines.is_empty() {
             "No pending reminders".to_string()
@@ -256,7 +362,10 @@ struct WebReminder {
     due: u64,
     text: String,
     user_name: String,
+    /// Where it will be posted
     channel_name: String,
+    /// Where it was asked, when posted somewhere else
+    asked_in_name: Option<String>,
     message_url: String,
     mine: bool,
 }
@@ -273,6 +382,16 @@ pub async fn web_list(
         .iter()
         .map(|(id, context)| (*id, crate::channel_label(&context.channel)))
         .collect::<HashMap<_, _>>();
+    // Reminders set before names were saved
+    let name_or = |saved: &str, channel_id: ChannelId| {
+        if !saved.is_empty() {
+            return saved.to_string();
+        }
+        channel_names
+            .get(&channel_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown channel".to_string())
+    };
     let mut reminders = plugin
         .reminders
         .lock()
@@ -284,10 +403,11 @@ pub async fn web_list(
             due: r.due,
             text: r.text.clone(),
             user_name: r.user_name.clone(),
-            channel_name: channel_names
-                .get(&r.channel_id)
-                .cloned()
-                .unwrap_or_else(|| if r.in_dm { "DM" } else { "unknown channel" }.to_string()),
+            channel_name: name_or(&r.channel_name, r.channel_id),
+            asked_in_name: r.elsewhere.then(|| match r.asked_in {
+                Some(asked_in) => name_or(&r.asked_in_name, asked_in),
+                None => "another channel".to_string(),
+            }),
             message_url: r.message_url.clone(),
             mine: r.user_id == profile.user_id,
         })
@@ -362,6 +482,38 @@ async fn send(rpc: &rpc::ProtocolClient, reminder: &Reminder, now: u64) {
         "<@{}> ⏰ {}{late}",
         reminder.user_id, reminder.text
     ));
+
+    if reminder.elsewhere {
+        let text = if reminder.message_url.is_empty() {
+            text
+        } else {
+            format!("{text}\n-# Asked in {}", reminder.message_url)
+        };
+        let sent = rpc
+            .send_message(rpc::context::current(), reminder.channel_id, text)
+            .await;
+        if matches!(sent, Ok(Ok(_))) {
+            return;
+        }
+        // E.g. their DMs are closed: fall back to replying where they asked
+        tracing::warn!(
+            id = reminder.id,
+            "Failed to send a reminder elsewhere: {sent:?}"
+        );
+        let Some(asked_in) = reminder.asked_in else {
+            return;
+        };
+        let reminder = Reminder {
+            channel_id: asked_in,
+            elsewhere: false,
+            text: format!(
+                "{} (I couldn't post it in {})",
+                reminder.text, reminder.channel_name
+            ),
+            ..reminder.clone()
+        };
+        return Box::pin(send(rpc, &reminder, now)).await;
+    }
 
     let replied = rpc
         .send_reply(
@@ -459,11 +611,15 @@ mod tests {
             user_id: UserId::new(user),
             channel_id: ChannelId::new(1),
             message_id: MessageId::new(1),
+            elsewhere: false,
             due,
             text: "x".to_string(),
             user_name: String::new(),
             message_url: String::new(),
             in_dm: false,
+            channel_name: String::new(),
+            asked_in: None,
+            asked_in_name: String::new(),
         }
     }
 

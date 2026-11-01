@@ -121,7 +121,7 @@ impl LlmPlugin {
                 Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
             },
             "set_reminder" => match parse_args(args) {
-                Ok(set) => ToolOutput::text(self.set_reminder(asked, set).await),
+                Ok(set) => ToolOutput::text(self.set_reminder(rpc, asked, set).await),
                 Err(err) => ToolOutput::text(format!("Invalid arguments for {name}: {err}")),
             },
             "list_reminders" => ToolOutput::text(self.list_reminders(asked.author.id)),
