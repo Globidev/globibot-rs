@@ -122,8 +122,23 @@ where
         Ok(TcpListenerStream::new(listener))
     }
 
+    /// Retries every second while the connection is refused: a plugin started before the bot,
+    /// or while it's being replaced, waits for it instead of crashing. Under Nomad, the
+    /// template restarts it if the bot comes back at another address.
     async fn connect(self) -> io::Result<Self::Client> {
-        TcpStream::connect(self.addr).await
+        let mut logged = false;
+        loop {
+            match TcpStream::connect(&self.addr).await {
+                Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                    if !logged {
+                        tracing::warn!("Connection refused, retrying every second: {err}");
+                        logged = true;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                result => return result,
+            }
+        }
     }
 }
 
@@ -151,5 +166,22 @@ mod tests {
             .unwrap();
         assert_eq!(handshake, "hello");
         assert_eq!(rest.next().await.unwrap().unwrap(), "first request");
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_waits_for_the_listener() {
+        // A free port, nothing listening yet
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let connecting = tokio::spawn(Tcp::new(addr).connect());
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(!connecting.is_finished());
+        let listener = TcpListener::bind(addr).await.unwrap();
+        let (connected, accepted) = tokio::join!(connecting, listener.accept());
+        assert!(connected.unwrap().is_ok() && accepted.is_ok());
     }
 }
