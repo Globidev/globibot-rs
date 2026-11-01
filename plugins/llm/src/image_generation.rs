@@ -69,14 +69,19 @@ llm_tool! {
            description = format!(
                "Make an image from a description. It is attached to your answer: don't link it or say you can't send \
                images. People's avatars can be used as references (e.g. to draw someone as a pirate), only when \
-               their owner agrees to share images with you. Each person can have a few images made per day. At \
-               most {MAX_PER_ANSWER} images per answer."
+               their owner agrees to share images with you, and so can the images shown to you with this \
+               message. Each person can have a few images made per day. At most {MAX_PER_ANSWER} images per \
+               answer."
            ))]
     pub struct GenerateImage {
         #[param(name = "prompt", description = "A detailed description of the image, in English")]
         prompt: String,
         #[param(name = "reference_user_ids", description = "Discord user ids whose avatars to use as references")]
         reference_user_ids: Option<Vec<String>>,
+        #[param(name = "use_shown_images",
+                description = "Use the images shown to you with this message (attached, replied to, or posted \
+                    just before) as references, e.g. to edit a photo or draw the person in it")]
+        use_shown_images: Option<bool>,
         #[param(name = "aspect_ratio", enum = ASPECT_RATIOS)]
         aspect_ratio: Option<String>,
     }
@@ -85,7 +90,13 @@ llm_tool! {
 impl Tool for GenerateImage {
     async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
         ctx.plugin
-            .generate_image(ctx.rpc, ctx.asked.author.id, ctx.files, self)
+            .generate_image(
+                ctx.rpc,
+                ctx.asked.author.id,
+                ctx.files,
+                ctx.shown_images,
+                self,
+            )
             .await
     }
 }
@@ -97,6 +108,7 @@ impl LlmPlugin {
         rpc: &rpc::ProtocolClient,
         requester: UserId,
         files: &Mutex<Vec<FileAttachment>>,
+        shown_images: &[String],
         args: GenerateImage,
     ) -> ToolOutput {
         let settings = self.image_settings.read().clone();
@@ -121,23 +133,32 @@ impl LlmPlugin {
             .aspect_ratio
             .filter(|ratio| ASPECT_RATIOS.contains(&ratio.as_str()));
 
+        // Already consented to when they were shown to the chat model
+        let mut references = Vec::new();
+        let mut text = String::new();
+        if args.use_shown_images == Some(true) {
+            if shown_images.is_empty() {
+                text.push_str("No images were shown to you with this message\n");
+            } else {
+                references.extend_from_slice(shown_images);
+                text.push_str(&format!(
+                    "{} shown image(s) used as references\n",
+                    shown_images.len()
+                ));
+            }
+        }
+
         // The same consent rule as showing avatars to the chat model
         let reference_user_ids = args.reference_user_ids.unwrap_or_default();
         let avatars = self.avatars(rpc, requester, &reference_user_ids).await;
-        let references = avatars
-            .images
-            .into_iter()
-            .filter_map(|image| match image {
-                ContentPart::Image(image) => Some(image.image_url.url),
-                ContentPart::Text(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let mut text = if avatars.text.is_empty() {
-            String::new()
-        } else {
-            // "attached as image n" means used as reference n here
-            format!("References:\n{}\n", avatars.text)
-        };
+        references.extend(avatars.images.into_iter().filter_map(|image| match image {
+            ContentPart::Image(image) => Some(image.image_url.url),
+            ContentPart::Text(_) => None,
+        }));
+        if !avatars.text.is_empty() {
+            // "attached as image n" means the avatar is a reference here
+            text.push_str(&format!("Avatars:\n{}\n", avatars.text));
+        }
 
         let generated = self
             .llm_client

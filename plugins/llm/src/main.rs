@@ -1184,6 +1184,14 @@ impl LlmPlugin {
             .start_typing(rpc::context::current(), message.channel_id)
             .await??;
         let image_parts = images::fetch_all(self.llm_client.http(), image_urls).await;
+        // Kept for generate_image references
+        let shown_images = image_parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Image(image) => Some(image.image_url.url.clone()),
+                ContentPart::Text(_) => None,
+            })
+            .collect::<Vec<_>>();
         request_message.content.extend(image_parts);
         // Here rather than in the system prompt, which would then change every minute and miss the cache
         request_message
@@ -1207,7 +1215,7 @@ impl LlmPlugin {
         // the trace, and the generated images to attach to the answer
         let calls = Mutex::new(Vec::new());
         let files = Mutex::new(Vec::new());
-        let (calls_ref, files_ref, rpc_ref) = (&calls, &files, &rpc);
+        let (calls_ref, files_ref, rpc_ref, shown_ref) = (&calls, &files, &rpc, &shown_images);
         let completion_res = self
             .llm_client
             .complete_with_tools(
@@ -1223,6 +1231,7 @@ impl LlmPlugin {
                         rpc: rpc_ref,
                         asked: message,
                         files: files_ref,
+                        shown_images: shown_ref,
                     };
                     let output = match LlmTool::parse(&name, &args) {
                         Ok(tool) => tool.run(&ctx).await,
