@@ -442,6 +442,10 @@ impl Protocol for Server {
         Ok(self.discord_http.get_channel(channel_id).await?)
     }
 
+    async fn dm_channel(self, _ctx: Context, user_id: UserId) -> DiscordApiResult<ChannelId> {
+        Ok(user_id.create_dm_channel(&self.discord_http).await?.id)
+    }
+
     async fn list_guild_members(
         self,
         _ctx: Context,

@@ -85,6 +85,8 @@ pub trait Protocol {
 
     async fn get_user(user_id: UserId) -> DiscordApiResult<User>;
     async fn get_channel(channel_id: ChannelId) -> DiscordApiResult<Channel>;
+    /// The bot's DM channel with `user_id`, opened if needed
+    async fn dm_channel(user_id: UserId) -> DiscordApiResult<ChannelId>;
 
     async fn list_guild_members(guild_id: GuildId) -> DiscordApiResult<Vec<Member>>;
     /// `None` if the user isn't in the guild
