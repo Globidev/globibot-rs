@@ -22,294 +22,363 @@
 
   type SuggestionVote = 'Up' | 'Down' | 'Omegalul';
 
-  let loreForms = $state<Record<string, string>>({});
+  type Filter = 'all' | 'with_suggestions' | 'with_lore' | 'without_lore';
 
-  async function loadData(): Promise<Data> {
-    const res = await fetch('/plugin-api/llm/lore');
-    const data: Data = await res.json();
-    init(data);
-    return data;
-  }
+  // Same limit as /add-user-context
+  const MAX_ADDITION_CHARS = 500;
+  const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
+  const OMEGALUL = 'https://cdn.discordapp.com/emojis/373119675829190656.webp?size=48';
+  const VOTES: { vote: SuggestionVote; label: string }[] = [
+    { vote: 'Up', label: '👍' },
+    { vote: 'Down', label: '👎' },
+    { vote: 'Omegalul', label: '' }
+  ];
 
-  function init(data: Data): void {
-    loreForms = {};
-    // Initialize the "scratchpad" for edits
-    for (const [userId, userLore] of Object.entries(data.lore_by_user)) {
-      if (!(userId in loreForms)) loreForms[userId] = userLore.lore;
-    }
-  }
+  let data = $state<Data | null>(null);
+  // Sort order from the first load: cards don't jump around when someone suggests or votes
+  let rankByUser = $state<Record<string, number>>({});
+  let loadError = $state<string | null>(null);
+  let searchQuery = $state('');
+  let filter = $state<Filter>('all');
+  let isAdmin = $state(false);
+  // Per user id: the fact being typed, the rewrite being edited (only while editing), the last error
+  let additions = $state<Record<string, string>>({});
+  let rewrites = $state<Record<string, string>>({});
+  let errors = $state<Record<string, string>>({});
 
-  let initPromise = $state(loadData());
   let currentUserId = $derived(authStore.user?.user_id ?? '');
-  let isAllowedToAccept = $state(false);
+
+  async function load(): Promise<void> {
+    const res = await fetch('/plugin-api/llm/lore');
+    if (!res.ok) {
+      loadError = await res.text();
+      return;
+    }
+    const loaded: Data = await res.json();
+    rankByUser = Object.fromEntries(sortedUserIds(loaded).map((userId, rank) => [userId, rank]));
+    data = loaded;
+  }
+  load();
+
+  /** Suggestions first, then people with lore, then by name */
+  function sortedUserIds(data: Data): string[] {
+    const suggestionCount = (userId: string) => data.suggestions_by_user[userId]?.length ?? 0;
+    return Object.entries(data.lore_by_user)
+      .toSorted(
+        ([aId, a], [bId, b]) =>
+          suggestionCount(bId) - suggestionCount(aId) ||
+          Number(hasLore(b)) - Number(hasLore(a)) ||
+          a.member.username.localeCompare(b.member.username)
+      )
+      .map(([userId]) => userId);
+  }
 
   // The plugin decides who the admin is (LLM_ADMIN_USER_ID), the settings tell us if it's us.
   // The accept endpoint checks this again server side
-  async function loadIsAllowedToAccept(): Promise<void> {
+  async function loadIsAdmin(): Promise<void> {
     const res = await fetch('/plugin-api/llm/settings');
     if (!res.ok) return;
     const settings: { allowed_to_edit?: boolean } = await res.json();
-    isAllowedToAccept = settings.allowed_to_edit === true;
+    isAdmin = settings.allowed_to_edit === true;
   }
-  loadIsAllowedToAccept();
-  let searchQuery = $state('');
-  let loreFilter = $state<'all' | 'lore_only' | 'no_lore_only'>('all');
+  loadIsAdmin();
 
-  async function handleSuggest(userId: string) {
-    const suggestion = loreForms[userId];
-    if (!suggestion?.trim()) return;
-
-    const resp = await fetch('/plugin-api/llm/lore/suggest', {
+  /** Every lore endpoint answers with the whole lore book */
+  async function post(path: string, body: object, userId: string): Promise<boolean> {
+    delete errors[userId];
+    const res = await fetch(`/plugin-api/llm/lore/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ for_user_id: userId, suggestion: suggestion.trim() })
+      body: JSON.stringify(body)
     });
-    if (!resp.ok) {
-      alert('Failed to submit suggestion: ' + (await resp.text()));
-      return;
+    if (!res.ok) {
+      errors[userId] = await res.text();
+      return false;
     }
-    const data = await resp.json();
-    initPromise = Promise.resolve(data);
-    init(data);
+    data = await res.json();
+    return true;
   }
 
-  async function handleVote(for_user_id: string, by_user_id: string, vote: SuggestionVote) {
-    const resp = await fetch('/plugin-api/llm/lore/vote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ for_user_id, by_user_id, vote })
-    });
-    if (!resp.ok) {
-      alert('Failed to submit vote: ' + (await resp.text()));
-      return;
-    }
-    const data = await resp.json();
-    initPromise = Promise.resolve(data);
-    init(data);
+  async function suggestAddition(userId: string) {
+    const suggestion = additions[userId]?.trim();
+    if (!suggestion) return;
+    const body = { for_user_id: userId, suggestion, kind: 'Append' };
+    if (await post('suggest', body, userId)) delete additions[userId];
   }
 
-  async function acceptSuggestion(for_user_id: string, by_user_id: string) {
-    const resp = await fetch('/plugin-api/llm/lore/accept', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ for_user_id, by_user_id })
-    });
-    if (!resp.ok) {
-      alert('Failed to accept suggestion: ' + (await resp.text()));
-      return;
-    }
-    const data = await resp.json();
-    initPromise = Promise.resolve(data);
-    init(data);
+  async function suggestRewrite(userId: string) {
+    const suggestion = rewrites[userId]?.trim();
+    if (!suggestion) return;
+    const body = { for_user_id: userId, suggestion, kind: 'Replace' };
+    if (await post('suggest', body, userId)) delete rewrites[userId];
   }
 
-  function totalVotes(sug: UserLoreSuggestion, voteType: SuggestionVote): number {
-    let total = 0;
-    for (const vote of Object.values(sug.votes_by_user_id)) {
-      if (vote === voteType) total++;
-    }
-    return total;
+  function vote(userId: string, sug: UserLoreSuggestion, vote: SuggestionVote) {
+    post('vote', { for_user_id: userId, by_user_id: sug.suggestion_by.user_id, vote }, userId);
   }
-</script>
 
-{#snippet memberInfo(member: DiscordMember, isSmall = false)}
-  <div class="flex items-center gap-3 {isSmall ? 'pl-8 opacity-80' : ''} max-w-3xs">
-    <img src={member.avatar_url} alt="" class="{isSmall ? 'h-6 w-6' : 'h-8 w-8'} rounded-md" />
-    <span class="{isSmall ? 'text-xs' : 'text-sm font-semibold'} truncate">
-      {member.username}
-    </span>
-  </div>
-{/snippet}
+  function accept(userId: string, sug: UserLoreSuggestion) {
+    post('accept', { for_user_id: userId, by_user_id: sug.suggestion_by.user_id }, userId);
+  }
 
-<div class="mb-6 flex flex-col gap-2 md:flex-row md:items-center">
-  <div class="flex w-full max-w-sm gap-2">
-    <div class="relative w-full">
-      <span class="absolute inset-y-0 left-3 flex items-center text-gray-500"> 🔍 </span>
-      <input
-        type="text"
-        bind:value={searchQuery}
-        placeholder="Search users..."
-        class="w-full rounded-lg border border-gray-700 bg-gray-900 py-2 pr-4 pl-10 text-sm text-white outline-none focus:border-indigo-500"
-      />
-    </div>
-    <button
-      onclick={() => (searchQuery = '')}
-      class={[
-        'cursor-pointer text-xs text-gray-500 hover:text-white',
-        searchQuery === '' ? 'invisible' : ''
-      ]}
-    >
-      Clear
-    </button>
-  </div>
+  function voteCount(sug: UserLoreSuggestion, vote: SuggestionVote): number {
+    return Object.values(sug.votes_by_user_id).filter((v) => v === vote).length;
+  }
 
-  <div class="flex items-center gap-2 md:ml-auto">
-    <span class="icon-[mdi--filter-cog-outline]"></span>
-    <select
-      bind:value={loreFilter}
-      class="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
-    >
-      <option value="all">All Users</option>
-      <option value="lore_only">With Lore only</option>
-      <option value="no_lore_only">Without Lore only</option>
-    </select>
-  </div>
-</div>
+  const hasLore = (lore: UserLore) => lore.lore.trim().length > 0;
 
-{#await initPromise}
-  <div class="animate-pulse text-gray-400">Reading the archives...</div>
-{:then data}
-  <div class="grid-container">
-    {#each Object.entries(data.lore_by_user)
-      .filter(([_, val]) => val.member.username.toLowerCase().includes(searchQuery.toLowerCase()))
-      .filter(([_, val]) => {
-        if (loreFilter === 'lore_only') return val.lore.trim().length > 0;
-        if (loreFilter === 'no_lore_only') return val.lore.trim().length === 0;
+  let entries = $derived.by(() => {
+    if (data == null) return [];
+    const suggestionsByUser = data.suggestions_by_user;
+    const query = searchQuery.trim().toLowerCase();
+    return Object.entries(data.lore_by_user)
+      .map(([userId, lore]) => ({ userId, lore, suggestions: suggestionsByUser[userId] ?? [] }))
+      .filter(
+        ({ lore }) =>
+          lore.member.username.toLowerCase().includes(query) ||
+          lore.lore.toLowerCase().includes(query)
+      )
+      .filter(({ lore, suggestions }) => {
+        if (filter === 'with_suggestions') return suggestions.length > 0;
+        if (filter === 'with_lore') return hasLore(lore);
+        if (filter === 'without_lore') return !hasLore(lore);
         return true;
       })
-      .toSorted(([aId, aLore], [bId, bLore]) => {
-        const aSuggestionLen = data.suggestions_by_user[aId]?.length ?? 0;
-        const bSuggestionLen = data.suggestions_by_user[bId]?.length ?? 0;
-        if (aSuggestionLen !== bSuggestionLen) {
-          return bSuggestionLen - aSuggestionLen; // More suggestions first
-        }
-        if (aLore.lore.length === 0 && bLore.lore.length === 0) return 0;
-        if (aLore.lore.length === 0) return 1;
-        if (bLore.lore.length === 0) return -1;
-        return aLore.member.username.localeCompare(bLore.member.username);
-      }) as [userId, userLore]}
-      <div class="contents">
-        {@render memberInfo(userLore.member)}
+      .toSorted((a, b) => (rankByUser[a.userId] ?? Infinity) - (rankByUser[b.userId] ?? Infinity));
+  });
 
-        <textarea
-          rows={4}
-          placeholder="No lore yet"
-          disabled={userId === currentUserId}
-          bind:value={loreForms[userId]}
-          class="w-full rounded border border-gray-700 bg-gray-900 p-2 text-sm text-white outline-none focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-        ></textarea>
+  let peopleWithLore = $derived(Object.values(data?.lore_by_user ?? {}).filter(hasLore).length);
+  let pendingCount = $derived(
+    Object.values(data?.suggestions_by_user ?? {}).reduce((count, s) => count + s.length, 0)
+  );
+</script>
 
-        <button
-          onclick={() => handleSuggest(userId)}
-          class="rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white transition-all hover:bg-indigo-500 disabled:opacity-0"
-          disabled={loreForms[userId] === userLore.lore}
-        >
-          Suggest Change
-        </button>
-      </div>
+{#snippet avatar(member: DiscordMember, size: string)}
+  <img
+    src={member.avatar_url ?? DEFAULT_AVATAR}
+    alt=""
+    loading="lazy"
+    class="{size} shrink-0 rounded-full"
+  />
+{/snippet}
 
-      {#if data.suggestions_by_user[userId]}
-        {#each data.suggestions_by_user[userId] as sug}
-          <div class="contents">
-            <div class="flex">{@render memberInfo(sug.suggestion_by, true)}</div>
+<div class="flex w-full flex-col gap-4 text-left">
+  <p class="text-xs text-gray-500">
+    Facts about people that the bot uses for flavor in its answers. Anyone can suggest a fact or a
+    rewrite, everyone votes, and the admin accepts. Every night the bot also suggests facts from the
+    day's messages.
+  </p>
 
-            <div
-              class="rounded border border-dashed border-gray-700 bg-gray-950 p-2 text-sm text-gray-300 italic"
-            >
-              {#if sug.kind === 'Append'}
-                <span class="font-medium text-green-400 not-italic">➕ adds:</span>
-              {/if}
-              {sug.suggestion}
-            </div>
+  <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+    <div class="relative w-full sm:max-w-sm">
+      <span
+        class="absolute inset-y-0 left-3 my-auto icon-[mdi--magnify] size-4 text-gray-500"
+        aria-hidden="true"
+      ></span>
+      <input
+        type="search"
+        bind:value={searchQuery}
+        placeholder="Search people or lore…"
+        class="w-full rounded-lg border border-gray-700 bg-gray-900 py-2 pr-3 pl-9 text-sm text-white outline-none focus:border-indigo-500"
+      />
+    </div>
 
-            <div class="flex gap-1">
-              <button
-                onclick={() => handleVote(userId, sug.suggestion_by.user_id, 'Up')}
-                disabled={sug.suggestion_by.user_id === currentUserId}
-                class={[
-                  'btn-vote',
-                  sug.votes_by_user_id[currentUserId] === 'Up' ? 'bg-gray-700!' : ''
-                ]}
-                title="Upvote">👍 {totalVotes(sug, 'Up')}</button
-              >
-              <button
-                onclick={() => handleVote(userId, sug.suggestion_by.user_id, 'Down')}
-                disabled={sug.suggestion_by.user_id === currentUserId}
-                class={[
-                  'btn-vote',
-                  sug.votes_by_user_id[currentUserId] === 'Down' ? 'bg-gray-700!' : ''
-                ]}
-                title="Downvote">👎 {totalVotes(sug, 'Down')}</button
-              >
-              <button
-                onclick={() => handleVote(userId, sug.suggestion_by.user_id, 'Omegalul')}
-                disabled={sug.suggestion_by.user_id === currentUserId}
-                class={[
-                  'btn-vote',
-                  sug.votes_by_user_id[currentUserId] === 'Omegalul' ? 'bg-gray-700!' : ''
-                ]}
-              >
-                <span class="flex gap-1">
-                  <img
-                    class="size-4"
-                    alt="Omegalul"
-                    src="https://cdn.discordapp.com/emojis/373119675829190656.webp?size=240"
-                  />
-                  {totalVotes(sug, 'Omegalul')}
-                </span>
-              </button>
-              {#if isAllowedToAccept}
-                <button
-                  onclick={() => acceptSuggestion(userId, sug.suggestion_by.user_id)}
-                  class="btn-vote bg-green-600 text-white hover:bg-green-500"
-                >
-                  Accept
-                </button>
-              {/if}
-            </div>
-          </div>
-        {/each}
+    <div class="flex items-center gap-3 sm:ml-auto">
+      {#if data}
+        <span class="text-xs text-gray-500">
+          {peopleWithLore} people with lore ·
+          <button
+            onclick={() => (filter = 'with_suggestions')}
+            class="cursor-pointer {pendingCount > 0 ? 'text-amber-300 hover:text-amber-200' : ''}"
+          >
+            {pendingCount} pending {pendingCount === 1 ? 'suggestion' : 'suggestions'}
+          </button>
+        </span>
       {/if}
-
-      <div class="col-span-3 my-2 border-b border-gray-800"></div>
-    {/each}
+      <select
+        bind:value={filter}
+        aria-label="Filter"
+        class="rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+      >
+        <option value="all">Everyone</option>
+        <option value="with_suggestions">With suggestions</option>
+        <option value="with_lore">With lore</option>
+        <option value="without_lore">Without lore</option>
+      </select>
+    </div>
   </div>
-{/await}
+
+  {#if loadError}
+    <div class="text-sm text-red-400">⚠ {loadError}</div>
+  {:else if data == null}
+    <div class="animate-pulse text-sm text-gray-400">Reading the archives...</div>
+  {:else if entries.length === 0}
+    <div class="text-sm text-gray-400">Nobody matches.</div>
+  {:else}
+    <div class="grid items-start gap-3 lg:grid-cols-2">
+      {#each entries as { userId, lore, suggestions } (userId)}
+        {@const isMe = userId === currentUserId}
+        {@const name = lore.member.username}
+        <article class="flex flex-col gap-3 rounded-lg bg-gray-900 p-4">
+          <header class="flex items-center gap-3">
+            {@render avatar(lore.member, 'size-9')}
+            <div class="flex min-w-0 flex-1 flex-col">
+              <h3 class="truncate text-sm font-semibold text-gray-100">
+                {name}
+                {#if isMe}<span class="ml-1 text-xs font-normal text-gray-500">(you)</span>{/if}
+              </h3>
+              {#if suggestions.length > 0}
+                <span class="text-xs text-amber-300">
+                  {suggestions.length} pending {suggestions.length === 1
+                    ? 'suggestion'
+                    : 'suggestions'}
+                </span>
+              {/if}
+            </div>
+            {#if !isMe && hasLore(lore) && !(userId in rewrites)}
+              <button
+                onclick={() => (rewrites[userId] = lore.lore)}
+                title="Suggest a new version of the whole lore"
+                class="btn-ghost"
+              >
+                <span class="icon-[mdi--pencil-outline] size-3.5" aria-hidden="true"></span>
+                Rewrite
+              </button>
+            {/if}
+          </header>
+
+          {#if userId in rewrites}
+            <form
+              onsubmit={(e) => {
+                e.preventDefault();
+                suggestRewrite(userId);
+              }}
+              class="flex flex-col gap-2"
+            >
+              <textarea
+                bind:value={rewrites[userId]}
+                aria-label="New lore for {name}"
+                class="w-full rounded border border-gray-700 bg-gray-950 p-2 text-sm text-white outline-none focus:border-indigo-500"
+              ></textarea>
+              <div class="flex justify-end gap-2">
+                <button type="button" onclick={() => delete rewrites[userId]} class="btn-ghost">
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!rewrites[userId].trim() ||
+                    rewrites[userId].trim() === lore.lore.trim()}
+                  class="btn-primary"
+                >
+                  Suggest rewrite
+                </button>
+              </div>
+            </form>
+          {:else if hasLore(lore)}
+            <p class="text-sm leading-relaxed break-words whitespace-pre-wrap text-gray-200">
+              {lore.lore}
+            </p>
+          {:else}
+            <p class="text-sm text-gray-500 italic">No lore yet.</p>
+          {/if}
+
+          {#if isMe}
+            <p class="text-xs text-gray-500">Others can suggest facts about you here.</p>
+          {:else}
+            <form
+              onsubmit={(e) => {
+                e.preventDefault();
+                suggestAddition(userId);
+              }}
+              class="flex gap-2"
+            >
+              <input
+                bind:value={additions[userId]}
+                maxlength={MAX_ADDITION_CHARS}
+                placeholder="Add a fact about {name}…"
+                aria-label="New fact about {name}"
+                class="min-w-0 flex-1 rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-sm text-white outline-none focus:border-indigo-500"
+              />
+              <button type="submit" disabled={!additions[userId]?.trim()} class="btn-primary">
+                <span class="icon-[mdi--plus] size-4" aria-hidden="true"></span>
+                Suggest
+              </button>
+            </form>
+          {/if}
+
+          {#if errors[userId]}
+            <p class="text-xs text-red-400">⚠ {errors[userId]}</p>
+          {/if}
+
+          {#each suggestions as sug (sug.suggestion_by.user_id)}
+            {@const isAddition = sug.kind === 'Append'}
+            {@const isMine = sug.suggestion_by.user_id === currentUserId}
+            <div
+              class="flex flex-col gap-2 rounded-md border-l-2 bg-gray-950 px-3 py-2 {isAddition
+                ? 'border-green-500'
+                : 'border-amber-400'}"
+            >
+              <div class="flex flex-wrap items-center gap-1.5 text-xs text-gray-400">
+                <span class="font-medium {isAddition ? 'text-green-400' : 'text-amber-300'}">
+                  {isAddition ? '➕ Addition' : '✏️ Rewrite'}
+                </span>
+                by
+                {@render avatar(sug.suggestion_by, 'size-4')}
+                <span class="text-gray-300">{isMine ? 'you' : sug.suggestion_by.username}</span>
+              </div>
+              <p class="text-sm break-words whitespace-pre-wrap text-gray-200">{sug.suggestion}</p>
+              <div class="flex flex-wrap items-center gap-1">
+                {#each VOTES as { vote: kind, label } (kind)}
+                  {@const voted = sug.votes_by_user_id[currentUserId] === kind}
+                  <button
+                    onclick={() => vote(userId, sug, kind)}
+                    disabled={isMine}
+                    title={isMine ? "You can't vote on your own suggestion" : kind}
+                    aria-pressed={voted}
+                    class="btn-vote {voted ? 'bg-indigo-500/30! ring-1 ring-indigo-400' : ''}"
+                  >
+                    {#if label}{label}{:else}<img
+                        class="size-4"
+                        alt="Omegalul"
+                        src={OMEGALUL}
+                      />{/if}
+                    <span class="tabular-nums">{voteCount(sug, kind)}</span>
+                  </button>
+                {/each}
+                {#if isAdmin}
+                  <button
+                    onclick={() => accept(userId, sug)}
+                    class="btn-vote ml-auto bg-green-600! text-white hover:bg-green-500!"
+                  >
+                    Accept
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </article>
+      {/each}
+    </div>
+  {/if}
+</div>
 
 <style>
   @reference "../../../layout.css";
 
-  .btn-vote {
-    @apply cursor-pointer rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-50;
+  .btn-primary {
+    @apply flex cursor-pointer items-center gap-1 rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-indigo-600;
   }
 
-  /* Helper to treat wrappers as transparent for the grid */
-  .contents {
-    display: contents;
+  .btn-ghost {
+    @apply flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-white;
+  }
+
+  .btn-vote {
+    @apply flex cursor-pointer items-center gap-1 rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   textarea {
     field-sizing: content;
-    min-height: 40px;
-    width: 100%;
-  }
-
-  .grid-container {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    column-gap: 1rem;
-    row-gap: 0.5rem;
-    width: 100%;
-  }
-
-  /* Mobile: Switch to a single column card layout */
-  @media (max-width: 640px) {
-    .grid-container {
-      grid-template-columns: 1fr; /* Everything takes full width */
-      row-gap: 1rem; /* More space between stacked elements */
-    }
-
-    /* Force the "spacer" line to be more prominent between 'cards' */
-    .col-span-3 {
-      grid-column: 1 / -1;
-      margin-top: 1.5rem;
-      border-bottom-width: 2px;
-    }
-
-    /* Optional: Make the suggestion row look indented on mobile */
-    .pl-8 {
-      padding-left: 1.5rem;
-    }
+    min-height: 5rem;
   }
 </style>
