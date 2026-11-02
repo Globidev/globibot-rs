@@ -5,6 +5,7 @@ mod fun;
 mod image_generation;
 mod images;
 mod message_search;
+mod nightly_lore;
 mod openrouter;
 mod reminders;
 mod settings;
@@ -134,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
 
     let llm_plugin = Arc::clone(&plugin.inner);
     let send_reminders = reminders::send_when_due(Arc::clone(&plugin.inner), plugin.rpc.clone());
+    let nightly_lore = nightly_lore::run_every_night(Arc::clone(&plugin.inner), plugin.rpc.clone());
 
     // ponytail: saves every channel each minute, a restart loses up to a minute of context
     let save_regularly = {
@@ -182,6 +184,9 @@ async fn main() -> anyhow::Result<()> {
         },
         _ = send_reminders => {
             tracing::info!("Reminder task has shut down");
+        },
+        _ = nightly_lore => {
+            tracing::info!("Nightly lore task has shut down");
         },
         _ = save_regularly => {
             tracing::info!("Lore saving task has shut down");
@@ -605,6 +610,8 @@ struct LlmPlugin {
     /// Members with this role agree to their images being sent to the model provider
     images_role_id: Option<RoleId>,
     starboard_channel_id: Option<ChannelId>,
+    /// Where lore is suggested every night, from that channel's messages
+    nightly_lore_channel_id: Option<ChannelId>,
 
     llm_client: openrouter::Client,
     storage: RedisStorage,
@@ -1057,6 +1064,7 @@ impl LlmPlugin {
         let default_model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
         let llm_client = openrouter::Client::from_env(usage)?;
         let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
+        let nightly_lore_channel_id = optional_env("LLM_NIGHTLY_LORE_CHANNEL_ID")?;
         let images_role_id: Option<RoleId> = optional_env("LLM_IMAGES_ROLE_ID")?;
 
         // Consent can be withdrawn by dropping the role: forget what it covered
@@ -1141,6 +1149,7 @@ impl LlmPlugin {
             guild_id,
             images_role_id,
             starboard_channel_id,
+            nightly_lore_channel_id,
             llm_client,
             storage,
             llm_model: RwLock::new(model),
@@ -1679,6 +1688,7 @@ impl HandleEvents for LlmPlugin {
                     LlmCommands::Llm(Llm::Personality(PersonalityCommand::Set { personality })) => {
                         self.set_personality(&ctx, personality).await?
                     }
+                    LlmCommands::Llm(Llm::NightlyLore) => self.nightly_lore_now(&ctx).await?,
                     LlmCommands::AddUserContext(command) => {
                         self.add_user_context(&ctx, command).await?
                     }

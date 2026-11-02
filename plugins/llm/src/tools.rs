@@ -268,6 +268,7 @@ fn kind_name(kind: UsageKind) -> &'static str {
         UsageKind::Summary => "summaries of older messages",
         UsageKind::Caption => "image captions",
         UsageKind::ImageGeneration => "generated images",
+        UsageKind::NightlyLore => "nightly lore suggestions",
     }
 }
 
@@ -404,12 +405,13 @@ llm_tool! {
 
 impl Tool for SuggestLore {
     async fn run(self, ctx: &ToolCtx<'_>) -> ToolOutput {
-        ToolOutput::text(suggest_lore(
+        let suggested = suggest_lore(
             &ctx.plugin.lore_book,
             &ctx.plugin.bot_profile,
             &self.user_id,
             &self.fact,
-        ))
+        );
+        ToolOutput::text(suggested.map_or_else(|why| why, |_| SUGGESTED.to_string()))
     }
 }
 
@@ -425,26 +427,26 @@ fn get_lore(lore_book: &RwLock<LoreBook>, user_ids: &[String]) -> String {
         .join("\n")
 }
 
-/// `bot` is the suggester
-fn suggest_lore(
+pub const SUGGESTED: &str = "Suggested, people will vote on it";
+
+/// `bot` is the suggester. Gives who the fact is about, or why it wasn't suggested.
+pub fn suggest_lore(
     lore_book: &RwLock<LoreBook>,
     bot: &DiscordProfile,
     user_id: &str,
     fact: &str,
-) -> String {
-    let Some(user_id) = parse_user_id(user_id) else {
-        return format!("{user_id}: not a user id");
+) -> Result<UserId, String> {
+    let Some(parsed_id) = parse_user_id(user_id) else {
+        return Err(format!("{user_id}: not a user id"));
     };
     if fact.trim().chars().count() > MAX_FACT_CHARS {
-        return format!("Facts are at most {MAX_FACT_CHARS} characters");
+        return Err(format!("Facts are at most {MAX_FACT_CHARS} characters"));
     }
-    match lore_book
+    lore_book
         .write()
-        .suggest_addition(user_id, bot.clone(), fact)
-    {
-        Ok(()) => "Suggested, people will vote on it".to_string(),
-        Err(why) => why.to_string(),
-    }
+        .suggest_addition(parsed_id, bot.clone(), fact)
+        .map_err(str::to_string)?;
+    Ok(parsed_id)
 }
 
 /// Accepts "123", and "<@123>" in case the model copies a mention
@@ -545,6 +547,7 @@ mod tests {
             Ok(LlmTool::SearchLore(SearchLore { query })) => lore_book.read().search(&query),
             Ok(LlmTool::SuggestLore(SuggestLore { user_id, fact })) => {
                 suggest_lore(lore_book, &profile(99, "Globibot"), &user_id, &fact)
+                    .map_or_else(|why| why, |_| SUGGESTED.to_string())
             }
             Ok(other) => panic!("not a lore tool: {other:?}"),
             Err(err) => err,

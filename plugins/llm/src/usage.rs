@@ -29,6 +29,8 @@ pub enum UsageKind {
     Caption,
     /// Images made with the `generate_image` tool
     ImageGeneration,
+    /// Lore suggested every night from a channel's messages
+    NightlyLore,
 }
 
 /// The `usage` object of an OpenRouter response

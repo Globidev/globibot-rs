@@ -22,6 +22,9 @@ bot_command! {
         Model(ModelCommand),
         #[group(name = "personality", description = "Get or set the LLM personality")]
         Personality(PersonalityCommand),
+        #[subcommand(name = "nightly-lore",
+                     description = "Run tonight's lore suggestions now (admin only)")]
+        NightlyLore,
     }
 }
 
