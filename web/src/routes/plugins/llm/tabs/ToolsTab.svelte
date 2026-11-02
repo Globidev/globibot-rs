@@ -13,7 +13,7 @@
 
   type Trace = {
     at: number;
-    kind: 'chat' | 'direct_message';
+    kind: 'chat' | 'direct_message' | 'nightly_lore';
     model: string;
     /** null in DMs */
     requester: string | null;
