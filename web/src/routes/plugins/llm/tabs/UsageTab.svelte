@@ -372,3 +372,17 @@
 {:catch err}
   <div class="text-red-500">Error loading usage: {err.message}</div>
 {/await}
+
+<style>
+  /* On small screens the tables scroll sideways instead of squeezing their columns together */
+  table :is(th, td) {
+    padding-inline: 0.5rem;
+    white-space: nowrap;
+  }
+  table :is(th, td):first-child {
+    padding-left: 0;
+  }
+  table :is(th, td):last-child {
+    padding-right: 0;
+  }
+</style>

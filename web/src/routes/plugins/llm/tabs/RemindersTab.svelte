@@ -92,7 +92,7 @@
             <span class="text-sm text-gray-200">{time(reminder.due)}</span>
             <span class="text-xs text-gray-500">{fromNow(reminder.due)}</span>
           </div>
-          <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <div class="flex min-w-0 flex-1 basis-60 flex-col gap-1">
             <span class="text-sm break-words whitespace-pre-wrap text-gray-100"
               >{reminder.text}</span
             >

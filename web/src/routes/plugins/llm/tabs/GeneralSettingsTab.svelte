@@ -135,14 +135,16 @@
       <span class="text-xs font-medium whitespace-nowrap text-gray-400">
         Current window sizes
       </span>
-      <div class="flex flex-col gap-2">
+      <div class="flex min-w-0 flex-col gap-2">
         {#if formData.context_windows_by_channel.length === 0}
           <span class="text-sm text-gray-400">No context windows available.</span>
         {:else}
           {#each formData.context_windows_by_channel as entry}
-            <div class="flex items-center gap-2">
-              <span class="font-mono text-sm text-gray-300">{entry.channel_name}</span>
-              <span class="text-sm text-gray-400">- {entry.size}</span>
+            <div class="flex min-w-0 items-center gap-2 text-left">
+              <span class="truncate font-mono text-sm text-gray-300" title={entry.channel_name}
+                >{entry.channel_name}</span
+              >
+              <span class="shrink-0 text-sm text-gray-400">- {entry.size}</span>
             </div>
           {/each}
         {/if}

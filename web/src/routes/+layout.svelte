@@ -29,8 +29,9 @@
     max-w-5xl
     items-center
     justify-between
-    px-6
+    px-4
     py-4
+    sm:px-6
     lg:max-w-6xl
     xl:max-w-7xl
     2xl:max-w-352"
@@ -40,7 +41,7 @@
       <span>Globibot</span>
     </a>
 
-    <div class="flex items-center gap-6 text-sm">
+    <div class="flex items-center gap-4 text-sm sm:gap-6">
       <NavbarPlugins />
 
       <a
@@ -62,8 +63,10 @@
       mx-auto
       w-full
       max-w-5xl
-      px-6
-      py-12
+      px-3
+      py-6
+      sm:px-6
+      sm:py-12
       lg:max-w-6xl
       xl:max-w-7xl
       2xl:max-w-352

@@ -5,9 +5,9 @@
   const { plugins } = pluginStore;
 </script>
 
-<div class="mx-auto max-w-5xl px-6 py-16">
+<div class="mx-auto max-w-5xl sm:py-4">
   <!-- Header -->
-  <header class="mb-12 text-center">
+  <header class="mb-8 text-center sm:mb-12">
     <h1 class="text-2xl font-semibold tracking-tight">Active plugins</h1>
   </header>
 

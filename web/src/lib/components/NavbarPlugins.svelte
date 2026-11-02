@@ -13,15 +13,13 @@
   </button>
 
   {#if open}
-    <div
-      class="absolute right-0 mt-2 w-48 rounded-lg border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-900"
-    >
+    <div class="absolute right-0 mt-2 w-48 rounded-lg border border-gray-700 bg-gray-900 shadow-lg">
       <ul class="py-1 text-sm text-white">
         {#each $plugins as plugin}
           <li>
             <a
               href={`/plugins/${plugin.name}`}
-              class="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-800"
+              class="block px-4 py-2 hover:bg-gray-800"
               onclick={() => (open = false)}
             >
               {plugin.name}

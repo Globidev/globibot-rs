@@ -14,11 +14,15 @@
       onclick={() => (open = !open)}
     >
       {#if authStore.user != null}
-        <div class="flex items-center gap-3">
+        <div class="flex min-w-0 items-center gap-3">
           {#if authStore.user.avatar_url}
-            <img src={authStore.user.avatar_url} alt="User Avatar" class="h-8 w-8 rounded-lg" />
+            <img
+              src={authStore.user.avatar_url}
+              alt="User Avatar"
+              class="h-8 w-8 shrink-0 rounded-lg"
+            />
           {/if}
-          <span>{authStore.user.username}</span>
+          <span class="max-w-24 truncate sm:max-w-48">{authStore.user.username}</span>
         </div>
       {:else}
         <a
@@ -35,14 +39,12 @@
   {/if}
 
   {#if open && authStore.user != null}
-    <div
-      class="absolute right-0 mt-2 w-48 rounded-lg border border-gray-200 bg-white shadow-lg dark:border-gray-700 dark:bg-gray-900"
-    >
+    <div class="absolute right-0 mt-2 w-48 rounded-lg border border-gray-700 bg-gray-900 shadow-lg">
       <ul class="py-1 text-sm text-white">
         <li>
           <a
             href={`#`}
-            class="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-800"
+            class="block px-4 py-2 hover:bg-gray-800"
             onclick={() => {
               open = false;
               authStore.logout();

@@ -26,7 +26,7 @@
 </script>
 
 <a
-  class="flex flex-col gap-2 rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:shadow-md dark:border-gray-700 dark:bg-gray-900"
+  class="flex flex-col gap-2 rounded-xl border border-gray-700 bg-gray-900 p-5 shadow-sm transition hover:border-gray-500 hover:shadow-md"
   href={`/plugins/${plugin.name}`}
 >
   <!-- Plugin name -->

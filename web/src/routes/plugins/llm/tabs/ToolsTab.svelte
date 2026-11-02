@@ -127,7 +127,8 @@
   {@const shown = [...traces].reverse().filter((t) => !onlyWithCalls || t.calls.length > 0)}
   <div class="flex w-full flex-col gap-8">
     <p class="text-left text-xs text-gray-500">
-      Answers to pings and DMs from the last 3 days, where the model could call the tools below.
+      Answers to pings and DMs, and nightly lore suggestions, from the last 3 days, where the model
+      could call the tools below.
     </p>
 
     <!-- KPI row -->
