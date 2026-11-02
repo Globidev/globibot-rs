@@ -10,6 +10,7 @@ use itertools::Itertools;
 use crate::{
     LlmPlugin,
     cooldown::cooldown_message,
+    images::{self, MessageImages},
     openrouter::{ContentPart, Message as LlmMessage, Role},
     usage::UsageKind,
 };
@@ -23,13 +24,16 @@ pub enum Vibe {
 }
 
 impl LlmPlugin {
-    /// One-off completion with the current personality and lore, outside of any chat context
+    /// One-off completion with the current personality and lore, outside of any chat context.
+    /// `images` must have their author's consent.
     pub async fn complete_one_shot(
         &self,
         kind: UsageKind,
         prompt: String,
+        images: Vec<ContentPart>,
     ) -> anyhow::Result<String> {
-        let message = LlmMessage::text(Role::User, prompt);
+        let mut message = LlmMessage::text(Role::User, prompt);
+        message.content.extend(images);
 
         // Build the request before awaiting so the model's lock isn't held across the await
         let completion = self.llm_client.complete(
@@ -75,7 +79,7 @@ impl LlmPlugin {
         };
 
         let answer = self
-            .complete_one_shot(UsageKind::Command, prompt)
+            .complete_one_shot(UsageKind::Command, prompt, vec![])
             .await
             .unwrap_or_else(|err| {
                 tracing::error!("Failed to get LLM completion for {vibe:?}: {err:?}");
@@ -128,7 +132,7 @@ impl LlmPlugin {
             character, but clarity comes first.\n\n{transcript}"
         );
         let answer = self
-            .complete_one_shot(UsageKind::Command, prompt)
+            .complete_one_shot(UsageKind::Command, prompt, vec![])
             .await
             .unwrap_or_else(|err| {
                 tracing::error!("Failed to get LLM completion for /tldr: {err:?}");
@@ -145,9 +149,28 @@ impl LlmPlugin {
         rpc: rpc::ProtocolClient,
         message: &Message,
     ) -> anyhow::Result<()> {
-        let post = starboard_post_text(message);
-        if post.is_empty() {
+        let mut post = starboard_post_text(message);
+        let images = MessageImages::with_embeds(message);
+        if post.is_empty() && images.urls.is_empty() {
             return Ok(());
+        }
+
+        // The images are the starred message's author's: they need their consent, and only the
+        // role can give it here
+        let mut shown_images = Vec::new();
+        if !images.urls.is_empty() {
+            let author = starboard_author_id(message);
+            let has_role = match author {
+                Some(author) => self.has_images_role(&rpc, author).await,
+                None => false,
+            };
+            let consent = author.and_then(|author| images::consent(false, false, author, has_role));
+            if consent.is_some() {
+                shown_images = images::fetch_all(self.llm_client.http(), &images.urls).await;
+            }
+            if shown_images.is_empty() {
+                post = format!("{post}\n{}", images::NOT_SHARED).trim().to_string();
+            }
         }
 
         let prompt = format!(
@@ -155,7 +178,9 @@ impl LlmPlugin {
             star reactions are shared:\n\n{post}\n\nReact to it in character in one or two short \
             sentences."
         );
-        let answer = self.complete_one_shot(UsageKind::Starboard, prompt).await?;
+        let answer = self
+            .complete_one_shot(UsageKind::Starboard, prompt, shown_images)
+            .await?;
 
         rpc.send_reply(
             rpc::context::current(),
@@ -250,6 +275,25 @@ fn starboard_post_text(message: &Message) -> String {
     parts.join("\n")
 }
 
+/// The author of the starred message. Starboard bots don't give their id, but use their avatar
+/// as the embed's author icon: `/avatars/<id>/...`, or `/guilds/<guild>/users/<id>/avatars/...`
+/// for a server avatar. `None` for a default avatar.
+fn starboard_author_id(message: &Message) -> Option<UserId> {
+    message.embeds.iter().find_map(|embed| {
+        let icon_url = embed.author.as_ref()?.icon_url.as_deref()?;
+        let url = reqwest::Url::parse(icon_url).ok()?;
+        if url.host_str()? != "cdn.discordapp.com" {
+            return None;
+        }
+        let segments = url.path_segments()?.collect::<Vec<_>>();
+        let id = match segments.as_slice() {
+            ["avatars", id, _] | ["guilds", _, "users", id, "avatars", _] => *id,
+            _ => return None,
+        };
+        id.parse().ok().map(UserId::new)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +305,43 @@ mod tests {
         assert!(!sanitized.contains("@here"));
         assert!(!sanitized.contains("<@&"));
         assert!(sanitized.contains("<@456>"));
+    }
+
+    #[test]
+    fn reads_starboard_author_and_images() {
+        let post = |icon_url: &str| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": "1", "channel_id": "2", "type": 0, "content": "⭐ 5", "timestamp": "2026-11-02T00:00:00Z",
+                "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+                "pinned": false, "attachments": [],
+                "author": { "id": "3", "username": "starboard", "discriminator": "0", "avatar": null },
+                "embeds": [{
+                    "author": { "name": "globi", "icon_url": icon_url },
+                    "description": "look",
+                    "image": {
+                        "url": "https://cdn.discordapp.com/attachments/4/5/cat.png",
+                        "proxy_url": "https://media.discordapp.net/attachments/4/5/cat.png",
+                        "width": 2048, "height": 1024
+                    }
+                }]
+            }))
+            .unwrap()
+        };
+
+        let message = post("https://cdn.discordapp.com/avatars/42/abc.png");
+        assert_eq!(starboard_author_id(&message), Some(UserId::new(42)));
+        assert_eq!(
+            MessageImages::with_embeds(&message).urls,
+            [
+                "https://media.discordapp.net/attachments/4/5/cat.png?width=1024&height=512&format=webp"
+            ]
+        );
+        assert!(MessageImages::of(&message).urls.is_empty());
+
+        let server_avatar = post("https://cdn.discordapp.com/guilds/7/users/43/avatars/abc.png");
+        assert_eq!(starboard_author_id(&server_avatar), Some(UserId::new(43)));
+        let default_avatar = post("https://cdn.discordapp.com/embed/avatars/0.png");
+        assert_eq!(starboard_author_id(&default_avatar), None);
     }
 
     #[test]

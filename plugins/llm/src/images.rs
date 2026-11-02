@@ -68,15 +68,40 @@ impl MessageImages {
     pub fn of(message: &DiscordMessage) -> Self {
         let mut images = Self::default();
         for attachment in message.attachments.iter().filter(|a| is_image(a)) {
-            if attachment.filename.starts_with("SPOILER_") {
-                images.spoilers += 1;
-            } else if images.urls.len() < MAX_IMAGES_PER_MESSAGE
-                && let Some(url) = proxied_url(attachment)
-            {
-                images.urls.push(url);
+            if let Some((width, height)) = attachment.dimensions() {
+                images.push(&attachment.filename, &attachment.proxy_url, width, height);
             }
         }
         images
+    }
+
+    /// Also the images of its embeds, e.g. a Starboard post's copy of the starred message
+    pub fn with_embeds(message: &DiscordMessage) -> Self {
+        let mut images = Self::of(message);
+        for image in message
+            .embeds
+            .iter()
+            .filter_map(|embed| embed.image.as_ref())
+        {
+            if let (Some(proxy_url), Some(width), Some(height)) =
+                (&image.proxy_url, image.width, image.height)
+            {
+                images.push(&image.url, proxy_url, width, height);
+            }
+        }
+        images
+    }
+
+    /// `name` is a file name or a link to the file
+    fn push(&mut self, name: &str, proxy_url: &str, width: u32, height: u32) {
+        let file_name = name.rsplit('/').next().unwrap_or(name);
+        if file_name.starts_with("SPOILER_") {
+            self.spoilers += 1;
+        } else if self.urls.len() < MAX_IMAGES_PER_MESSAGE
+            && let Some(url) = proxied_url(proxy_url, width, height)
+        {
+            self.urls.push(url);
+        }
     }
 
     /// Stands in the context until the caption replaces it
@@ -97,10 +122,9 @@ pub fn is_image(attachment: &Attachment) -> bool {
         && attachment.dimensions().is_some()
 }
 
-fn proxied_url(attachment: &Attachment) -> Option<String> {
-    let (width, height) = attachment.dimensions()?;
+fn proxied_url(proxy_url: &str, width: u32, height: u32) -> Option<String> {
     let (width, height) = fit(width, height, MAX_IMAGE_SIDE);
-    let mut url = reqwest::Url::parse(&attachment.proxy_url).ok()?;
+    let mut url = reqwest::Url::parse(proxy_url).ok()?;
     url.query_pairs_mut()
         .append_pair("width", &width.to_string())
         .append_pair("height", &height.to_string())
