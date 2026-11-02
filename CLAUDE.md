@@ -26,7 +26,7 @@ See README.md for the architecture. Private deploy/infra notes, if present, are 
 
 ## Build gotchas
 - `build.sh` copies `target/release/globibot-plugin-*` (skipping `*.d`) into `arm64-artifacts/plugins/<name>`. Every plugin crate must be named `globibot-plugin-<name>`.
-- `cargo check -p <crate>` gives quick type checks; release builds go through `./build-artifacts.sh` (Docker, interactive `-it`).
+- `cargo check -p <crate>` gives quick type checks; `./build-artifacts.sh` cross-builds the release binaries in Docker.
 
 ## Deploy shape
 - Each process is a Nomad job using the same image tag; plugin jobs find the bot and Redis through Nomad service discovery (`globibot-rpc`, `globibot-subscriber`, `redis`) in a `template` block, and secrets through a Nomad variable at `nomad/jobs/<job>/<group>/<task>`.
