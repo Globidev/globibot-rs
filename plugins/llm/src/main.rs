@@ -441,6 +441,9 @@ async fn llm_lore(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse
 struct LlmLoreSuggestionRequest {
     for_user_id: UserId,
     suggestion: String,
+    /// `Append` adds `suggestion` to the lore, `Replace` makes it the whole new lore
+    #[serde(default)]
+    kind: SuggestionKind,
 }
 
 async fn llm_lore_suggest(
@@ -448,11 +451,25 @@ async fn llm_lore_suggest(
     Extension(profile): Extension<DiscordProfile>,
     Json(suggestion_req): Json<LlmLoreSuggestionRequest>,
 ) -> impl IntoResponse {
-    let suggest_result = llm_plugin.lore_book.write().suggest(
-        suggestion_req.for_user_id,
-        profile,
-        &suggestion_req.suggestion,
-    );
+    let LlmLoreSuggestionRequest {
+        for_user_id,
+        suggestion,
+        kind,
+    } = suggestion_req;
+    let suggest_result = match kind {
+        SuggestionKind::Replace => {
+            llm_plugin
+                .lore_book
+                .write()
+                .suggest(for_user_id, profile, &suggestion)
+        }
+        SuggestionKind::Append => {
+            llm_plugin
+                .lore_book
+                .write()
+                .suggest_addition(for_user_id, profile, &suggestion)
+        }
+    };
     if let Err(why) = suggest_result {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
