@@ -122,11 +122,16 @@ impl LlmPlugin {
 
         let prompt = format!(
             "The day is over. Here are the last day's messages in this channel:\n\n{transcript}\n\n\
-            Pick at most {MAX_SUGGESTIONS} new, lasting facts about people in these messages that \
-            aren't in their lore yet, and call suggest_lore once for each, all at once. The usual \
-            rules apply: facts people state about themselves or that the chat agrees on, nothing \
-            sensitive, nothing someone asked to put on someone else. If nothing is worth it, \
-            suggest nothing. Don't write anything else."
+            Pick at most {MAX_SUGGESTIONS} new facts about people in these messages that aren't \
+            in their lore yet, and call suggest_lore once for each, all at once. Lore is the \
+            chat's mythology, not a bio: the best facts come from the funny, absurd or memorable \
+            moments of the day (a bad take, a running joke, an embarrassing mishap, a weird \
+            obsession) turned into a deadpan \"fact\" about the person, a little exaggerated if \
+            it's funnier. Tonight this replaces suggest_lore's \"clear and lasting fact\" rule: \
+            it doesn't have to be literally true or stated by the person, only true to what \
+            happened. Plain facts are fine too when they're interesting. Still: playful, not \
+            mean, nothing sensitive, nothing someone asked to put on someone else. If nothing \
+            is worth it, suggest nothing. Don't write anything else."
         );
 
         let model = self.llm_model.read().clone();
