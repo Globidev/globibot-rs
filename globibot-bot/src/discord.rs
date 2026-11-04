@@ -5,9 +5,11 @@ use globibot_core::serenity::all::GatewayIntents;
 use globibot_core::serenity::{
     self, Client, async_trait,
     client::Context,
+    gateway::ChunkGuildFilter,
     model::{
         application::Interaction,
         channel::Message,
+        guild::Guild,
         id::{ChannelId, GuildId, MessageId},
     },
 };
@@ -38,6 +40,14 @@ impl serenity::client::EventHandler for EventHandler {
         self.publisher.broadcast(Event::InteractionCreate {
             interaction: Box::new(command),
         });
+    }
+
+    /// Discord only sends a few members with the guild: ask for all of them, so the cache can
+    /// name everyone (mentions in `content_safe` otherwise become "@invalid-user"). Here
+    /// rather than in `cache_ready`, which a reconnect doesn't repeat.
+    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
+        ctx.shard
+            .chunk_guild(guild.id, None, false, ChunkGuildFilter::None, None);
     }
 
     async fn cache_ready(&self, _ctx: Context, guilds: Vec<GuildId>) {
