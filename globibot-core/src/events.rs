@@ -21,6 +21,10 @@ pub enum Event {
         channel_id: ChannelId,
         message_id: MessageId,
     },
+    /// The whole message as it is after an edit. Not sent when only embeds load.
+    MessageEdit {
+        message: Box<Message>,
+    },
     InteractionCreate {
         interaction: Box<CommandInteraction>,
     },
@@ -30,6 +34,7 @@ pub enum Event {
 pub enum EventType {
     MessageCreate,
     MessageDelete,
+    MessageEdit,
     InteractionCreate,
 }
 
@@ -38,6 +43,7 @@ impl Event {
         match self {
             Event::MessageCreate { .. } => EventType::MessageCreate,
             Event::MessageDelete { .. } => EventType::MessageDelete,
+            Event::MessageEdit { .. } => EventType::MessageEdit,
             Event::InteractionCreate { .. } => EventType::InteractionCreate,
         }
     }

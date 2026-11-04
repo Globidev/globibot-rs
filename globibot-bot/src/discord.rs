@@ -9,6 +9,7 @@ use globibot_core::serenity::{
     model::{
         application::Interaction,
         channel::Message,
+        event::MessageUpdateEvent,
         guild::Guild,
         id::{ChannelId, GuildId, MessageId},
     },
@@ -24,6 +25,34 @@ impl serenity::client::EventHandler for EventHandler {
         drop_forwards(&mut new_message);
         self.publisher.broadcast(Event::MessageCreate {
             message: Box::new(new_message),
+        });
+    }
+
+    async fn message_update(
+        &self,
+        ctx: Context,
+        _old_if_available: Option<Message>,
+        new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        // Discord also sends updates when embeds load: only edits set the edited timestamp
+        if event.edited_timestamp.is_none() {
+            return;
+        }
+        // `new` needs the old message in serenity's message cache, which is off: fetch it
+        let mut message = match new {
+            Some(message) => message,
+            None => match event.channel_id.message(&ctx, event.id).await {
+                Ok(message) => message,
+                Err(why) => {
+                    tracing::warn!("Failed to fetch edited message {}: {why}", event.id);
+                    return;
+                }
+            },
+        };
+        drop_forwards(&mut message);
+        self.publisher.broadcast(Event::MessageEdit {
+            message: Box::new(message),
         });
     }
 
