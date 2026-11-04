@@ -50,6 +50,11 @@ impl serenity::client::EventHandler for EventHandler {
                 }
             },
         };
+        // Fetched messages have no guild or member: without them it would look like a DM
+        message.guild_id = message.guild_id.or(event.guild_id);
+        if message.member.is_none() {
+            message.member = event.member.flatten();
+        }
         drop_forwards(&mut message);
         self.publisher.broadcast(Event::MessageEdit {
             message: Box::new(message),
