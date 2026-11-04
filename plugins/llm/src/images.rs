@@ -56,6 +56,11 @@ pub fn is_caption(text: &str) -> bool {
     text.starts_with("[Image: ") || text.starts_with("[Images: ")
 }
 
+/// What stands for images until they're captioned, see [`MessageImages::placeholder`]
+pub fn is_placeholder(text: &str) -> bool {
+    text == "[Image]" || text == "[Images]"
+}
+
 /// The images of a message that can be shown to the model
 #[derive(Debug, Default)]
 pub struct MessageImages {

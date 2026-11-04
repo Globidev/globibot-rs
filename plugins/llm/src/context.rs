@@ -29,6 +29,10 @@ const KEEP_AFTER_DROP_PERCENT: usize = 70;
 const MAX_SUMMARY_CHARS: usize = 6_000;
 
 pub const SUMMARY_TAG: &str = "[Summary of earlier messages in this channel]";
+/// After the first line of an edited message
+pub const EDITED: &str = "[Edited]";
+/// What's left of a deleted message, after its author
+pub const DELETED: &str = "[Deleted message]";
 
 /// How far back a ping can look for an image when it has none of its own
 const RECENT_IMAGE_MAX_MESSAGES: u64 = 10;
@@ -51,6 +55,8 @@ pub struct ContextMessage {
 /// The latest images posted in a channel. Not saved: their links expire anyway.
 #[derive(Debug, Clone)]
 pub struct PostedImages {
+    /// Their message, so a deletion can forget them
+    message_id: MessageId,
     pub author_name: String,
     pub urls: Vec<String>,
     posted_at: Instant,
@@ -117,9 +123,85 @@ impl ChannelContext {
         }
     }
 
+    /// Replaces a message with its edited version, marked as edited. Its images' caption is kept
+    /// when they're still shown: an edit can remove images, not change them. False if the
+    /// message isn't in the window.
+    pub fn edit(&mut self, mut edited: ContextMessage) -> bool {
+        let Some(stored) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|stored| stored.id.is_some() && stored.id == edited.id)
+        else {
+            return false;
+        };
+
+        let caption = stored
+            .message
+            .content
+            .iter()
+            .find(|part| matches!(part, ContentPart::Text(part) if images::is_caption(&part.text)))
+            .cloned();
+        if let Some(caption) = caption {
+            for part in &mut edited.message.content {
+                if matches!(part, ContentPart::Text(part) if images::is_placeholder(&part.text)) {
+                    *part = caption.clone();
+                }
+            }
+        }
+        let after_first_line = edited.message.content.len().min(1);
+        edited.message.content.insert(
+            after_first_line,
+            ContentPart::Text(TextContentPart {
+                text: EDITED.to_string(),
+            }),
+        );
+        *stored = edited;
+        true
+    }
+
+    /// Replaces a deleted message with a marker: who wrote it stays, nothing of what it said or
+    /// showed. False if the message isn't in the window.
+    pub fn delete(&mut self, id: MessageId) -> bool {
+        if self
+            .latest_images
+            .as_ref()
+            .is_some_and(|images| images.message_id == id)
+        {
+            self.latest_images = None;
+        }
+        let Some(stored) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|stored| stored.id == Some(id))
+        else {
+            return false;
+        };
+
+        // User messages start with `name (<@id>): `
+        let author = match stored.message.content.first() {
+            Some(ContentPart::Text(part)) => part.text.split_once(">): ").map(|(author, _)| author),
+            _ => None,
+        };
+        let text = match author {
+            Some(author) => format!("{author}>): {DELETED}"),
+            None => DELETED.to_string(),
+        };
+        stored.images_consent = None;
+        stored.message.content = vec![ContentPart::Text(TextContentPart { text })];
+        true
+    }
+
     /// Remembers images just posted. Call after pushing their message.
-    pub fn set_latest_images(&mut self, author_name: String, urls: Vec<String>) {
+    pub fn set_latest_images(
+        &mut self,
+        message_id: MessageId,
+        author_name: String,
+        urls: Vec<String>,
+    ) {
         self.latest_images = Some(PostedImages {
+            message_id,
             author_name,
             urls,
             posted_at: Instant::now(),
@@ -339,10 +421,71 @@ mod tests {
         assert!(!context.replace_text(MessageId::new(2), "[Image]", "x".to_string()));
     }
 
+    fn with_parts(id: u64, texts: &[&str]) -> ContextMessage {
+        let mut message = user_message(id, texts[0]);
+        message.message.content = texts
+            .iter()
+            .map(|text| {
+                ContentPart::Text(TextContentPart {
+                    text: text.to_string(),
+                })
+            })
+            .collect();
+        message
+    }
+
+    #[test]
+    fn edits_replace_the_message_and_keep_its_caption() {
+        let (mut context, _) = context_with(3);
+        context.messages[1] = with_parts(1, &["alice (<@7>): look", "[Image: a cat]"]);
+
+        // Still has its image: the caption stays
+        assert!(context.edit(with_parts(1, &["alice (<@7>): look at this", "[Image]"])));
+        assert_eq!(
+            transcript_line(&context.messages[1].message),
+            "alice (<@7>): look at this [Edited] [Image: a cat]"
+        );
+
+        // Image removed in the edit: so is the caption
+        assert!(context.edit(with_parts(1, &["alice (<@7>): never mind"])));
+        assert_eq!(
+            transcript_line(&context.messages[1].message),
+            "alice (<@7>): never mind [Edited]"
+        );
+
+        assert!(!context.edit(with_parts(41, &["not in the window"])));
+    }
+
+    #[test]
+    fn deletes_keep_the_author_only() {
+        let (mut context, _) = context_with(3);
+        context.messages[1] = with_parts(1, &["alice (<@7>): secret", "[Image: a cat]"]);
+        context.messages[1].images_consent = Some(Consent::Shared);
+        context.set_latest_images(MessageId::new(2), "alice".to_string(), vec!["url".into()]);
+
+        assert!(context.delete(MessageId::new(2)));
+        assert_eq!(
+            transcript_line(&context.messages[1].message),
+            "alice (<@7>): [Deleted message]"
+        );
+        assert!(context.messages[1].images_consent.is_none());
+        assert!(context.recent_images(Instant::now()).is_none());
+
+        // Not from a user line: nothing to keep
+        assert!(context.delete(MessageId::new(1)));
+        assert_eq!(text_of(&context.messages[0].message), DELETED);
+
+        assert!(!context.delete(MessageId::new(42)));
+    }
+
     #[test]
     fn recent_images_expire_by_messages_and_time() {
         let (mut context, _) = context_with(1);
-        context.set_latest_images("globi".to_string(), vec!["url".to_string()]);
+        context.set_latest_images(
+            MessageId::new(1),
+            "globi".to_string(),
+            vec!["url".to_string()],
+        );
         let now = Instant::now();
         assert!(context.recent_images(now).is_some());
 
@@ -354,7 +497,11 @@ mod tests {
         context.push(user_message(200, "later"), 1000);
         assert!(context.recent_images(now).is_none());
 
-        context.set_latest_images("globi".to_string(), vec!["url".to_string()]);
+        context.set_latest_images(
+            MessageId::new(1),
+            "globi".to_string(),
+            vec!["url".to_string()],
+        );
         assert!(
             context
                 .recent_images(now + Duration::from_secs(4 * 60))

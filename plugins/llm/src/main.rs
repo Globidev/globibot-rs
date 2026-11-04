@@ -74,8 +74,12 @@ async fn main() -> anyhow::Result<()> {
 
     let guild_id = std::env::var("LLM_INSTALL_COMMAND_GUILD_ID")?.parse()?;
 
-    let endpoints =
-        common::endpoints::tcp_from_env([EventType::MessageCreate, EventType::InteractionCreate])?;
+    let endpoints = common::endpoints::tcp_from_env([
+        EventType::MessageCreate,
+        EventType::MessageEdit,
+        EventType::MessageDelete,
+        EventType::InteractionCreate,
+    ])?;
 
     let mut storage = RedisStorage::from_env().await?;
 
@@ -750,6 +754,7 @@ The conversation may start with a summary of older messages, starting with "[Sum
 
 Images appear as "[Image: description]" and GIFs as "[GIF: description]". When you are asked about an image, the image itself may be attached.
 "[Image not shared with the bot]" is an image you can't see: its author didn't agree to share it. Don't guess what it shows. People can share an image by pinging you in the message that has it.
+"[Edited]" follows the first line of a message its author edited: you see the edited version. "[Deleted message]" stands for a message its author deleted: don't guess what it said.
 
 You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
 Max 1 or 2 paragraphs, never more than that.
@@ -1435,7 +1440,7 @@ impl LlmPlugin {
         let urls = images.urls.clone();
 
         if let Some(context) = self.contexts_by_channel.lock().get_mut(&channel_id) {
-            context.set_latest_images(author_name.to_string(), urls.clone());
+            context.set_latest_images(message_id, author_name.to_string(), urls.clone());
         }
 
         let llm_client = self.llm_client.clone();
@@ -1465,6 +1470,102 @@ impl LlmPlugin {
                 tracing::warn!(%channel_id, "Captioned message left the context first");
             }
         });
+    }
+
+    /// How a message is kept in the context: from the guild, or a DM from one of its members.
+    /// `None` for other messages.
+    async fn render_message(
+        &self,
+        rpc: &rpc::ProtocolClient,
+        message: &Message,
+    ) -> anyhow::Result<Option<RenderedMessage>> {
+        // Messages in the configured guild, and DMs from its members
+        let is_dm = message.guild_id.is_none();
+        let nick = if is_dm {
+            let member = rpc
+                .get_member(rpc::context::current(), self.guild_id, message.author.id)
+                .await??;
+            let Some(member) = member else {
+                return Ok(None);
+            };
+            member.nick
+        } else if message.guild_id == Some(self.guild_id) {
+            message.member.as_ref().and_then(|m| m.nick.clone())
+        } else {
+            return Ok(None);
+        };
+
+        let user_name = nick.as_deref().unwrap_or(&message.author.name);
+        let user_id = message.author.id.get();
+
+        // The guild's nicknames, DMs included
+        let content_safe = rpc
+            .content_safe(
+                rpc::context::current(),
+                message.content.clone(),
+                Some(self.guild_id),
+            )
+            .await??
+            .replace("@rust-bot", "@globibot");
+
+        let images = MessageImages::of(message);
+        let has_role = self.images_role_id.is_some_and(|role| {
+            message
+                .member
+                .as_ref()
+                .is_some_and(|member| member.roles.contains(&role))
+        });
+        let images_consent = (!images.urls.is_empty())
+            .then(|| {
+                images::consent(
+                    is_dm,
+                    message.mentions_user_id(self.bot_id),
+                    message.author.id,
+                    has_role,
+                )
+            })
+            .flatten();
+        let stored = {
+            let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];
+            if let Some(replied_to) = &message.referenced_message {
+                texts.push(reply_line(replied_to, self.bot_id));
+            }
+            texts.extend(
+                images::gif_descriptions(&message.content)
+                    .into_iter()
+                    .map(|gif| format!("[GIF: {gif}]")),
+            );
+            if images.spoilers > 0 {
+                texts.push("[Spoiler image]".to_string());
+            }
+            if !images.urls.is_empty() {
+                texts.push(if images_consent.is_some() {
+                    images.placeholder().to_string()
+                } else {
+                    images::NOT_SHARED.to_string()
+                });
+            }
+            ContextMessage {
+                id: Some(message.id),
+                images_consent,
+                message: LlmMessage {
+                    role: Role::User,
+                    content: texts
+                        .into_iter()
+                        .map(|text| ContentPart::Text(TextContentPart { text }))
+                        .collect(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                },
+            }
+        };
+
+        Ok(Some(RenderedMessage {
+            stored,
+            user_name: user_name.to_string(),
+            images,
+            is_dm,
+        }))
     }
 
     async fn register_message(
@@ -1676,6 +1777,14 @@ impl Plugin for LlmPlugin {
     type EventsPolicy = HasEvents<true>;
 }
 
+/// A message as kept in the context, with what answering it needs
+struct RenderedMessage {
+    stored: ContextMessage,
+    user_name: String,
+    images: MessageImages,
+    is_dm: bool,
+}
+
 impl HandleEvents for LlmPlugin {
     type Err = anyhow::Error;
 
@@ -1732,90 +1841,20 @@ impl HandleEvents for LlmPlugin {
             }
 
             Event::MessageCreate { message } if !message.author.bot => {
-                // Messages in the configured guild, and DMs from its members
-                let is_dm = message.guild_id.is_none();
-                let nick = if is_dm {
-                    let member = rpc
-                        .get_member(rpc::context::current(), self.guild_id, message.author.id)
-                        .await??;
-                    let Some(member) = member else {
-                        return Ok(());
-                    };
-                    member.nick
-                } else if message.guild_id == Some(self.guild_id) {
-                    message.member.as_ref().and_then(|m| m.nick.clone())
-                } else {
+                let Some(RenderedMessage {
+                    stored: stored_message,
+                    user_name,
+                    images,
+                    is_dm,
+                }) = self.render_message(&rpc, &message).await?
+                else {
                     return Ok(());
                 };
+                let images_consent = stored_message.images_consent;
 
                 if !is_dm {
                     self.check_trivia_guess(&rpc, &message).await?;
                 }
-
-                let user_name = nick.as_deref().unwrap_or(&message.author.name);
-                let user_id = message.author.id.get();
-
-                // The guild's nicknames, DMs included
-                let content_safe = rpc
-                    .content_safe(
-                        rpc::context::current(),
-                        message.content.clone(),
-                        Some(self.guild_id),
-                    )
-                    .await??
-                    .replace("@rust-bot", "@globibot");
-
-                let images = MessageImages::of(&message);
-                let has_role = self.images_role_id.is_some_and(|role| {
-                    message
-                        .member
-                        .as_ref()
-                        .is_some_and(|member| member.roles.contains(&role))
-                });
-                let images_consent = (!images.urls.is_empty())
-                    .then(|| {
-                        images::consent(
-                            is_dm,
-                            message.mentions_user_id(self.bot_id),
-                            message.author.id,
-                            has_role,
-                        )
-                    })
-                    .flatten();
-                let stored_message = {
-                    let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];
-                    if let Some(replied_to) = &message.referenced_message {
-                        texts.push(reply_line(replied_to, self.bot_id));
-                    }
-                    texts.extend(
-                        images::gif_descriptions(&message.content)
-                            .into_iter()
-                            .map(|gif| format!("[GIF: {gif}]")),
-                    );
-                    if images.spoilers > 0 {
-                        texts.push("[Spoiler image]".to_string());
-                    }
-                    if !images.urls.is_empty() {
-                        texts.push(if images_consent.is_some() {
-                            images.placeholder().to_string()
-                        } else {
-                            images::NOT_SHARED.to_string()
-                        });
-                    }
-                    ContextMessage {
-                        id: Some(message.id),
-                        images_consent,
-                        message: LlmMessage {
-                            role: Role::User,
-                            content: texts
-                                .into_iter()
-                                .map(|text| ContentPart::Text(TextContentPart { text }))
-                                .collect(),
-                            tool_calls: Vec::new(),
-                            tool_call_id: None,
-                        },
-                    }
-                };
 
                 // Every DM is for the bot
                 let mentioned = is_dm || message.mentions_user_id(self.bot_id);
@@ -1832,7 +1871,7 @@ impl HandleEvents for LlmPlugin {
                 self.register_message(rpc.clone(), &message, stored_message.clone())
                     .await?;
                 if images_consent.is_some() {
-                    self.describe_images(&message, user_name, &images);
+                    self.describe_images(&message, &user_name, &images);
                 }
 
                 if let Some((context, (label, image_urls))) = answer_input {
@@ -1853,6 +1892,25 @@ impl HandleEvents for LlmPlugin {
                         ReactionType::Unicode("⏳".to_string()),
                     )
                     .await??;
+                }
+            }
+
+            Event::MessageEdit { message } if !message.author.bot => {
+                let Some(rendered) = self.render_message(&rpc, &message).await? else {
+                    return Ok(());
+                };
+                if let Some(context) = self.contexts_by_channel.lock().get_mut(&message.channel_id)
+                {
+                    context.edit(rendered.stored);
+                }
+            }
+
+            Event::MessageDelete {
+                channel_id,
+                message_id,
+            } => {
+                if let Some(context) = self.contexts_by_channel.lock().get_mut(&channel_id) {
+                    context.delete(message_id);
                 }
             }
 
