@@ -625,7 +625,15 @@ impl Protocol for Server {
 
         Ok(MessageSearchResults {
             total_results: found.total_results,
-            messages: found.messages.into_iter().flatten().collect(),
+            messages: found
+                .messages
+                .into_iter()
+                .flatten()
+                .map(|mut message| {
+                    crate::discord::drop_forwards(&mut message);
+                    message
+                })
+                .collect(),
         })
     }
 }
