@@ -269,6 +269,7 @@ fn kind_name(kind: UsageKind) -> &'static str {
         UsageKind::Caption => "image captions",
         UsageKind::ImageGeneration => "generated images",
         UsageKind::NightlyLore => "nightly lore suggestions",
+        UsageKind::ChimeInCheck => "chime-in checks",
     }
 }
 

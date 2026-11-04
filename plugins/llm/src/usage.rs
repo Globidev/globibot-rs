@@ -31,6 +31,8 @@ pub enum UsageKind {
     ImageGeneration,
     /// Lore suggested every night from a channel's messages
     NightlyLore,
+    /// Whether to join a conversation without being pinged
+    ChimeInCheck,
 }
 
 /// The `usage` object of an OpenRouter response

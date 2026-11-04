@@ -71,6 +71,8 @@ pub struct ChannelContext {
     pub messages: VecDeque<ContextMessage>,
     /// Messages pushed since startup
     pushed: u64,
+    /// When the bot's latest answer was pushed, since startup
+    last_answer_at: Option<Instant>,
     latest_images: Option<PostedImages>,
 }
 
@@ -81,6 +83,7 @@ impl ChannelContext {
             summary: None,
             messages: VecDeque::new(),
             pushed: 0,
+            last_answer_at: None,
             latest_images: None,
         }
     }
@@ -88,6 +91,9 @@ impl ChannelContext {
     /// Adds a message. Past `max_size` messages, drops the oldest ones down to 70% of it and
     /// returns them, to be merged into the summary.
     pub fn push(&mut self, message: ContextMessage, max_size: usize) -> Option<Vec<Message>> {
+        if matches!(message.message.role, Role::Assistant) {
+            self.last_answer_at = Some(Instant::now());
+        }
         self.messages.push_back(message);
         self.pushed += 1;
         if self.messages.len() <= max_size {
@@ -191,6 +197,11 @@ impl ChannelContext {
         stored.images_consent = None;
         stored.message.content = vec![ContentPart::Text(TextContentPart { text })];
         true
+    }
+
+    /// How long ago the bot last answered here, if it did since startup
+    pub fn since_last_answer(&self, now: Instant) -> Option<Duration> {
+        self.last_answer_at.map(|at| now.duration_since(at))
     }
 
     /// Remembers images just posted. Call after pushing their message.

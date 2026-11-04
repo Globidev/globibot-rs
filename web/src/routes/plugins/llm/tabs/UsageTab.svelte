@@ -19,7 +19,8 @@
     | 'caption'
     | 'direct_message'
     | 'image_generation'
-    | 'nightly_lore';
+    | 'nightly_lore'
+    | 'chime_in_check';
 
   type Usage = {
     /** Keyed by UTC day number (days since the Unix epoch) */
@@ -36,7 +37,9 @@
     { id: 'caption', name: 'Image captions', color: '#d55181' },
     { id: 'direct_message', name: 'DM replies', color: '#008300' },
     { id: 'image_generation', name: 'Generated images', color: '#9085e9' },
-    { id: 'nightly_lore', name: 'Nightly lore', color: '#e66767' }
+    { id: 'nightly_lore', name: 'Nightly lore', color: '#e66767' },
+    // Past the palette's 8 categorical slots: a neutral gray, the "Other" color. Fold any further kind in with it.
+    { id: 'chime_in_check', name: 'Chime-in checks', color: '#8a8a85' }
   ];
   const HIT_RATE_COLOR = '#9085e9';
   const KIND_NAMES = Object.fromEntries(KINDS.map((k) => [k.id, k.name])) as Record<Kind, string>;

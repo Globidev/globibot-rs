@@ -1,3 +1,4 @@
+mod chime_in;
 mod commands;
 mod context;
 mod cooldown;
@@ -24,6 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::{PrivateCookieJar, cookie::Key};
+use chime_in::{Candidate, ChimeIn};
 use commands::{
     AddToLore, AddUserContext, Hype, Llm, LlmCommands, LoreTrivia, ModelCommand, PersonalityChoice,
     PersonalityCommand, Roast, Tldr,
@@ -633,6 +635,8 @@ struct LlmPlugin {
     starboard_channel_id: Option<ChannelId>,
     /// Where lore is suggested every night, from that channel's messages
     nightly_lore_channel_id: Option<ChannelId>,
+    /// Where it may join conversations without being pinged
+    chime_in: Option<ChimeIn>,
 
     llm_client: openrouter::Client,
     storage: RedisStorage,
@@ -1119,6 +1123,10 @@ impl LlmPlugin {
                 },
                 profile_from_member,
             );
+        let chime_in = optional_env::<ChannelId>("LLM_CHIME_IN_CHANNEL_ID")?.map(|channel_id| {
+            let bot_names = vec!["globibot".to_string(), bot_profile.username.to_lowercase()];
+            ChimeIn::new(channel_id, bot_names)
+        });
 
         for member in members {
             if member.user.bot {
@@ -1172,6 +1180,7 @@ impl LlmPlugin {
             images_role_id,
             starboard_channel_id,
             nightly_lore_channel_id,
+            chime_in,
             llm_client,
             storage,
             llm_model: RwLock::new(model),
@@ -1470,6 +1479,67 @@ impl LlmPlugin {
                 tracing::warn!(%channel_id, "Captioned message left the context first");
             }
         });
+    }
+
+    /// Whether the rules let a message the bot wasn't pinged in go to the chime-in check
+    fn is_chime_in_candidate(&self, message: &Message) -> bool {
+        let Some(chime_in) = &self.chime_in else {
+            return false;
+        };
+        if message.channel_id != chime_in.channel_id {
+            return false;
+        }
+        let now = Instant::now();
+        let since_bot_spoke = self
+            .contexts_by_channel
+            .lock()
+            .get(&message.channel_id)
+            .and_then(|context| context.since_last_answer(now));
+        let candidate = Candidate {
+            text: &message.content,
+            bot_names: &chime_in.bot_names,
+            replies_to_bot: message
+                .referenced_message
+                .as_ref()
+                .is_some_and(|replied_to| replied_to.author.id == self.bot_id),
+            since_bot_spoke,
+        };
+        chime_in::is_candidate(&candidate) && chime_in.has_room(now)
+    }
+
+    /// Asks the model whether to answer a candidate message, and answers it if so and the limits
+    /// still allow. Images aren't shown: the bot wasn't pinged, so they aren't shared with it.
+    async fn maybe_chime_in(
+        &self,
+        rpc: rpc::ProtocolClient,
+        message: &Message,
+        context: Vec<LlmMessage>,
+        mut request_message: LlmMessage,
+    ) -> anyhow::Result<()> {
+        let Some(chime_in) = &self.chime_in else {
+            return Ok(());
+        };
+        let model = self.llm_model.read().clone();
+        let (answering, verdict) = chime_in::should_chime_in(
+            &self.llm_client,
+            &model,
+            message.channel_id,
+            &context,
+            &request_message,
+        )
+        .await?;
+        tracing::info!(message = %message.link(), "Chime-in check: {verdict}");
+        if !answering || !chime_in.try_take(Instant::now()) {
+            return Ok(());
+        }
+
+        request_message
+            .content
+            .push(ContentPart::Text(TextContentPart {
+                text: chime_in::ANSWER_NOTE.to_string(),
+            }));
+        self.answer_message(rpc, message, context, request_message, &[])
+            .await
     }
 
     /// How a message is kept in the context: from the guild, or a DM from one of its members.
@@ -1867,6 +1937,9 @@ impl HandleEvents for LlmPlugin {
                 } else {
                     None
                 };
+                // Not pinged: it may still join in, if the model agrees once it's registered
+                let chime_in_context = (!mentioned && self.is_chime_in_candidate(&message))
+                    .then(|| self.context_for_channel(message.channel_id));
 
                 self.register_message(rpc.clone(), &message, stored_message.clone())
                     .await?;
@@ -1892,6 +1965,9 @@ impl HandleEvents for LlmPlugin {
                         ReactionType::Unicode("⏳".to_string()),
                     )
                     .await??;
+                } else if let Some(context) = chime_in_context {
+                    self.maybe_chime_in(rpc, &message, context, stored_message.message)
+                        .await?;
                 }
             }
 
