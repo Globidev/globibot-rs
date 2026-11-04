@@ -280,6 +280,7 @@ impl Protocol for Server {
         content: String,
         guild_id: Option<GuildId>,
     ) -> DiscordApiResult<String> {
+        #[expect(deprecated, reason = "it still defaults to showing them")]
         let mut opts = ContentSafeOptions::new().show_discriminator(false);
         if let Some(gid) = guild_id {
             opts = opts.display_as_member_from(gid);
@@ -738,6 +739,24 @@ fn same_json(ours: &serde_json::Value, theirs: &serde_json::Value, strict: bool)
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    /// Other bots post Components V2 messages (containers, sections): serenity < 0.12.5 failed
+    /// to parse them, which broke whole message searches
+    #[test]
+    fn components_v2_messages_parse() {
+        let message = json!({
+            "id": "30", "channel_id": "20", "content": "", "flags": 32772,
+            "timestamp": "2026-11-03T18:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0,
+            "author": { "id": "1", "username": "robin", "avatar": null, "discriminator": "0" },
+            "components": [
+                { "type": 17, "components": [{ "type": 9, "components": [{ "type": 10, "content": "hi" }] }] },
+                { "type": 10, "content": "hello" }
+            ],
+        });
+        serde_json::from_value::<Message>(message).unwrap();
+    }
 
     /// What Discord returns for `/tldr`: its own fields, defaults left out
     fn discord_tldr() -> Value {
