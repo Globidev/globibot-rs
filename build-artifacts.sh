@@ -10,5 +10,5 @@ docker run \
     -v '.:/usr/src/globibot/' \
     -v 'globibot-target:/usr/src/globibot/target' \
     -v 'globibot-registry:/usr/local/cargo/registry' \
-    -e RUSTFLAGS='-C target-feature=-crt-static' \
+    -e RUSTFLAGS='-C target-feature=-crt-static -C link-arg=-fuse-ld=mold' \
     globibot-builder sh ./build.sh

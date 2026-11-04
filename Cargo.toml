@@ -42,3 +42,7 @@ uuid = { version = "1.19", features = ["v4", "serde", "fast-rng"] }
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Recompiles only what changed in our own crates: a bit less optimized, much faster to rebuild
+[profile.release]
+incremental = true
