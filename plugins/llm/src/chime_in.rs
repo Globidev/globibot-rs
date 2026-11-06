@@ -31,11 +31,11 @@ const CLASSIFIER_PROMPT: &str = "You decide whether Globibot, a bot in a Discord
     join the conversation on its own, without being pinged. You get the latest messages, the \
     last one being the one to decide on.
 
-    Answer YES only when that last message invites the bot in: someone talks to it or about it \
+    Answer YES when that last message invites the bot in: someone talks to it or about it \
     and would welcome an answer, asks for its take, follows up on what it just said, or asks the \
-    room a question nobody is answering and the bot can help. Answer NO when people are talking \
-    among themselves, joking with each other, or when a reply would interrupt. When unsure, \
-    answer NO.
+    room a question nobody is answering and the bot can help. Also answer YES when the bot has \
+    something useful or funny to add that the people talking would likely enjoy. Answer NO when \
+    people are talking among themselves privately, or when a reply would interrupt.
 
     Reply with YES or NO, then a short reason on the same line.";
 
