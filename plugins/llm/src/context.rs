@@ -37,6 +37,8 @@ pub const DELETED: &str = "[Deleted message]";
 /// How far back a ping can look for an image when it has none of its own
 const RECENT_IMAGE_MAX_MESSAGES: u64 = 10;
 const RECENT_IMAGE_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+/// How far back a ping sees the latest embed post
+const RECENT_EMBEDS_MAX_MESSAGES: u64 = 10;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextMessage {
@@ -64,6 +66,16 @@ pub struct PostedImages {
     position: u64,
 }
 
+/// The latest post made of embeds, e.g. patch notes from a followed announcement channel. Not
+/// kept in the window (too long): only shown to pings shortly after it. Not saved.
+#[derive(Debug, Clone)]
+struct PostedEmbeds {
+    message_id: MessageId,
+    text: String,
+    /// The channel's message count when it was posted
+    position: u64,
+}
+
 #[derive(Debug)]
 pub struct ChannelContext {
     pub channel: Channel,
@@ -74,6 +86,7 @@ pub struct ChannelContext {
     /// When the bot's latest answer was pushed, since startup
     last_answer_at: Option<Instant>,
     latest_images: Option<PostedImages>,
+    latest_embeds: Option<PostedEmbeds>,
 }
 
 impl ChannelContext {
@@ -85,6 +98,7 @@ impl ChannelContext {
             pushed: 0,
             last_answer_at: None,
             latest_images: None,
+            latest_embeds: None,
         }
     }
 
@@ -176,6 +190,13 @@ impl ChannelContext {
         {
             self.latest_images = None;
         }
+        if self
+            .latest_embeds
+            .as_ref()
+            .is_some_and(|embeds| embeds.message_id == id)
+        {
+            self.latest_embeds = None;
+        }
         let Some(stored) = self
             .messages
             .iter_mut()
@@ -226,6 +247,23 @@ impl ChannelContext {
             self.pushed - images.position < RECENT_IMAGE_MAX_MESSAGES
                 && now.duration_since(images.posted_at) <= RECENT_IMAGE_MAX_AGE
         })
+    }
+
+    /// Remembers an embed post. It isn't pushed: the messages after it count from here.
+    pub fn set_latest_embeds(&mut self, message_id: MessageId, text: String) {
+        self.latest_embeds = Some(PostedEmbeds {
+            message_id,
+            text,
+            position: self.pushed,
+        });
+    }
+
+    /// The latest embed post's text, if fewer than 10 messages came after it
+    pub fn recent_embeds(&self) -> Option<&str> {
+        self.latest_embeds
+            .as_ref()
+            .filter(|embeds| self.pushed - embeds.position < RECENT_EMBEDS_MAX_MESSAGES)
+            .map(|embeds| embeds.text.as_str())
     }
 
     /// What's sent to the model: the summary first, then the messages.
@@ -523,6 +561,24 @@ mod tests {
                 .recent_images(now + Duration::from_secs(6 * 60))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn recent_embeds_expire_by_messages_and_deletion() {
+        let (mut context, _) = context_with(1);
+        context.set_latest_embeds(MessageId::new(50), "patch notes".to_string());
+        assert_eq!(context.recent_embeds(), Some("patch notes"));
+
+        for i in 0..9 {
+            context.push(user_message(100 + i, "later"), 1000);
+        }
+        assert!(context.recent_embeds().is_some());
+        context.push(user_message(200, "later"), 1000);
+        assert!(context.recent_embeds().is_none());
+
+        context.set_latest_embeds(MessageId::new(50), "patch notes".to_string());
+        context.delete(MessageId::new(50));
+        assert!(context.recent_embeds().is_none());
     }
 
     #[test]

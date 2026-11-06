@@ -1910,6 +1910,19 @@ impl HandleEvents for LlmPlugin {
                 self.comment_on_starboard(rpc, &message).await?
             }
 
+            // Webhook posts, e.g. from a followed announcement channel: kept aside for pings soon
+            // after, not in the window
+            Event::MessageCreate { message }
+                if message.webhook_id.is_some()
+                    && message.guild_id == Some(self.guild_id)
+                    && !message.embeds.is_empty() =>
+            {
+                if let Some(context) = self.contexts_by_channel.lock().get_mut(&message.channel_id)
+                {
+                    context.set_latest_embeds(message.id, embed_post_text(&message));
+                }
+            }
+
             Event::MessageCreate { message } if !message.author.bot => {
                 let Some(RenderedMessage {
                     stored: stored_message,
@@ -1933,7 +1946,13 @@ impl HandleEvents for LlmPlugin {
                 // Taken before this message is added, which is sent separately with its images
                 let answer_input = if answering {
                     let context = self.context_for_channel(message.channel_id);
-                    Some((context, self.images_to_show(&rpc, &message, &images).await))
+                    let embeds = self
+                        .contexts_by_channel
+                        .lock()
+                        .get(&message.channel_id)
+                        .and_then(|context| context.recent_embeds().map(str::to_string));
+                    let images = self.images_to_show(&rpc, &message, &images).await;
+                    Some((context, embeds, images))
                 } else {
                     None
                 };
@@ -1947,8 +1966,13 @@ impl HandleEvents for LlmPlugin {
                     self.describe_images(&message, &user_name, &images);
                 }
 
-                if let Some((context, (label, image_urls))) = answer_input {
+                if let Some((context, embeds, (label, image_urls))) = answer_input {
                     let mut request_message = stored_message.message;
+                    if let Some(text) = embeds {
+                        request_message
+                            .content
+                            .push(ContentPart::Text(TextContentPart { text }));
+                    }
                     if let Some(label) = label {
                         request_message
                             .content
@@ -1997,9 +2021,48 @@ impl HandleEvents for LlmPlugin {
     }
 }
 
+/// The text of a webhook post: its content, then each embed's title, description and fields.
+/// Discord caps embeds at 6000 characters per message.
+fn embed_post_text(message: &Message) -> String {
+    let mut lines = vec![format!("[Recent post by {}]", message.author.name)];
+    lines.push(message.content.clone());
+    for embed in &message.embeds {
+        lines.extend(embed.title.clone());
+        lines.extend(embed.description.clone());
+        lines.extend(
+            embed
+                .fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, field.value)),
+        );
+    }
+    lines.retain(|line| !line.trim().is_empty());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embed_posts_keep_titles_descriptions_and_fields() {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "1", "channel_id": "2", "content": "",
+            "author": { "id": "3", "username": "Deadlock #announcements", "discriminator": "0000" },
+            "timestamp": "2026-11-05T06:10:00Z", "edited_timestamp": null, "tts": false,
+            "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [],
+            "pinned": false, "type": 0, "webhook_id": "4",
+            "embeds": [{
+                "title": "Minor Update", "description": "- Healbane: nerfed",
+                "fields": [{ "name": "Note", "value": "more soon", "inline": false }]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            embed_post_text(&message),
+            "[Recent post by Deadlock #announcements]\nMinor Update\n- Healbane: nerfed\nNote: more soon"
+        );
+    }
 
     #[test]
     fn replies_say_who_and_what() {
