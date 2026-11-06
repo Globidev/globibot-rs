@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   type Reminder = {
     id: number;
     /** Unix seconds */
@@ -23,7 +24,7 @@
   async function load() {
     try {
       const res = await fetch('/plugin-api/llm/reminders');
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await errorText(res));
       data = await res.json();
     } catch (err) {
       error = (err as Error).message;
@@ -42,7 +43,7 @@
       body: JSON.stringify({ id })
     });
     // Also when it was just sent: reload either way
-    if (!res.ok && res.status !== 404) error = await res.text();
+    if (!res.ok && res.status !== 404) error = await errorText(res);
     await load();
   }
 

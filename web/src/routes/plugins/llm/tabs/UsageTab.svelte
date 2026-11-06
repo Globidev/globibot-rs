@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   import StackedBars from '../../../../lib/components/StackedBars.svelte';
 
   type Totals = {
@@ -51,7 +52,7 @@
 
   async function loadUsage(): Promise<Usage> {
     const res = await fetch('/plugin-api/llm/usage');
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   }
 
@@ -61,7 +62,7 @@
 
   async function loadCredits(): Promise<Credits> {
     const res = await fetch('/plugin-api/llm/credits');
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   }
 

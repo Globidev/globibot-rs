@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   type Data = {
     model: string;
     prompt: string;
@@ -38,7 +39,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await errorText(res));
       const newData = await res.json();
       currentDataJson = JSON.stringify(newData);
       status = 'saved';

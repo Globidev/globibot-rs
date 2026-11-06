@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   type Data = {
     personality: string;
     available_personalities: string[];
@@ -26,7 +27,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await errorText(res));
       const newData: Data = await res.json();
       formData = newData;
       status = 'saved';

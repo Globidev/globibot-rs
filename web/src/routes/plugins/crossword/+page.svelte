@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   import DiscordLogin from '../../../lib/components/DiscordLogin.svelte';
   import { authStore } from '../../../lib/stores/auth.svelte';
 
@@ -33,7 +34,7 @@
 
   async function loadLeaderboard(): Promise<Leaderboard> {
     const res = await fetch('/plugin-api/crossword/leaderboard');
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   }
 

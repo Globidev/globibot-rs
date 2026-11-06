@@ -1,3 +1,4 @@
+import { errorText } from '$lib/errorText';
 class AuthStore {
   user = $state<DiscordMember | null>(null);
   initialized = $state(false);
@@ -29,7 +30,7 @@ class AuthStore {
         body: JSON.stringify({ code, state })
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await errorText(response));
       }
       const member: DiscordMember = await response.json();
       this.user = member;

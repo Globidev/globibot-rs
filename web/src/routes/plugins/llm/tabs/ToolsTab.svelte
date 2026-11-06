@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   type Totals = {
     requests: number;
     prompt_tokens: number;
@@ -37,13 +38,13 @@
 
   async function loadTraces(): Promise<{ traces: Trace[] }> {
     const res = await fetch('/plugin-api/llm/tool-traces');
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   }
 
   async function loadTools(): Promise<ToolDefinition[]> {
     const res = await fetch('/plugin-api/llm/tools');
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   }
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '$lib/errorText';
   import { authStore, type DiscordMember } from '../../../../lib/stores/auth.svelte';
 
   type Data = {
@@ -52,7 +53,7 @@
   async function load(): Promise<void> {
     const res = await fetch('/plugin-api/llm/lore');
     if (!res.ok) {
-      loadError = await res.text();
+      loadError = await errorText(res);
       return;
     }
     const loaded: Data = await res.json();
@@ -93,7 +94,7 @@
       body: JSON.stringify(body)
     });
     if (!res.ok) {
-      errors[userId] = await res.text();
+      errors[userId] = await errorText(res);
       return false;
     }
     data = await res.json();
