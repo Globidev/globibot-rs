@@ -12,6 +12,7 @@
   };
 
   type UserLoreSuggestion = {
+    id: number;
     member: DiscordMember;
     suggestion: string;
     suggestion_by: DiscordMember;
@@ -114,11 +115,11 @@
   }
 
   function vote(userId: string, sug: UserLoreSuggestion, vote: SuggestionVote) {
-    post('vote', { for_user_id: userId, by_user_id: sug.suggestion_by.user_id, vote }, userId);
+    post('vote', { for_user_id: userId, suggestion_id: sug.id, vote }, userId);
   }
 
   function accept(userId: string, sug: UserLoreSuggestion) {
-    post('accept', { for_user_id: userId, by_user_id: sug.suggestion_by.user_id }, userId);
+    post('accept', { for_user_id: userId, suggestion_id: sug.id }, userId);
   }
 
   function voteCount(sug: UserLoreSuggestion, vote: SuggestionVote): number {
@@ -310,7 +311,7 @@
             <p class="text-xs text-red-400">⚠ {errors[userId]}</p>
           {/if}
 
-          {#each suggestions as sug (sug.suggestion_by.user_id)}
+          {#each suggestions as sug (sug.id)}
             {@const isAddition = sug.kind === 'Append'}
             {@const isMine = sug.suggestion_by.user_id === currentUserId}
             <div

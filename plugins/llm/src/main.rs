@@ -97,11 +97,12 @@ async fn main() -> anyhow::Result<()> {
 
         // Only default when the key is missing: a read or decode error must not lead to the
         // periodic save overwriting the stored lore book with an empty one
-        let lore_book = storage
+        let mut lore_book = storage
             .get_opt::<LoreBook>("latest")
             .await
             .context("Failed to load LLM lore book")?
             .unwrap_or_default();
+        lore_book.number_old_suggestions();
         let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
         let settings = storage
             .get_opt::<LlmSettings>(SETTINGS_KEY)
@@ -486,7 +487,7 @@ async fn llm_lore_suggest(
 #[derive(Debug, serde::Deserialize)]
 struct LlmLoreVoteRequest {
     for_user_id: UserId,
-    by_user_id: UserId,
+    suggestion_id: u64,
     vote: SuggestionVote,
 }
 
@@ -495,44 +496,18 @@ async fn llm_lore_vote(
     Extension(profile): Extension<DiscordProfile>,
     Json(vote_req): Json<LlmLoreVoteRequest>,
 ) -> impl IntoResponse {
-    if profile.user_id == vote_req.by_user_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            "You cannot vote on your own suggestions",
-        )
-            .into_response();
-    }
-
-    {
-        let mut lore_book = llm_plugin.lore_book.write();
-        let suggestions = match lore_book.suggestions_by_user.get_mut(&vote_req.for_user_id) {
-            Some(suggestions) => suggestions,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "No suggestions found for the specified user",
-                )
-                    .into_response();
-            }
-        };
-
-        let suggestion = match suggestions
-            .iter_mut()
-            .find(|s| s.suggestion_by.user_id == vote_req.by_user_id)
-        {
-            Some(suggestion) => suggestion,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "No suggestion found from the specified user",
-                )
-                    .into_response();
-            }
-        };
-
-        suggestion
-            .votes_by_user_id
-            .insert(profile.user_id, vote_req.vote);
+    let LlmLoreVoteRequest {
+        for_user_id,
+        suggestion_id,
+        vote,
+    } = vote_req;
+    let vote_result =
+        llm_plugin
+            .lore_book
+            .write()
+            .vote(for_user_id, suggestion_id, profile.user_id, vote);
+    if let Err(why) = vote_result {
+        return (StatusCode::BAD_REQUEST, why).into_response();
     }
 
     llm_lore(State(llm_plugin)).await.into_response()
@@ -541,7 +516,7 @@ async fn llm_lore_vote(
 #[derive(Debug, serde::Deserialize)]
 struct LoreAcceptRequest {
     for_user_id: UserId,
-    by_user_id: UserId,
+    suggestion_id: u64,
 }
 
 async fn llm_lore_accept(
@@ -557,40 +532,12 @@ async fn llm_lore_accept(
             .into_response();
     }
 
-    {
-        let mut lore_book = llm_plugin.lore_book.write();
-        let suggestions = match lore_book
-            .suggestions_by_user
-            .get_mut(&accept_req.for_user_id)
-        {
-            Some(suggestions) => suggestions,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "No suggestions found for the specified user",
-                )
-                    .into_response();
-            }
-        };
-
-        let suggestion_index = match suggestions
-            .iter()
-            .position(|s| s.suggestion_by.user_id == accept_req.by_user_id)
-        {
-            Some(index) => index,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "No suggestion found from the specified user",
-                )
-                    .into_response();
-            }
-        };
-
-        let suggestion = suggestions.remove(suggestion_index);
-        if let Some(user_lore) = lore_book.lore_by_user.get_mut(&accept_req.for_user_id) {
-            user_lore.lore = suggestion.applied_to(&user_lore.lore);
-        }
+    let accept_result = llm_plugin
+        .lore_book
+        .write()
+        .accept(accept_req.for_user_id, accept_req.suggestion_id);
+    if let Err(why) = accept_result {
+        return (StatusCode::BAD_REQUEST, why).into_response();
     }
 
     llm_lore(State(llm_plugin)).await.into_response()
@@ -738,6 +685,9 @@ impl PersonalityRegistry {
 struct LoreBook {
     lore_by_user: HashMap<UserId, UserLore>,
     suggestions_by_user: HashMap<UserId, Vec<UserLoreSuggestion>>,
+    /// The latest suggestion id given. Ids start at 1: 0 is a suggestion saved before ids.
+    #[serde(default)]
+    last_suggestion_id: u64,
 }
 
 impl StorageValue for LoreBook {
@@ -812,8 +762,8 @@ impl LoreBook {
         prompt
     }
 
-    /// Creates or replaces `suggestion_by`'s suggestion for `for_user_id`'s lore with a complete
-    /// new lore
+    /// Suggests a complete new lore for `for_user_id`. Replaces `suggestion_by`'s pending rewrite
+    /// for that user, if any: one rewrite each.
     fn suggest(
         &mut self,
         for_user_id: UserId,
@@ -822,11 +772,17 @@ impl LoreBook {
     ) -> Result<(), &'static str> {
         let suggestion = self.check_suggestion(for_user_id, &suggestion_by, suggestion)?;
 
-        match self.pending_suggestion_mut(for_user_id, suggestion_by.user_id) {
-            Some(existing_suggestion) => {
-                existing_suggestion.suggestion = suggestion.to_string();
-                existing_suggestion.kind = SuggestionKind::Replace;
-            }
+        let pending_rewrite =
+            self.suggestions_by_user
+                .get_mut(&for_user_id)
+                .and_then(|suggestions| {
+                    suggestions.iter_mut().find(|s| {
+                        s.suggestion_by.user_id == suggestion_by.user_id
+                            && s.kind == SuggestionKind::Replace
+                    })
+                });
+        match pending_rewrite {
+            Some(rewrite) => rewrite.suggestion = suggestion.to_string(),
             None => self.push_suggestion(
                 for_user_id,
                 suggestion_by,
@@ -839,7 +795,7 @@ impl LoreBook {
     }
 
     /// Suggests adding `addition` to `for_user_id`'s lore, without replacing what's already there.
-    /// If `suggestion_by` already has a pending suggestion for that user, `addition` is added to it
+    /// Each addition is its own suggestion, voted on and accepted on its own.
     fn suggest_addition(
         &mut self,
         for_user_id: UserId,
@@ -847,17 +803,54 @@ impl LoreBook {
         addition: &str,
     ) -> Result<(), &'static str> {
         let addition = self.check_suggestion(for_user_id, &suggestion_by, addition)?;
+        self.push_suggestion(for_user_id, suggestion_by, addition, SuggestionKind::Append);
+        Ok(())
+    }
 
-        match self.pending_suggestion_mut(for_user_id, suggestion_by.user_id) {
-            Some(existing_suggestion) => {
-                existing_suggestion.suggestion =
-                    append_lore(&existing_suggestion.suggestion, addition);
-            }
-            None => {
-                self.push_suggestion(for_user_id, suggestion_by, addition, SuggestionKind::Append)
+    /// Gives an id to suggestions saved before they had one
+    fn number_old_suggestions(&mut self) {
+        for suggestion in self.suggestions_by_user.values_mut().flatten() {
+            if suggestion.id == 0 {
+                self.last_suggestion_id += 1;
+                suggestion.id = self.last_suggestion_id;
             }
         }
+    }
 
+    /// Sets `voter`'s vote on a suggestion. Not on their own.
+    fn vote(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_id: u64,
+        voter: UserId,
+        vote: SuggestionVote,
+    ) -> Result<(), &'static str> {
+        let suggestion = self
+            .suggestions_by_user
+            .get_mut(&for_user_id)
+            .and_then(|suggestions| suggestions.iter_mut().find(|s| s.id == suggestion_id))
+            .ok_or(NO_SUCH_SUGGESTION)?;
+        if suggestion.suggestion_by.user_id == voter {
+            return Err("You cannot vote on your own suggestions");
+        }
+        suggestion.votes_by_user_id.insert(voter, vote);
+        Ok(())
+    }
+
+    /// Applies a suggestion to the lore and removes it
+    fn accept(&mut self, for_user_id: UserId, suggestion_id: u64) -> Result<(), &'static str> {
+        let suggestions = self
+            .suggestions_by_user
+            .get_mut(&for_user_id)
+            .ok_or(NO_SUCH_SUGGESTION)?;
+        let index = suggestions
+            .iter()
+            .position(|s| s.id == suggestion_id)
+            .ok_or(NO_SUCH_SUGGESTION)?;
+        let suggestion = suggestions.remove(index);
+        if let Some(user_lore) = self.lore_by_user.get_mut(&for_user_id) {
+            user_lore.lore = suggestion.applied_to(&user_lore.lore);
+        }
         Ok(())
     }
 
@@ -884,17 +877,6 @@ impl LoreBook {
         Ok(suggestion)
     }
 
-    fn pending_suggestion_mut(
-        &mut self,
-        for_user_id: UserId,
-        by_user_id: UserId,
-    ) -> Option<&mut UserLoreSuggestion> {
-        self.suggestions_by_user
-            .get_mut(&for_user_id)?
-            .iter_mut()
-            .find(|s| s.suggestion_by.user_id == by_user_id)
-    }
-
     fn push_suggestion(
         &mut self,
         for_user_id: UserId,
@@ -906,10 +888,12 @@ impl LoreBook {
             return;
         };
 
+        self.last_suggestion_id += 1;
         self.suggestions_by_user
             .entry(for_user_id)
             .or_default()
             .push(UserLoreSuggestion {
+                id: self.last_suggestion_id,
                 member: user_lore.member.clone(),
                 suggestion: suggestion.to_string(),
                 suggestion_by,
@@ -927,6 +911,9 @@ struct UserLore {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct UserLoreSuggestion {
+    /// 0 until numbered, for suggestions saved before ids
+    #[serde(default)]
+    id: u64,
     member: DiscordProfile,
     suggestion: String,
     suggestion_by: DiscordProfile,
@@ -955,6 +942,8 @@ enum SuggestionKind {
     /// The suggestion is added to whatever the lore is when it gets accepted
     Append,
 }
+
+const NO_SUCH_SUGGESTION: &str = "No such suggestion: it may have been accepted already";
 
 fn append_lore(lore: &str, addition: &str) -> String {
     let lore = lore.trim();
@@ -2133,18 +2122,12 @@ mod tests {
         lore_book
     }
 
-    fn accept(lore_book: &mut LoreBook, by_user_id: u64) {
-        let suggestions = lore_book
-            .suggestions_by_user
-            .get_mut(&UserId::new(1))
-            .unwrap();
-        let index = suggestions
+    /// The ids of user 1's pending suggestions, oldest first
+    fn suggestion_ids(lore_book: &LoreBook) -> Vec<u64> {
+        lore_book.suggestions_by_user[&UserId::new(1)]
             .iter()
-            .position(|s| s.suggestion_by.user_id == UserId::new(by_user_id))
-            .unwrap();
-        let suggestion = suggestions.remove(index);
-        let user_lore = lore_book.lore_by_user.get_mut(&UserId::new(1)).unwrap();
-        user_lore.lore = suggestion.applied_to(&user_lore.lore);
+            .map(|s| s.id)
+            .collect()
     }
 
     fn lore(lore_book: &LoreBook) -> &str {
@@ -2161,25 +2144,82 @@ mod tests {
             .suggest(UserId::new(1), profile(3), "Likes dogs.")
             .unwrap();
 
-        accept(&mut lore_book, 3);
-        accept(&mut lore_book, 2);
+        let [addition, rewrite] = suggestion_ids(&lore_book)[..] else {
+            panic!("expected 2 suggestions")
+        };
+        lore_book.accept(UserId::new(1), rewrite).unwrap();
+        lore_book.accept(UserId::new(1), addition).unwrap();
 
         assert_eq!(lore(&lore_book), "Likes dogs. Hates mondays");
     }
 
     #[test]
-    fn additions_from_the_same_user_accumulate() {
+    fn additions_from_the_same_user_stay_separate() {
         let mut lore_book = lore_book_with("");
+        for fact in ["Likes cats", "Hates mondays"] {
+            lore_book
+                .suggest_addition(UserId::new(1), profile(2), fact)
+                .unwrap();
+        }
+        let ids = suggestion_ids(&lore_book);
+        assert_eq!(ids, [1, 2]);
+
+        lore_book.accept(UserId::new(1), 2).unwrap();
+        assert_eq!(lore(&lore_book), "Hates mondays");
+        assert_eq!(suggestion_ids(&lore_book), [1]);
+        assert!(lore_book.accept(UserId::new(1), 2).is_err());
+    }
+
+    #[test]
+    fn a_new_rewrite_replaces_the_pending_one() {
+        let mut lore_book = lore_book_with("Likes cats");
         lore_book
-            .suggest_addition(UserId::new(1), profile(2), "Likes cats")
+            .suggest(UserId::new(1), profile(2), "Likes dogs")
             .unwrap();
         lore_book
             .suggest_addition(UserId::new(1), profile(2), "Hates mondays")
             .unwrap();
+        lore_book
+            .suggest(UserId::new(1), profile(2), "Likes birds")
+            .unwrap();
 
-        accept(&mut lore_book, 2);
+        let suggestions = &lore_book.suggestions_by_user[&UserId::new(1)];
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0].suggestion, "Likes birds");
+    }
 
-        assert_eq!(lore(&lore_book), "Likes cats. Hates mondays");
+    #[test]
+    fn votes_go_to_one_suggestion_and_not_your_own() {
+        let mut lore_book = lore_book_with("");
+        for fact in ["Likes cats", "Hates mondays"] {
+            lore_book
+                .suggest_addition(UserId::new(1), profile(2), fact)
+                .unwrap();
+        }
+        lore_book
+            .vote(UserId::new(1), 2, UserId::new(3), SuggestionVote::Up)
+            .unwrap();
+        let suggestions = &lore_book.suggestions_by_user[&UserId::new(1)];
+        assert!(suggestions[0].votes_by_user_id.is_empty());
+        assert_eq!(suggestions[1].votes_by_user_id.len(), 1);
+
+        let own = lore_book.vote(UserId::new(1), 2, UserId::new(2), SuggestionVote::Up);
+        assert!(own.is_err());
+    }
+
+    #[test]
+    fn old_suggestions_get_ids_on_load() {
+        let json = serde_json::json!({
+            "lore_by_user": {},
+            "suggestions_by_user": { "1": [
+                { "member": profile(1), "suggestion": "a", "suggestion_by": profile(2), "votes_by_user_id": {} },
+                { "member": profile(1), "suggestion": "b", "suggestion_by": profile(3), "votes_by_user_id": {} }
+            ] }
+        });
+        let mut lore_book: LoreBook = serde_json::from_value(json).unwrap();
+        lore_book.number_old_suggestions();
+        assert_eq!(suggestion_ids(&lore_book), [1, 2]);
+        assert_eq!(lore_book.last_suggestion_id, 2);
     }
 
     #[test]
