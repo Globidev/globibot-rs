@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use serde_json::Value;
 
 use crate::{
-    LlmPlugin, LoreBook,
+    LlmPlugin, LoreBook, LoreSource,
     context::clamp_chars,
     image_generation::GenerateImage,
     images,
@@ -411,6 +411,7 @@ impl Tool for SuggestLore {
             &ctx.plugin.bot_profile,
             &self.user_id,
             &self.fact,
+            LoreSource::Chat,
         );
         ToolOutput::text(suggested.map_or_else(|why| why, |_| SUGGESTED.to_string()))
     }
@@ -436,6 +437,7 @@ pub fn suggest_lore(
     bot: &DiscordProfile,
     user_id: &str,
     fact: &str,
+    source: LoreSource,
 ) -> Result<UserId, String> {
     let Some(parsed_id) = parse_user_id(user_id) else {
         return Err(format!("{user_id}: not a user id"));
@@ -445,7 +447,7 @@ pub fn suggest_lore(
     }
     lore_book
         .write()
-        .suggest_addition(parsed_id, bot.clone(), fact)
+        .suggest_fact(parsed_id, bot.clone(), fact, source)
         .map_err(str::to_string)?;
     Ok(parsed_id)
 }
@@ -455,13 +457,15 @@ fn parse_user_id(id: &str) -> Option<UserId> {
     parse_id(id).map(UserId::new)
 }
 
+/// The lore tools read every fact, outdated ones marked: deeper than the system prompt
 impl LoreBook {
     fn lore_line(&self, user_id: UserId) -> String {
         match self.lore_by_user.get(&user_id) {
-            Some(user_lore) if !user_lore.lore.trim().is_empty() => {
+            Some(user_lore) if !user_lore.facts.is_empty() => {
                 format!(
                     "{} (<@{user_id}>): {}",
-                    user_lore.member.username, user_lore.lore
+                    user_lore.member.username,
+                    user_lore.text(true)
                 )
             }
             Some(user_lore) => format!("{} (<@{user_id}>): no lore", user_lore.member.username),
@@ -483,19 +487,19 @@ impl LoreBook {
         let matches = self
             .lore_by_user
             .values()
-            .filter(|user_lore| !user_lore.lore.trim().is_empty())
-            .filter(|user_lore| {
-                let haystack =
-                    format!("{} {}", user_lore.member.username, user_lore.lore).to_lowercase();
+            .filter(|user_lore| !user_lore.facts.is_empty())
+            .map(|user_lore| (user_lore, user_lore.text(true)))
+            .filter(|(user_lore, lore)| {
+                let haystack = format!("{} {lore}", user_lore.member.username).to_lowercase();
                 words.iter().any(|word| haystack.contains(word))
             })
             .take(MAX_SEARCH_RESULTS);
-        for user_lore in matches {
+        for (user_lore, lore) in matches {
             let user_id = user_lore.member.user_id;
             writeln!(
                 found,
-                "{} (<@{user_id}>): {}",
-                user_lore.member.username, user_lore.lore
+                "{} (<@{user_id}>): {lore}",
+                user_lore.member.username
             )
             .ok();
         }
@@ -513,7 +517,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{SuggestionKind, UserLore};
+    use crate::UserLore;
 
     fn profile(id: u64, name: &str) -> DiscordProfile {
         DiscordProfile {
@@ -530,14 +534,11 @@ mod tests {
             (2, "Bob", ""),
             (3, "Pizzaman", "Hates mondays"),
         ] {
-            lore_book.lore_by_user.insert(
-                UserId::new(id),
-                UserLore {
-                    member: profile(id, name),
-                    lore: lore.to_string(),
-                },
-            );
+            let mut user_lore = UserLore::new(profile(id, name));
+            user_lore.lore = lore.to_string();
+            lore_book.lore_by_user.insert(UserId::new(id), user_lore);
         }
+        lore_book.migrate();
         RwLock::new(lore_book)
     }
 
@@ -546,10 +547,14 @@ mod tests {
         match LlmTool::parse(name, &args.to_string()) {
             Ok(LlmTool::GetLore(GetLore { user_ids })) => get_lore(lore_book, &user_ids),
             Ok(LlmTool::SearchLore(SearchLore { query })) => lore_book.read().search(&query),
-            Ok(LlmTool::SuggestLore(SuggestLore { user_id, fact })) => {
-                suggest_lore(lore_book, &profile(99, "Globibot"), &user_id, &fact)
-                    .map_or_else(|why| why, |_| SUGGESTED.to_string())
-            }
+            Ok(LlmTool::SuggestLore(SuggestLore { user_id, fact })) => suggest_lore(
+                lore_book,
+                &profile(99, "Globibot"),
+                &user_id,
+                &fact,
+                LoreSource::Chat,
+            )
+            .map_or_else(|why| why, |_| SUGGESTED.to_string()),
             Ok(other) => panic!("not a lore tool: {other:?}"),
             Err(err) => err,
         }
@@ -610,9 +615,13 @@ mod tests {
         let suggestion = &lore_book.suggestions_by_user[&UserId::new(1)][0];
         assert_eq!(suggestion.suggestion, "Has two cats");
         assert_eq!(suggestion.suggestion_by.user_id, UserId::new(99));
-        assert_eq!(suggestion.kind, SuggestionKind::Append);
+        assert_eq!(suggestion.fact_id, None);
+        assert_eq!(suggestion.source, Some(LoreSource::Chat));
         // Not applied until accepted
-        assert_eq!(lore_book.lore_by_user[&UserId::new(1)].lore, "Loves CATS");
+        assert_eq!(
+            lore_book.lore_by_user[&UserId::new(1)].text(true),
+            "Loves CATS"
+        );
     }
 
     #[test]

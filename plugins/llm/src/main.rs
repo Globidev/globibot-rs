@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to load LLM lore book")?
             .unwrap_or_default();
-        lore_book.number_old_suggestions();
+        lore_book.migrate();
         let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
         let settings = storage
             .get_opt::<LlmSettings>(SETTINGS_KEY)
@@ -238,6 +238,8 @@ impl WebServer {
             .route("/lore/suggest", axum::routing::post(llm_lore_suggest))
             .route("/lore/vote", axum::routing::post(llm_lore_vote))
             .route("/lore/accept", axum::routing::post(llm_lore_accept))
+            .route("/lore/dismiss", axum::routing::post(llm_lore_dismiss))
+            .route("/lore/outdated", axum::routing::post(llm_lore_outdated))
             .with_state(self.clone())
             .layer(middleware::from_fn_with_state(self, discord_auth));
 
@@ -448,9 +450,9 @@ async fn llm_lore(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse
 struct LlmLoreSuggestionRequest {
     for_user_id: UserId,
     suggestion: String,
-    /// `Append` adds `suggestion` to the lore, `Replace` makes it the whole new lore
+    /// The fact to rewrite. Absent: a new fact.
     #[serde(default)]
-    kind: SuggestionKind,
+    fact_id: Option<u64>,
 }
 
 async fn llm_lore_suggest(
@@ -461,20 +463,15 @@ async fn llm_lore_suggest(
     let LlmLoreSuggestionRequest {
         for_user_id,
         suggestion,
-        kind,
+        fact_id,
     } = suggestion_req;
-    let suggest_result = match kind {
-        SuggestionKind::Replace => {
-            llm_plugin
-                .lore_book
-                .write()
-                .suggest(for_user_id, profile, &suggestion)
-        }
-        SuggestionKind::Append => {
-            llm_plugin
-                .lore_book
-                .write()
-                .suggest_addition(for_user_id, profile, &suggestion)
+    let suggest_result = {
+        let mut lore_book = llm_plugin.lore_book.write();
+        match fact_id {
+            Some(fact_id) => {
+                lore_book.suggest_edit(for_user_id, profile, fact_id, &suggestion, LoreSource::Web)
+            }
+            None => lore_book.suggest_fact(for_user_id, profile, &suggestion, LoreSource::Web),
         }
     };
     if let Err(why) = suggest_result {
@@ -537,6 +534,64 @@ async fn llm_lore_accept(
         .write()
         .accept(accept_req.for_user_id, accept_req.suggestion_id);
     if let Err(why) = accept_result {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+
+    llm_lore(State(llm_plugin)).await.into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LoreDismissRequest {
+    for_user_id: UserId,
+    suggestion_id: u64,
+}
+
+/// Withdraws a suggestion (its author) or rejects it (the admin)
+async fn llm_lore_dismiss(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(dismiss_req): Json<LoreDismissRequest>,
+) -> impl IntoResponse {
+    let is_admin = llm_plugin.admin_id == profile.user_id;
+    let dismiss_result = llm_plugin.lore_book.write().dismiss(
+        dismiss_req.for_user_id,
+        dismiss_req.suggestion_id,
+        profile.user_id,
+        is_admin,
+    );
+    if let Err(why) = dismiss_result {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+
+    llm_lore(State(llm_plugin)).await.into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LoreOutdatedRequest {
+    for_user_id: UserId,
+    fact_id: u64,
+    outdated: bool,
+}
+
+async fn llm_lore_outdated(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(outdated_req): Json<LoreOutdatedRequest>,
+) -> impl IntoResponse {
+    if llm_plugin.admin_id != profile.user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only the admin can mark lore outdated",
+        )
+            .into_response();
+    }
+
+    let outdated_result = llm_plugin.lore_book.write().set_outdated(
+        outdated_req.for_user_id,
+        outdated_req.fact_id,
+        outdated_req.outdated,
+    );
+    if let Err(why) = outdated_result {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
 
@@ -685,9 +740,10 @@ impl PersonalityRegistry {
 struct LoreBook {
     lore_by_user: HashMap<UserId, UserLore>,
     suggestions_by_user: HashMap<UserId, Vec<UserLoreSuggestion>>,
-    /// The latest suggestion id given. Ids start at 1: 0 is a suggestion saved before ids.
-    #[serde(default)]
-    last_suggestion_id: u64,
+    /// The latest id given to a suggestion or a fact. Ids start at 1: 0 is a suggestion saved
+    /// before ids.
+    #[serde(default, alias = "last_suggestion_id")]
+    last_id: u64,
 }
 
 impl StorageValue for LoreBook {
@@ -733,7 +789,7 @@ impl LoreBook {
             it's relevant, and suggest_lore to suggest a new fact (people vote on it):\n"
         );
         for user_lore in self.lore_by_user.values() {
-            if user_lore.lore.trim().is_empty() {
+            if user_lore.facts.is_empty() {
                 continue;
             }
             let username = &user_lore.member.username;
@@ -744,13 +800,14 @@ impl LoreBook {
         prompt
     }
 
+    /// Everyone's current lore, outdated facts left out
     fn to_prompt(&self) -> String {
         use std::fmt::Write;
 
         let mut prompt = format!("{LORE_PREMISE}\n");
 
         for user_lore in self.lore_by_user.values() {
-            let lore = &user_lore.lore;
+            let lore = user_lore.text(false);
             if lore.is_empty() {
                 continue;
             }
@@ -762,58 +819,80 @@ impl LoreBook {
         prompt
     }
 
-    /// Suggests a complete new lore for `for_user_id`. Replaces `suggestion_by`'s pending rewrite
-    /// for that user, if any: one rewrite each.
-    fn suggest(
+    /// Suggests a new fact about `for_user_id`
+    fn suggest_fact(
         &mut self,
         for_user_id: UserId,
         suggestion_by: DiscordProfile,
-        suggestion: &str,
+        fact: &str,
+        source: LoreSource,
     ) -> Result<(), &'static str> {
-        let suggestion = self.check_suggestion(for_user_id, &suggestion_by, suggestion)?;
+        let fact = self.check_suggestion(for_user_id, &suggestion_by, fact)?;
+        self.push_suggestion(for_user_id, suggestion_by, fact, None, source);
+        Ok(())
+    }
 
-        let pending_rewrite =
-            self.suggestions_by_user
-                .get_mut(&for_user_id)
-                .and_then(|suggestions| {
-                    suggestions.iter_mut().find(|s| {
-                        s.suggestion_by.user_id == suggestion_by.user_id
-                            && s.kind == SuggestionKind::Replace
-                    })
-                });
-        match pending_rewrite {
-            Some(rewrite) => rewrite.suggestion = suggestion.to_string(),
-            None => self.push_suggestion(
-                for_user_id,
-                suggestion_by,
-                suggestion,
-                SuggestionKind::Replace,
-            ),
+    /// Suggests new text for one of `for_user_id`'s facts. Replaces `suggestion_by`'s pending edit
+    /// of that fact, if any.
+    fn suggest_edit(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_by: DiscordProfile,
+        fact_id: u64,
+        text: &str,
+        source: LoreSource,
+    ) -> Result<(), &'static str> {
+        let text = self.check_suggestion(for_user_id, &suggestion_by, text)?;
+        let fact = self.lore_by_user[&for_user_id]
+            .facts
+            .iter()
+            .find(|fact| fact.id == fact_id)
+            .ok_or("No such fact")?;
+        if fact.text == text {
+            return Err("That's already what it says");
         }
 
+        let pending_edit = self
+            .suggestions_by_user
+            .get_mut(&for_user_id)
+            .and_then(|suggestions| {
+                suggestions.iter_mut().find(|s| {
+                    s.suggestion_by.user_id == suggestion_by.user_id && s.fact_id == Some(fact_id)
+                })
+            });
+        match pending_edit {
+            Some(edit) => edit.suggestion = text.to_string(),
+            None => self.push_suggestion(for_user_id, suggestion_by, text, Some(fact_id), source),
+        }
         Ok(())
     }
 
-    /// Suggests adding `addition` to `for_user_id`'s lore, without replacing what's already there.
-    /// Each addition is its own suggestion, voted on and accepted on its own.
-    fn suggest_addition(
-        &mut self,
-        for_user_id: UserId,
-        suggestion_by: DiscordProfile,
-        addition: &str,
-    ) -> Result<(), &'static str> {
-        let addition = self.check_suggestion(for_user_id, &suggestion_by, addition)?;
-        self.push_suggestion(for_user_id, suggestion_by, addition, SuggestionKind::Append);
-        Ok(())
-    }
-
-    /// Gives an id to suggestions saved before they had one
-    fn number_old_suggestions(&mut self) {
+    /// Upgrades a lore book saved by an older version: numbers suggestions saved before ids, and
+    /// turns lore saved as one block of text into an "older lore" fact
+    fn migrate(&mut self) {
         for suggestion in self.suggestions_by_user.values_mut().flatten() {
             if suggestion.id == 0 {
-                self.last_suggestion_id += 1;
-                suggestion.id = self.last_suggestion_id;
+                self.last_id += 1;
+                suggestion.id = self.last_id;
             }
+        }
+        for user_lore in self.lore_by_user.values_mut() {
+            let older_lore = std::mem::take(&mut user_lore.lore);
+            if older_lore.trim().is_empty() {
+                continue;
+            }
+            self.last_id += 1;
+            user_lore.facts.insert(
+                0,
+                LoreFact {
+                    id: self.last_id,
+                    text: older_lore.trim().to_string(),
+                    suggested_by: None,
+                    suggested_at: None,
+                    source: None,
+                    outdated: false,
+                },
+            );
         }
     }
 
@@ -837,7 +916,7 @@ impl LoreBook {
         Ok(())
     }
 
-    /// Applies a suggestion to the lore and removes it
+    /// Adds the suggested fact, or applies the suggested edit, and removes the suggestion
     fn accept(&mut self, for_user_id: UserId, suggestion_id: u64) -> Result<(), &'static str> {
         let suggestions = self
             .suggestions_by_user
@@ -847,10 +926,72 @@ impl LoreBook {
             .iter()
             .position(|s| s.id == suggestion_id)
             .ok_or(NO_SUCH_SUGGESTION)?;
-        let suggestion = suggestions.remove(index);
-        if let Some(user_lore) = self.lore_by_user.get_mut(&for_user_id) {
-            user_lore.lore = suggestion.applied_to(&user_lore.lore);
+        let user_lore = self
+            .lore_by_user
+            .get_mut(&for_user_id)
+            .ok_or("They're not in the lore book anymore")?;
+
+        match suggestions[index].fact_id {
+            Some(fact_id) => {
+                let fact = user_lore
+                    .facts
+                    .iter_mut()
+                    .find(|fact| fact.id == fact_id)
+                    .ok_or("The fact it edits is gone")?;
+                fact.text = suggestions.remove(index).suggestion;
+            }
+            None => {
+                let suggestion = suggestions.remove(index);
+                self.last_id += 1;
+                user_lore.facts.push(LoreFact {
+                    id: self.last_id,
+                    text: suggestion.suggestion,
+                    suggested_by: Some(suggestion.suggestion_by),
+                    suggested_at: Some(suggestion.suggested_at.unwrap_or_else(unix_now)),
+                    source: suggestion.source,
+                    outdated: false,
+                });
+            }
         }
+        Ok(())
+    }
+
+    /// Removes a suggestion: withdrawn by its author, or rejected by the admin
+    fn dismiss(
+        &mut self,
+        for_user_id: UserId,
+        suggestion_id: u64,
+        by: UserId,
+        is_admin: bool,
+    ) -> Result<(), &'static str> {
+        let suggestions = self
+            .suggestions_by_user
+            .get_mut(&for_user_id)
+            .ok_or(NO_SUCH_SUGGESTION)?;
+        let index = suggestions
+            .iter()
+            .position(|s| s.id == suggestion_id)
+            .ok_or(NO_SUCH_SUGGESTION)?;
+        if !is_admin && suggestions[index].suggestion_by.user_id != by {
+            return Err("Only its author or the admin can remove a suggestion");
+        }
+        suggestions.remove(index);
+        Ok(())
+    }
+
+    /// Marks a fact outdated (kept for the lore tools, left out of the system prompt) or current
+    fn set_outdated(
+        &mut self,
+        for_user_id: UserId,
+        fact_id: u64,
+        outdated: bool,
+    ) -> Result<(), &'static str> {
+        let fact = self
+            .lore_by_user
+            .get_mut(&for_user_id)
+            .and_then(|user_lore| user_lore.facts.iter_mut().find(|fact| fact.id == fact_id))
+            .ok_or("No such fact")?;
+        fact.outdated = outdated;
         Ok(())
     }
 
@@ -882,23 +1023,26 @@ impl LoreBook {
         for_user_id: UserId,
         suggestion_by: DiscordProfile,
         suggestion: &str,
-        kind: SuggestionKind,
+        fact_id: Option<u64>,
+        source: LoreSource,
     ) {
         let Some(user_lore) = self.lore_by_user.get(&for_user_id) else {
             return;
         };
 
-        self.last_suggestion_id += 1;
+        self.last_id += 1;
         self.suggestions_by_user
             .entry(for_user_id)
             .or_default()
             .push(UserLoreSuggestion {
-                id: self.last_suggestion_id,
+                id: self.last_id,
                 member: user_lore.member.clone(),
                 suggestion: suggestion.to_string(),
                 suggestion_by,
                 votes_by_user_id: HashMap::new(),
-                kind,
+                fact_id,
+                suggested_at: Some(unix_now()),
+                source: Some(source),
             });
     }
 }
@@ -906,7 +1050,61 @@ impl LoreBook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct UserLore {
     member: DiscordProfile,
+    /// Oldest first
+    #[serde(default)]
+    facts: Vec<LoreFact>,
+    /// Lore saved as one block of text, before facts. Emptied into an "older lore" fact by
+    /// `LoreBook::migrate`, never saved again.
+    #[serde(default, skip_serializing)]
     lore: String,
+}
+
+impl UserLore {
+    fn new(member: DiscordProfile) -> Self {
+        Self {
+            member,
+            facts: Vec::new(),
+            lore: String::new(),
+        }
+    }
+
+    /// The facts as one text, as the model reads them. Outdated facts are marked, or left out.
+    fn text(&self, with_outdated: bool) -> String {
+        self.facts
+            .iter()
+            .filter(|fact| with_outdated || !fact.outdated)
+            .fold(String::new(), |lore, fact| {
+                if fact.outdated {
+                    append_lore(&lore, &format!("(Outdated) {}", fact.text))
+                } else {
+                    append_lore(&lore, &fact.text)
+                }
+            })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct LoreFact {
+    id: u64,
+    text: String,
+    /// `None` for older lore, from before facts
+    suggested_by: Option<DiscordProfile>,
+    /// Unix seconds. `None` for older lore.
+    suggested_at: Option<u64>,
+    source: Option<LoreSource>,
+    /// Kept for the lore tools, left out of the system prompt
+    outdated: bool,
+}
+
+/// Where a suggestion was made
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum LoreSource {
+    Web,
+    /// `/add-user-context` or the "Add to lore" message command
+    Command,
+    /// The bot's suggest_lore tool, while answering
+    Chat,
+    Nightly,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -918,29 +1116,15 @@ struct UserLoreSuggestion {
     suggestion: String,
     suggestion_by: DiscordProfile,
     votes_by_user_id: HashMap<UserId, SuggestionVote>,
-
-    // Defaulted so that lore books stored before this field existed still load
+    /// The fact this suggestion rewrites. `None`: a new fact.
     #[serde(default)]
-    kind: SuggestionKind,
-}
-
-impl UserLoreSuggestion {
-    /// The lore that results from accepting this suggestion on top of `lore`
-    fn applied_to(self, lore: &str) -> String {
-        match self.kind {
-            SuggestionKind::Replace => self.suggestion,
-            SuggestionKind::Append => append_lore(lore, &self.suggestion),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum SuggestionKind {
-    /// The suggestion is the complete new lore
-    #[default]
-    Replace,
-    /// The suggestion is added to whatever the lore is when it gets accepted
-    Append,
+    fact_id: Option<u64>,
+    /// Unix seconds. `None` for suggestions saved before dates.
+    #[serde(default)]
+    suggested_at: Option<u64>,
+    /// `None` for suggestions saved before sources
+    #[serde(default)]
+    source: Option<LoreSource>,
 }
 
 const NO_SUCH_SUGGESTION: &str = "No such suggestion: it may have been accepted already";
@@ -1129,10 +1313,7 @@ impl LlmPlugin {
                 .lore_by_user
                 .entry(member.user.id)
                 .and_modify(|lore| lore.member = profile.clone())
-                .or_insert_with(|| UserLore {
-                    member: profile,
-                    lore: String::new(),
-                });
+                .or_insert_with(|| UserLore::new(profile));
         }
 
         // Saved settings win over the defaults, except for a personality that no longer exists
@@ -1713,10 +1894,12 @@ impl LlmPlugin {
             .map(profile_from_member)
             .context("add-user-context was used outside of a guild")?;
 
-        let suggest_result =
-            self.lore_book
-                .write()
-                .suggest_addition(target_id, suggestion_by, &context);
+        let suggest_result = self.lore_book.write().suggest_fact(
+            target_id,
+            suggestion_by,
+            &context,
+            LoreSource::Command,
+        );
         let content = match suggest_result {
             Ok(()) => suggested_addition_reply(target_id),
             Err(why) => why.to_string(),
@@ -1752,10 +1935,11 @@ impl LlmPlugin {
                 .map(profile_from_member)
                 .context("Add to lore was used outside of a guild")?;
 
-            let suggest_result = self.lore_book.write().suggest_addition(
+            let suggest_result = self.lore_book.write().suggest_fact(
                 author_id,
                 suggestion_by,
                 &format!("Once said: \"{quote}\""),
+                LoreSource::Command,
             );
             match suggest_result {
                 Ok(()) => suggested_addition_reply(author_id),
@@ -2110,15 +2294,13 @@ mod tests {
         }
     }
 
+    /// User 1 with `lore` as older lore
     fn lore_book_with(lore: &str) -> LoreBook {
         let mut lore_book = LoreBook::default();
-        lore_book.lore_by_user.insert(
-            UserId::new(1),
-            UserLore {
-                member: profile(1),
-                lore: lore.to_string(),
-            },
-        );
+        let mut user_lore = UserLore::new(profile(1));
+        user_lore.lore = lore.to_string();
+        lore_book.lore_by_user.insert(UserId::new(1), user_lore);
+        lore_book.migrate();
         lore_book
     }
 
@@ -2130,62 +2312,138 @@ mod tests {
             .collect()
     }
 
-    fn lore(lore_book: &LoreBook) -> &str {
-        &lore_book.lore_by_user[&UserId::new(1)].lore
+    fn user_lore(lore_book: &LoreBook) -> &UserLore {
+        &lore_book.lore_by_user[&UserId::new(1)]
     }
 
     #[test]
-    fn addition_appends_to_lore_at_acceptance_time() {
-        let mut lore_book = lore_book_with("Likes cats");
-        lore_book
-            .suggest_addition(UserId::new(1), profile(2), "Hates mondays")
-            .unwrap();
-        lore_book
-            .suggest(UserId::new(1), profile(3), "Likes dogs.")
-            .unwrap();
+    fn older_lore_becomes_a_fact_without_author_or_date() {
+        let lore_book = lore_book_with(" Likes cats ");
+        let facts = &user_lore(&lore_book).facts;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].text, "Likes cats");
+        assert!(facts[0].suggested_by.is_none() && facts[0].suggested_at.is_none());
 
-        let [addition, rewrite] = suggestion_ids(&lore_book)[..] else {
+        // Not saved as a block again, and empty lore makes no fact
+        let saved = serde_json::to_value(user_lore(&lore_book)).unwrap();
+        assert!(saved.get("lore").is_none());
+        assert!(user_lore(&lore_book_with("")).facts.is_empty());
+    }
+
+    #[test]
+    fn accepted_facts_are_appended_with_their_author() {
+        let mut lore_book = lore_book_with("Likes cats");
+        for fact in ["Hates mondays", "Owns a boat"] {
+            lore_book
+                .suggest_fact(UserId::new(1), profile(2), fact, LoreSource::Web)
+                .unwrap();
+        }
+        let [_, second] = suggestion_ids(&lore_book)[..] else {
             panic!("expected 2 suggestions")
         };
-        lore_book.accept(UserId::new(1), rewrite).unwrap();
-        lore_book.accept(UserId::new(1), addition).unwrap();
+        lore_book.accept(UserId::new(1), second).unwrap();
 
-        assert_eq!(lore(&lore_book), "Likes dogs. Hates mondays");
+        let lore = user_lore(&lore_book);
+        assert_eq!(lore.text(true), "Likes cats. Owns a boat");
+        let fact = lore.facts.last().unwrap();
+        assert_eq!(fact.suggested_by.as_ref().unwrap().user_id, UserId::new(2));
+        assert!(fact.suggested_at.is_some());
+        assert_eq!(fact.source, Some(LoreSource::Web));
+        assert_eq!(suggestion_ids(&lore_book).len(), 1);
+        assert!(lore_book.accept(UserId::new(1), second).is_err());
     }
 
     #[test]
-    fn additions_from_the_same_user_stay_separate() {
+    fn edits_rewrite_one_fact_and_replace_the_pending_edit() {
+        let mut lore_book = lore_book_with("Likes cats");
+        let fact_id = user_lore(&lore_book).facts[0].id;
+        lore_book
+            .suggest_edit(
+                UserId::new(1),
+                profile(2),
+                fact_id,
+                "Likes dogs",
+                LoreSource::Web,
+            )
+            .unwrap();
+        lore_book
+            .suggest_edit(
+                UserId::new(1),
+                profile(2),
+                fact_id,
+                "Likes birds",
+                LoreSource::Web,
+            )
+            .unwrap();
+        let unchanged = lore_book.suggest_edit(
+            UserId::new(1),
+            profile(3),
+            fact_id,
+            "Likes cats",
+            LoreSource::Web,
+        );
+        assert!(unchanged.is_err());
+        assert!(
+            lore_book
+                .suggest_edit(UserId::new(1), profile(2), 999, "Nope", LoreSource::Web)
+                .is_err()
+        );
+
+        let ids = suggestion_ids(&lore_book);
+        assert_eq!(ids.len(), 1);
+        lore_book.accept(UserId::new(1), ids[0]).unwrap();
+        let facts = &user_lore(&lore_book).facts;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].text, "Likes birds");
+        // Still older lore: an edit keeps who first wrote it
+        assert!(facts[0].suggested_by.is_none());
+    }
+
+    #[test]
+    fn outdated_facts_leave_the_prompt_but_stay_for_the_tools() {
+        let mut lore_book = lore_book_with("Lives in Paris");
+        lore_book
+            .suggest_fact(UserId::new(1), profile(2), "Likes cats", LoreSource::Web)
+            .unwrap();
+        lore_book
+            .accept(UserId::new(1), suggestion_ids(&lore_book)[0])
+            .unwrap();
+        let paris = user_lore(&lore_book).facts[0].id;
+        lore_book.set_outdated(UserId::new(1), paris, true).unwrap();
+
+        assert_eq!(user_lore(&lore_book).text(false), "Likes cats");
+        assert_eq!(
+            user_lore(&lore_book).text(true),
+            "(Outdated) Lives in Paris. Likes cats"
+        );
+        assert!(!lore_book.to_prompt().contains("Paris"));
+        assert!(lore_book.set_outdated(UserId::new(1), 999, true).is_err());
+    }
+
+    #[test]
+    fn suggestions_are_withdrawn_by_their_author_or_rejected_by_the_admin() {
         let mut lore_book = lore_book_with("");
         for fact in ["Likes cats", "Hates mondays"] {
             lore_book
-                .suggest_addition(UserId::new(1), profile(2), fact)
+                .suggest_fact(UserId::new(1), profile(2), fact, LoreSource::Web)
                 .unwrap();
         }
-        let ids = suggestion_ids(&lore_book);
-        assert_eq!(ids, [1, 2]);
+        let [first, second] = suggestion_ids(&lore_book)[..] else {
+            panic!("expected 2 suggestions")
+        };
 
-        lore_book.accept(UserId::new(1), 2).unwrap();
-        assert_eq!(lore(&lore_book), "Hates mondays");
-        assert_eq!(suggestion_ids(&lore_book), [1]);
-        assert!(lore_book.accept(UserId::new(1), 2).is_err());
-    }
-
-    #[test]
-    fn a_new_rewrite_replaces_the_pending_one() {
-        let mut lore_book = lore_book_with("Likes cats");
+        assert!(
+            lore_book
+                .dismiss(UserId::new(1), first, UserId::new(3), false)
+                .is_err()
+        );
         lore_book
-            .suggest(UserId::new(1), profile(2), "Likes dogs")
+            .dismiss(UserId::new(1), first, UserId::new(2), false)
             .unwrap();
         lore_book
-            .suggest_addition(UserId::new(1), profile(2), "Hates mondays")
+            .dismiss(UserId::new(1), second, UserId::new(3), true)
             .unwrap();
-        lore_book
-            .suggest(UserId::new(1), profile(2), "Likes birds")
-            .unwrap();
-
-        let suggestions = &lore_book.suggestions_by_user[&UserId::new(1)];
-        assert_eq!(suggestions.len(), 2);
-        assert_eq!(suggestions[0].suggestion, "Likes birds");
+        assert!(suggestion_ids(&lore_book).is_empty());
     }
 
     #[test]
@@ -2193,51 +2451,49 @@ mod tests {
         let mut lore_book = lore_book_with("");
         for fact in ["Likes cats", "Hates mondays"] {
             lore_book
-                .suggest_addition(UserId::new(1), profile(2), fact)
+                .suggest_fact(UserId::new(1), profile(2), fact, LoreSource::Web)
                 .unwrap();
         }
+        let ids = suggestion_ids(&lore_book);
         lore_book
-            .vote(UserId::new(1), 2, UserId::new(3), SuggestionVote::Up)
+            .vote(UserId::new(1), ids[1], UserId::new(3), SuggestionVote::Up)
             .unwrap();
         let suggestions = &lore_book.suggestions_by_user[&UserId::new(1)];
         assert!(suggestions[0].votes_by_user_id.is_empty());
         assert_eq!(suggestions[1].votes_by_user_id.len(), 1);
 
-        let own = lore_book.vote(UserId::new(1), 2, UserId::new(2), SuggestionVote::Up);
+        let own = lore_book.vote(UserId::new(1), ids[1], UserId::new(2), SuggestionVote::Up);
         assert!(own.is_err());
-    }
-
-    #[test]
-    fn old_suggestions_get_ids_on_load() {
-        let json = serde_json::json!({
-            "lore_by_user": {},
-            "suggestions_by_user": { "1": [
-                { "member": profile(1), "suggestion": "a", "suggestion_by": profile(2), "votes_by_user_id": {} },
-                { "member": profile(1), "suggestion": "b", "suggestion_by": profile(3), "votes_by_user_id": {} }
-            ] }
-        });
-        let mut lore_book: LoreBook = serde_json::from_value(json).unwrap();
-        lore_book.number_old_suggestions();
-        assert_eq!(suggestion_ids(&lore_book), [1, 2]);
-        assert_eq!(lore_book.last_suggestion_id, 2);
     }
 
     #[test]
     fn cannot_suggest_for_yourself() {
         let mut lore_book = lore_book_with("Likes cats");
-        let result = lore_book.suggest_addition(UserId::new(1), profile(1), "Is great");
+        let result =
+            lore_book.suggest_fact(UserId::new(1), profile(1), "Is great", LoreSource::Web);
         assert!(result.is_err());
     }
 
     #[test]
-    fn stored_suggestions_without_kind_still_load_as_replace() {
+    fn lore_books_saved_before_facts_still_load() {
         let json = serde_json::json!({
-            "member": profile(1),
-            "suggestion": "Likes dogs",
-            "suggestion_by": profile(2),
-            "votes_by_user_id": {}
+            "lore_by_user": { "1": { "member": profile(1), "lore": "Likes cats" } },
+            "suggestions_by_user": { "1": [
+                { "id": 4, "member": profile(1), "suggestion": "a", "suggestion_by": profile(2),
+                  "votes_by_user_id": {}, "kind": "Append" },
+                { "member": profile(1), "suggestion": "b", "suggestion_by": profile(3),
+                  "votes_by_user_id": {} }
+            ] },
+            "last_suggestion_id": 4
         });
-        let suggestion: UserLoreSuggestion = serde_json::from_value(json).unwrap();
-        assert_eq!(suggestion.kind, SuggestionKind::Replace);
+        let mut lore_book: LoreBook = serde_json::from_value(json).unwrap();
+        lore_book.migrate();
+
+        assert_eq!(suggestion_ids(&lore_book), [4, 5]);
+        assert_eq!(user_lore(&lore_book).facts[0].id, 6);
+        assert_eq!(user_lore(&lore_book).text(true), "Likes cats");
+        assert_eq!(lore_book.last_id, 6);
+        let suggestion = &lore_book.suggestions_by_user[&UserId::new(1)][0];
+        assert_eq!(suggestion.fact_id, None);
     }
 }

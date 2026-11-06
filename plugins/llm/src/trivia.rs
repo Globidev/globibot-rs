@@ -47,15 +47,19 @@ impl LlmPlugin {
             let candidates = lore_book
                 .lore_by_user
                 .values()
-                .filter(|user_lore| !user_lore.lore.trim().is_empty())
+                // Current facts only, like the system prompt
+                .map(|user_lore| (user_lore, user_lore.text(false)))
+                .filter(|(_, lore)| !lore.is_empty())
                 .collect::<Vec<_>>();
-            candidates.choose(&mut rand::rng()).map(|user_lore| {
-                (
-                    user_lore.member.user_id,
-                    user_lore.member.username.clone(),
-                    user_lore.lore.clone(),
-                )
-            })
+            candidates
+                .choose(&mut rand::rng())
+                .map(|(user_lore, lore)| {
+                    (
+                        user_lore.member.user_id,
+                        user_lore.member.username.clone(),
+                        lore.clone(),
+                    )
+                })
         };
         let Some((answer_id, answer_name, lore)) = pick else {
             let content = "Nobody has any lore yet! Add some with /add-user-context";

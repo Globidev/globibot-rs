@@ -9,7 +9,21 @@
 
   type UserLore = {
     member: DiscordMember;
-    lore: string;
+    // Oldest first
+    facts: LoreFact[];
+  };
+
+  type LoreSource = 'Web' | 'Command' | 'Chat' | 'Nightly';
+
+  type LoreFact = {
+    id: number;
+    text: string;
+    // Both null for older lore, from before facts
+    suggested_by: DiscordMember | null;
+    suggested_at: number | null;
+    source: LoreSource | null;
+    // Left out of the bot's prompt, still found by its lore tools
+    outdated: boolean;
   };
 
   type UserLoreSuggestion = {
@@ -18,8 +32,10 @@
     suggestion: string;
     suggestion_by: DiscordMember;
     votes_by_user_id: Record<string, SuggestionVote>;
-    // Append suggestions are added to the lore when accepted instead of replacing it
-    kind: 'Replace' | 'Append';
+    // The fact it rewrites, null for a new fact
+    fact_id: number | null;
+    suggested_at: number | null;
+    source: LoreSource | null;
   };
 
   type SuggestionVote = 'Up' | 'Down' | 'Omegalul';
@@ -30,6 +46,12 @@
   const MAX_ADDITION_CHARS = 500;
   const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
   const OMEGALUL = 'https://cdn.discordapp.com/emojis/373119675829190656.webp?size=48';
+  const SOURCES: Record<LoreSource, string> = {
+    Web: 'on the web',
+    Command: 'with a command',
+    Chat: 'by the bot in chat',
+    Nightly: 'by the nightly lore'
+  };
   const VOTES: { vote: SuggestionVote; label: string }[] = [
     { vote: 'Up', label: '👍' },
     { vote: 'Down', label: '👎' },
@@ -43,9 +65,9 @@
   let searchQuery = $state('');
   let filter = $state<Filter>('all');
   let isAdmin = $state(false);
-  // Per user id: the fact being typed, the rewrite being edited (only while editing), the last error
+  // Per user id: the fact being typed, the last error. Per fact id: its edit, only while editing
   let additions = $state<Record<string, string>>({});
-  let rewrites = $state<Record<string, string>>({});
+  let edits = $state<Record<number, string>>({});
   let errors = $state<Record<string, string>>({});
 
   let currentUserId = $derived(authStore.user?.user_id ?? '');
@@ -76,7 +98,7 @@
   }
 
   // The plugin decides who the admin is (LLM_ADMIN_USER_ID), the settings tell us if it's us.
-  // The accept endpoint checks this again server side
+  // The admin endpoints check this again server side
   async function loadIsAdmin(): Promise<void> {
     const res = await fetch('/plugin-api/llm/settings');
     if (!res.ok) return;
@@ -101,18 +123,18 @@
     return true;
   }
 
-  async function suggestAddition(userId: string) {
+  async function suggestFact(userId: string) {
     const suggestion = additions[userId]?.trim();
     if (!suggestion) return;
-    const body = { for_user_id: userId, suggestion, kind: 'Append' };
+    const body = { for_user_id: userId, suggestion };
     if (await post('suggest', body, userId)) delete additions[userId];
   }
 
-  async function suggestRewrite(userId: string) {
-    const suggestion = rewrites[userId]?.trim();
+  async function suggestEdit(userId: string, fact: LoreFact) {
+    const suggestion = edits[fact.id]?.trim();
     if (!suggestion) return;
-    const body = { for_user_id: userId, suggestion, kind: 'Replace' };
-    if (await post('suggest', body, userId)) delete rewrites[userId];
+    const body = { for_user_id: userId, suggestion, fact_id: fact.id };
+    if (await post('suggest', body, userId)) delete edits[fact.id];
   }
 
   function vote(userId: string, sug: UserLoreSuggestion, vote: SuggestionVote) {
@@ -123,11 +145,27 @@
     post('accept', { for_user_id: userId, suggestion_id: sug.id }, userId);
   }
 
+  /** Withdraws our own suggestion, or rejects one as the admin */
+  function dismiss(userId: string, sug: UserLoreSuggestion) {
+    post('dismiss', { for_user_id: userId, suggestion_id: sug.id }, userId);
+  }
+
+  function setOutdated(userId: string, fact: LoreFact, outdated: boolean) {
+    post('outdated', { for_user_id: userId, fact_id: fact.id, outdated }, userId);
+  }
+
+  const formatDate = (secs: number) =>
+    new Date(secs * 1000).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+
   function voteCount(sug: UserLoreSuggestion, vote: SuggestionVote): number {
     return Object.values(sug.votes_by_user_id).filter((v) => v === vote).length;
   }
 
-  const hasLore = (lore: UserLore) => lore.lore.trim().length > 0;
+  const hasLore = (lore: UserLore) => lore.facts.length > 0;
 
   let entries = $derived.by(() => {
     if (data == null) return [];
@@ -138,7 +176,7 @@
       .filter(
         ({ lore }) =>
           lore.member.username.toLowerCase().includes(query) ||
-          lore.lore.toLowerCase().includes(query)
+          lore.facts.some((fact) => fact.text.toLowerCase().includes(query))
       )
       .filter(({ lore, suggestions }) => {
         if (filter === 'with_suggestions') return suggestions.length > 0;
@@ -166,9 +204,9 @@
 
 <div class="flex w-full flex-col gap-4 text-left">
   <p class="text-xs text-gray-500">
-    Facts about people that the bot uses for flavor in its answers. Anyone can suggest a fact or a
-    rewrite, everyone votes, and the admin accepts. Every night the bot also suggests facts from the
-    day's messages.
+    Facts about people that the bot uses for flavor in its answers. Anyone can suggest a new fact or
+    an edit, everyone votes, and the admin accepts. Every night the bot also suggests facts from the
+    day's messages. Outdated facts are left out of the bot's answers, but it can still look them up.
   </p>
 
   <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -237,49 +275,94 @@
                 </span>
               {/if}
             </div>
-            {#if !isMe && hasLore(lore) && !(userId in rewrites)}
-              <button
-                onclick={() => (rewrites[userId] = lore.lore)}
-                title="Suggest a new version of the whole lore"
-                class="btn-ghost"
-              >
-                <span class="icon-[mdi--pencil-outline] size-3.5" aria-hidden="true"></span>
-                Rewrite
-              </button>
-            {/if}
           </header>
 
-          {#if userId in rewrites}
-            <form
-              onsubmit={(e) => {
-                e.preventDefault();
-                suggestRewrite(userId);
-              }}
-              class="flex flex-col gap-2"
-            >
-              <textarea
-                bind:value={rewrites[userId]}
-                aria-label="New lore for {name}"
-                class="w-full rounded border border-gray-700 bg-gray-950 p-2 text-sm text-white outline-none focus:border-indigo-500"
-              ></textarea>
-              <div class="flex justify-end gap-2">
-                <button type="button" onclick={() => delete rewrites[userId]} class="btn-ghost">
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={!rewrites[userId].trim() ||
-                    rewrites[userId].trim() === lore.lore.trim()}
-                  class="btn-primary"
-                >
-                  Suggest rewrite
-                </button>
-              </div>
-            </form>
-          {:else if hasLore(lore)}
-            <p class="text-sm leading-relaxed break-words whitespace-pre-wrap text-gray-200">
-              {lore.lore}
-            </p>
+          {#if hasLore(lore)}
+            <ul class="flex flex-col gap-2.5">
+              {#each lore.facts as fact (fact.id)}
+                <li class="flex flex-col gap-1">
+                  {#if fact.id in edits}
+                    <form
+                      onsubmit={(e) => {
+                        e.preventDefault();
+                        suggestEdit(userId, fact);
+                      }}
+                      class="flex flex-col gap-2"
+                    >
+                      <textarea
+                        bind:value={edits[fact.id]}
+                        maxlength={MAX_ADDITION_CHARS}
+                        aria-label="New text for this fact about {name}"
+                        class="w-full rounded border border-gray-700 bg-gray-950 p-2 text-sm text-white outline-none focus:border-indigo-500"
+                      ></textarea>
+                      <div class="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onclick={() => delete edits[fact.id]}
+                          class="btn-ghost"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={!edits[fact.id].trim() || edits[fact.id].trim() === fact.text}
+                          class="btn-primary"
+                        >
+                          Suggest edit
+                        </button>
+                      </div>
+                    </form>
+                  {:else}
+                    <p
+                      class="text-sm leading-relaxed break-words whitespace-pre-wrap {fact.outdated
+                        ? 'text-gray-500'
+                        : 'text-gray-200'}"
+                    >
+                      {fact.text}
+                    </p>
+                    <div class="flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+                      {#if fact.outdated}
+                        <span class="rounded bg-gray-800 px-1.5 text-gray-400">Outdated</span>
+                      {/if}
+                      {#if fact.suggested_by}
+                        {@render avatar(fact.suggested_by, 'size-4')}
+                        <span>
+                          {fact.suggested_by.username}
+                          {#if fact.source}{SOURCES[fact.source]}{/if}
+                          {#if fact.suggested_at}· {formatDate(fact.suggested_at)}{/if}
+                        </span>
+                      {:else}
+                        <span class="italic">Older lore</span>
+                      {/if}
+                      <span class="ml-auto flex gap-1">
+                        {#if !isMe}
+                          <button
+                            onclick={() => (edits[fact.id] = fact.text)}
+                            title="Suggest new text for this fact"
+                            class="btn-ghost"
+                          >
+                            <span class="icon-[mdi--pencil-outline] size-3.5" aria-hidden="true"
+                            ></span>
+                            Edit
+                          </button>
+                        {/if}
+                        {#if isAdmin}
+                          <button
+                            onclick={() => setOutdated(userId, fact, !fact.outdated)}
+                            title={fact.outdated
+                              ? 'Use it in answers again'
+                              : 'Leave it out of answers, keep it for lookups'}
+                            class="btn-ghost"
+                          >
+                            {fact.outdated ? 'Mark current' : 'Mark outdated'}
+                          </button>
+                        {/if}
+                      </span>
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
           {:else}
             <p class="text-sm text-gray-500 italic">No lore yet.</p>
           {/if}
@@ -290,7 +373,7 @@
             <form
               onsubmit={(e) => {
                 e.preventDefault();
-                suggestAddition(userId);
+                suggestFact(userId);
               }}
               class="flex gap-2"
             >
@@ -313,7 +396,8 @@
           {/if}
 
           {#each suggestions as sug (sug.id)}
-            {@const isAddition = sug.kind === 'Append'}
+            {@const edited = lore.facts.find((fact) => fact.id === sug.fact_id)}
+            {@const isAddition = sug.fact_id == null}
             {@const isMine = sug.suggestion_by.user_id === currentUserId}
             <div
               class="flex flex-col gap-2 rounded-md border-l-2 bg-gray-950 px-3 py-2 {isAddition
@@ -322,12 +406,18 @@
             >
               <div class="flex flex-wrap items-center gap-1.5 text-xs text-gray-400">
                 <span class="font-medium {isAddition ? 'text-green-400' : 'text-amber-300'}">
-                  {isAddition ? '➕ Addition' : '✏️ Rewrite'}
+                  {isAddition ? '➕ New fact' : '✏️ Edit'}
                 </span>
                 by
                 {@render avatar(sug.suggestion_by, 'size-4')}
                 <span class="text-gray-300">{isMine ? 'you' : sug.suggestion_by.username}</span>
+                {#if sug.suggested_at}<span>· {formatDate(sug.suggested_at)}</span>{/if}
               </div>
+              {#if edited}
+                <p class="text-xs break-words whitespace-pre-wrap text-gray-500 line-through">
+                  {edited.text}
+                </p>
+              {/if}
               <p class="text-sm break-words whitespace-pre-wrap text-gray-200">{sug.suggestion}</p>
               <div class="flex flex-wrap items-center gap-1">
                 {#each VOTES as { vote: kind, label } (kind)}
@@ -347,14 +437,21 @@
                     <span class="tabular-nums">{voteCount(sug, kind)}</span>
                   </button>
                 {/each}
-                {#if isAdmin}
-                  <button
-                    onclick={() => accept(userId, sug)}
-                    class="btn-vote ml-auto bg-green-600! text-white hover:bg-green-500!"
-                  >
-                    Accept
-                  </button>
-                {/if}
+                <span class="ml-auto flex gap-1">
+                  {#if isMine || isAdmin}
+                    <button onclick={() => dismiss(userId, sug)} class="btn-ghost">
+                      {isMine ? 'Withdraw' : 'Reject'}
+                    </button>
+                  {/if}
+                  {#if isAdmin}
+                    <button
+                      onclick={() => accept(userId, sug)}
+                      class="btn-vote bg-green-600! text-white hover:bg-green-500!"
+                    >
+                      Accept
+                    </button>
+                  {/if}
+                </span>
               </div>
             </div>
           {/each}

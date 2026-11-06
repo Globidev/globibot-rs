@@ -15,7 +15,7 @@ use itertools::Itertools;
 use parking_lot::Mutex;
 
 use crate::{
-    LlmPlugin,
+    LlmPlugin, LoreSource,
     fun::{sanitize_llm_output, transcript_line},
     openrouter::{Message as LlmMessage, Role, ToolOutput},
     tool::ToolSpec,
@@ -163,6 +163,7 @@ impl LlmPlugin {
                                     &self.bot_profile,
                                     &user_id,
                                     &fact,
+                                    LoreSource::Nightly,
                                 ) {
                                     Ok(user_id) => {
                                         suggested_for.push(user_id);
