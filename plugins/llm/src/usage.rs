@@ -42,8 +42,14 @@ pub struct UsageReport {
     completion_tokens: Option<u64>,
     prompt_tokens_details: Option<PromptTokensDetails>,
     completion_tokens_details: Option<CompletionTokensDetails>,
-    /// In credits, which are US dollars
+    /// In credits, which are US dollars. Includes web search fees.
     cost: Option<f64>,
+    server_tool_use_details: Option<ServerToolUseDetails>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ServerToolUseDetails {
+    web_search_requests: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -69,6 +75,8 @@ pub struct Totals {
     pub completion_tokens: u64,
     pub reasoning_tokens: u64,
     pub cost: f64,
+    /// Searches run by OpenRouter's web search tool, each paid on top of tokens
+    pub web_searches: u64,
 }
 
 impl Totals {
@@ -89,6 +97,11 @@ impl Totals {
                 .and_then(|details| details.reasoning_tokens)
                 .unwrap_or_default(),
             cost: report.cost.unwrap_or_default(),
+            web_searches: report
+                .server_tool_use_details
+                .as_ref()
+                .and_then(|details| details.web_search_requests)
+                .unwrap_or_default(),
         }
     }
 
@@ -100,6 +113,7 @@ impl Totals {
         self.completion_tokens += other.completion_tokens;
         self.reasoning_tokens += other.reasoning_tokens;
         self.cost += other.cost;
+        self.web_searches += other.web_searches;
     }
 }
 

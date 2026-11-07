@@ -82,6 +82,7 @@ impl Client {
         const MAX_TOOL_ROUNDS: usize = 5;
 
         let mut totals = Totals::default();
+        let mut sources = Vec::<UrlCitation>::new();
 
         let mut messages = vec![Message::text(Role::System, system_prompt)];
         messages.extend(parts);
@@ -99,13 +100,20 @@ impl Client {
                 req.tool_choice = Some("none");
             }
 
-            let (message, round_totals) = self.send(kind, &req).await?;
+            let (mut message, round_totals) = self.send(kind, &req).await?;
             totals.add(&round_totals);
+            // A web search can happen in any round
+            for citation in message.annotations.drain(..).filter_map(|a| a.url_citation) {
+                if !sources.iter().any(|source| source.url == citation.url) {
+                    sources.push(citation);
+                }
+            }
             if message.tool_calls.is_empty() {
                 return Ok(ToolCompletion {
                     answer: message.content.unwrap_or_default(),
                     rounds: round,
                     totals,
+                    sources,
                 });
             }
 
@@ -208,6 +216,7 @@ impl Client {
             let content = message.content.get_or_insert_default();
             content.push_str(&choice.message.content.unwrap_or_default());
             message.tool_calls.extend(choice.message.tool_calls);
+            message.annotations.extend(choice.message.annotations);
         }
 
         Ok((message, totals))
@@ -359,6 +368,16 @@ pub struct ToolCompletion {
     pub rounds: usize,
     /// Usage of every round added up
     pub totals: Totals,
+    /// The web search results, in order, without duplicates. Empty without a search.
+    pub sources: Vec<UrlCitation>,
+}
+
+/// A web search result, as OpenRouter cites it
+#[derive(Debug, Clone, Deserialize)]
+pub struct UrlCitation {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
 }
 
 const COMPLETE_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -395,6 +414,14 @@ struct ReponseMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    annotations: Vec<Annotation>,
+}
+
+/// Only URL citations are used: the results of a web search
+#[derive(Debug, Clone, Deserialize)]
+struct Annotation {
+    url_citation: Option<UrlCitation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +498,43 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As OpenRouter answered a request with its web search tool (contents shortened)
+    #[test]
+    fn web_search_responses_give_sources_and_search_counts() {
+        let json = serde_json::json!({
+            "model": "google/gemini-3.8-flash",
+            "choices": [{ "finish_reason": "stop", "message": {
+                "role": "assistant", "content": "The latest patch...", "refusal": null,
+                "annotations": [
+                    { "type": "url_citation", "url_citation": {
+                        "url": "https://deadlock.now/patches", "title": "Deadlock patch notes",
+                        "start_index": 0, "end_index": 0, "content": "# DEADLOCK PATCH NOTES..." } },
+                    { "type": "file", "file": { "name": "a.pdf" } }
+                ]
+            } }],
+            "usage": {
+                "prompt_tokens": 22627, "completion_tokens": 1424, "cost": 0.04068045,
+                "server_tool_use_details": {
+                    "web_search_requests": 4, "tool_calls_requested": 4, "tool_calls_executed": 4
+                }
+            }
+        });
+        let response: Response = serde_json::from_value(json).unwrap();
+
+        let message = &response.choices[0].message;
+        let citations = message
+            .annotations
+            .iter()
+            .filter_map(|a| a.url_citation.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].url, "https://deadlock.now/patches");
+        assert_eq!(citations[0].title, "Deadlock patch notes");
+
+        let totals = Totals::from_report(response.usage.as_ref().unwrap(), 0);
+        assert_eq!(totals.web_searches, 4);
+    }
 
     #[test]
     fn content_parts_use_openrouter_format() {

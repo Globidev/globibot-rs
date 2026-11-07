@@ -27,14 +27,17 @@
   /** A JSON schema, as much of it as the plugin uses */
   type Param = { type: string; description?: string; enum?: string[]; items?: Param };
 
-  /** As sent to OpenRouter */
-  type ToolDefinition = {
-    function: {
-      name: string;
-      description: string;
-      parameters: { properties: Record<string, Param>; required?: string[] };
-    };
-  };
+  /** As sent to OpenRouter: our own functions, or server tools that OpenRouter runs itself */
+  type ToolDefinition =
+    | {
+        type: 'function';
+        function: {
+          name: string;
+          description: string;
+          parameters: { properties: Record<string, Param>; required?: string[] };
+        };
+      }
+    | { type: `openrouter:${string}`; parameters?: Record<string, unknown> };
 
   async function loadTraces(): Promise<{ traces: Trace[] }> {
     const res = await fetch('/plugin-api/llm/tool-traces');
@@ -186,7 +189,29 @@
         <div class="text-sm text-gray-400">Loading tools...</div>
       {:then tools}
         <div class="flex flex-col gap-2">
-          {#each tools as { function: tool }}
+          {#each tools.filter((t) => t.type !== 'function') as server (server.type)}
+            <details class="rounded-lg bg-gray-900 text-sm">
+              <summary class="cursor-pointer px-3 py-2">
+                <span class="font-mono text-xs text-indigo-300">{server.type}</span>
+                <span class="ml-2 text-xs text-gray-500">run by OpenRouter</span>
+              </summary>
+              <div class="flex flex-col gap-3 border-t border-gray-700/50 px-3 py-3">
+                <p class="text-gray-300">
+                  OpenRouter runs it when the model asks, and charges each use on top of tokens. Its
+                  calls show up in the answers above as <code>web_search</code>.
+                </p>
+                {#if server.parameters}
+                  <pre
+                    class="overflow-x-auto rounded bg-gray-950 p-2 text-xs text-gray-300">{JSON.stringify(
+                      server.parameters,
+                      null,
+                      2
+                    )}</pre>
+                {/if}
+              </div>
+            </details>
+          {/each}
+          {#each tools.flatMap( (t) => (t.type === 'function' ? [t.function] : []) ) as tool (tool.name)}
             {@const params = Object.entries(tool.parameters.properties)}
             <details class="rounded-lg bg-gray-900 text-sm">
               <summary class="cursor-pointer px-3 py-2">

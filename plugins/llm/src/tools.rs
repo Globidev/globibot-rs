@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use globibot_core::{rpc, serenity::all::UserId, storage::DiscordProfile};
 use parking_lot::RwLock;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     LlmPlugin, LoreBook, LoreSource,
@@ -51,7 +51,27 @@ pub fn tool_definitions(images_enabled: bool) -> Vec<Value> {
     if !images_enabled {
         definitions.retain(|definition| definition["function"]["name"] != GenerateImage::NAME);
     }
+    definitions.push(web_search_definition());
     definitions
+}
+
+/// The name web searches get in tool traces
+pub const WEB_SEARCH: &str = "web_search";
+
+/// OpenRouter's web search: a server tool, which OpenRouter runs when the model calls it. Its
+/// results come back as the answer's citations, not as a tool call to run here.
+fn web_search_definition() -> Value {
+    json!({
+        "type": "openrouter:web_search",
+        "parameters": {
+            // A fixed $0.007 a search. `auto` would use the provider's own search when it has one,
+            // priced by the provider.
+            "engine": "exa",
+            "max_results": 5,
+            // Across every search of one answer: each result costs prompt tokens
+            "max_total_results": 10,
+        }
+    })
 }
 
 llm_tool! {
@@ -653,8 +673,9 @@ mod tests {
     #[test]
     fn definitions_match_the_arguments() {
         let definitions = tool_definitions(true);
-        assert_eq!(definitions.len(), 11);
-        for definition in &definitions {
+        assert_eq!(definitions.len(), 12);
+        assert_eq!(definitions[11]["type"], "openrouter:web_search");
+        for definition in definitions.iter().filter(|d| d["type"] == "function") {
             let function = &definition["function"];
             assert!(function["description"].is_string(), "{function}");
             let parameters = &function["parameters"];
@@ -663,7 +684,7 @@ mod tests {
                 assert!(parameters["properties"].get(name).is_some(), "{function}");
             }
         }
-        assert_eq!(tool_definitions(false).len(), 10);
+        assert_eq!(tool_definitions(false).len(), 11);
 
         let get_lore = GetLore::definition();
         assert_eq!(

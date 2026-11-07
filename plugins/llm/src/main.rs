@@ -35,7 +35,9 @@ use cooldown::Cooldowns;
 use fun::{Vibe, sanitize_llm_output};
 use image_generation::{DailyCounts, ImageSettings};
 use images::{Consent, MessageImages};
-use openrouter::{ContentPart, Message as LlmMessage, Role, TextContentPart, ToolOutput};
+use openrouter::{
+    ContentPart, Message as LlmMessage, Role, TextContentPart, ToolOutput, UrlCitation,
+};
 use parking_lot::{Mutex, RwLock};
 use reminders::{REMINDERS_KEY, Reminders};
 use settings::{LlmSettings, SETTINGS_KEY};
@@ -1192,6 +1194,33 @@ fn reply_line(replied_to: &Message, bot_id: UserId) -> String {
     }
 }
 
+/// Added to the system prompt when answering: each search is paid on top of tokens
+const WEB_SEARCH_NOTE: &str = "# Web search
+Search the web only when an answer needs facts you don't know or that may have changed: news, \
+patch notes, releases, prices, scores, schedules. Not for banter, opinions, or what's in the chat. \
+Don't write links or a sources list: links to your sources are added under your answer.";
+
+/// How many search results are linked under an answer
+const MAX_SOURCE_LINKS: usize = 3;
+
+/// `answer` with links to its first web sources on a small line, as many as fit in a message
+fn with_source_links(answer: &str, sources: &[UrlCitation]) -> String {
+    let mut text = answer.to_string();
+    let usable = sources
+        .iter()
+        .filter(|source| source.url.starts_with("http") && !source.url.contains(['>', ' ']));
+    for (index, source) in usable.take(MAX_SOURCE_LINKS).enumerate() {
+        // `<...>` keeps Discord from adding a preview of every link
+        let separator = if index == 0 { "\n-# " } else { " " };
+        let link = format!("{separator}[src{}](<{}>)", index + 1, source.url);
+        if text.chars().count() + link.chars().count() > fun::MAX_MESSAGE_CHARS {
+            break;
+        }
+        text.push_str(&link);
+    }
+    text
+}
+
 fn suggested_addition_reply(for_user_id: UserId) -> String {
     format!(
         "Suggested an addition to <@{for_user_id}>'s lore. \
@@ -1432,7 +1461,10 @@ impl LlmPlugin {
                 kind,
                 model.clone(),
                 message.channel_id.to_string(),
-                self.system_prompt_with(&names_prompt),
+                format!(
+                    "{}\n{WEB_SEARCH_NOTE}",
+                    self.system_prompt_with(&names_prompt)
+                ),
                 context.clone(),
                 &tools,
                 move |name, args| async move {
@@ -1461,9 +1493,28 @@ impl LlmPlugin {
                 },
             )
             .await;
-        let calls = calls.into_inner();
+        let mut calls = calls.into_inner();
         // Sent with whichever answer comes, even the retry without tools: they're paid for
         let files = files.into_inner();
+        let sources = match &completion_res {
+            Ok(completion) => completion.sources.clone(),
+            Err(_) => Vec::new(),
+        };
+        // OpenRouter runs the searches: traced like the other tools, with their results
+        if let Ok(completion) = &completion_res
+            && completion.totals.web_searches > 0
+        {
+            calls.push(ToolCallRecord {
+                name: tools::WEB_SEARCH.to_string(),
+                arguments: serde_json::json!({ "searches": completion.totals.web_searches })
+                    .to_string(),
+                result: sources
+                    .iter()
+                    .map(|source| format!("{} <{}>", source.title, source.url))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
 
         let outcome = match &completion_res {
             Ok(completion) => Outcome::Answered {
@@ -1535,7 +1586,8 @@ impl LlmPlugin {
         };
         if let Ok(answer) = completion_res {
             let answer = sanitize_llm_output(&answer);
-            send(answer.clone(), files).await??;
+            // The context keeps the answer alone, so the model doesn't learn to write links itself
+            send(with_source_links(&answer, &sources), files).await??;
 
             let bot_message = ContextMessage {
                 id: None,
@@ -2495,5 +2547,33 @@ mod tests {
         assert_eq!(lore_book.last_id, 6);
         let suggestion = &lore_book.suggestions_by_user[&UserId::new(1)][0];
         assert_eq!(suggestion.fact_id, None);
+    }
+
+    fn citation(url: &str) -> UrlCitation {
+        UrlCitation {
+            url: url.to_string(),
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn source_links_go_under_the_answer_while_they_fit() {
+        let sources = [
+            "https://a.com",
+            "https://b.com/x y",
+            "https://c.com",
+            "https://d.com",
+            "https://e.com",
+        ]
+        .map(citation);
+        assert_eq!(
+            with_source_links("Answer", &sources),
+            "Answer\n-# [src1](<https://a.com>) [src2](<https://c.com>) [src3](<https://d.com>)"
+        );
+        assert_eq!(with_source_links("Answer", &[]), "Answer");
+
+        // A full message keeps its text, links are dropped
+        let full = "a".repeat(fun::MAX_MESSAGE_CHARS - 10);
+        assert_eq!(with_source_links(&full, &sources), full);
     }
 }

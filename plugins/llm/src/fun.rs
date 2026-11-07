@@ -193,11 +193,13 @@ impl LlmPlugin {
     }
 }
 
+/// Discord's limit is 2000 characters, with some margin for how it counts them
+pub const MAX_MESSAGE_CHARS: usize = 1_990;
+
 /// Makes LLM output safe to post: no mass mentions or role pings, and within Discord's message
 /// length limit
 pub fn sanitize_llm_output(text: &str) -> String {
-    // Discord's limit is 2000 characters, keep some margin for how it counts them
-    const MAX_CHARS: usize = 1_990;
+    const MAX_CHARS: usize = MAX_MESSAGE_CHARS;
 
     let text = text
         .replace("@everyone", "@\u{200B}everyone")
