@@ -5,6 +5,7 @@
 
 use std::{
     collections::VecDeque,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -50,6 +51,18 @@ pub struct ChimeIn {
     pub bot_names: Vec<String>,
     /// When it chimed in, latest last. ponytail: not saved, a restart resets the limits.
     posts: Mutex<VecDeque<Instant>>,
+    /// Answers being written in the channel. The context then still shows the ping as
+    /// unanswered, so the classifier would say YES and the bot would answer it twice.
+    answering: AtomicUsize,
+}
+
+/// Counts an answer in progress until dropped
+pub struct Answering<'a>(&'a AtomicUsize);
+
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// What the rules look at
@@ -67,7 +80,18 @@ impl ChimeIn {
             channel_id,
             bot_names,
             posts: Mutex::default(),
+            answering: AtomicUsize::new(0),
         }
+    }
+
+    /// Marks an answer in the channel as in progress, until the result is dropped
+    pub fn start_answer(&self) -> Answering<'_> {
+        self.answering.fetch_add(1, Ordering::Relaxed);
+        Answering(&self.answering)
+    }
+
+    pub fn is_answering(&self) -> bool {
+        self.answering.load(Ordering::Relaxed) > 0
     }
 
     /// Whether the limits leave room for one more
@@ -203,5 +227,16 @@ mod tests {
         assert!(!chime_in.try_take(at + HOUR + Duration::from_secs(1)));
         // A day after the first ones, there's room again
         assert!(chime_in.has_room(start + DAY + HOUR + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn answering_until_dropped() {
+        let chime_in = ChimeIn::new(ChannelId::new(1), Vec::new());
+        let first = chime_in.start_answer();
+        let second = chime_in.start_answer();
+        drop(first);
+        assert!(chime_in.is_answering());
+        drop(second);
+        assert!(!chime_in.is_answering());
     }
 }

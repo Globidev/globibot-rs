@@ -1418,6 +1418,11 @@ impl LlmPlugin {
         mut request_message: LlmMessage,
         image_urls: &[String],
     ) -> anyhow::Result<()> {
+        let _answering = self
+            .chime_in
+            .as_ref()
+            .filter(|chime_in| chime_in.channel_id == message.channel_id)
+            .map(ChimeIn::start_answer);
         // Each RPC gets its own context: one has a 10s deadline, and answering can take longer
         let typing = rpc
             .start_typing(rpc::context::current(), message.channel_id)
@@ -1708,7 +1713,7 @@ impl LlmPlugin {
         let Some(chime_in) = &self.chime_in else {
             return false;
         };
-        if message.channel_id != chime_in.channel_id {
+        if message.channel_id != chime_in.channel_id || chime_in.is_answering() {
             return false;
         }
         let now = Instant::now();
@@ -1751,7 +1756,8 @@ impl LlmPlugin {
         )
         .await?;
         tracing::info!(message = %message.link(), "Chime-in check: {verdict}");
-        if !answering || !chime_in.try_take(Instant::now()) {
+        // An answer may have started during the check
+        if !answering || chime_in.is_answering() || !chime_in.try_take(Instant::now()) {
             return Ok(());
         }
 
