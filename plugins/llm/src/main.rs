@@ -1203,20 +1203,35 @@ Don't write links or a sources list: links to your sources are added under your 
 /// How many search results are linked under an answer
 const MAX_SOURCE_LINKS: usize = 3;
 
-/// `answer` with links to its first web sources on a small line, as many as fit in a message
+/// `answer` with links to its first web sources on a small line, as many as fit in a message.
+/// Each link is named after its site, one per site.
 fn with_source_links(answer: &str, sources: &[UrlCitation]) -> String {
     let mut text = answer.to_string();
-    let usable = sources
-        .iter()
-        .filter(|source| source.url.starts_with("http") && !source.url.contains(['>', ' ']));
-    for (index, source) in usable.take(MAX_SOURCE_LINKS).enumerate() {
+    let mut sites = Vec::new();
+    let usable = sources.iter().filter_map(|source| {
+        if !source.url.starts_with("http") || source.url.contains(['>', ' ']) {
+            return None;
+        }
+        let url = reqwest::Url::parse(&source.url).ok()?;
+        let domain = url.domain()?;
+        let site = domain.strip_prefix("www.").unwrap_or(domain).to_string();
+        Some((site, &source.url))
+    });
+    for (site, url) in usable {
+        if sites.len() == MAX_SOURCE_LINKS {
+            break;
+        }
+        if sites.contains(&site) {
+            continue;
+        }
         // `<...>` keeps Discord from adding a preview of every link
-        let separator = if index == 0 { "\n-# " } else { " " };
-        let link = format!("{separator}[src{}](<{}>)", index + 1, source.url);
+        let separator = if sites.is_empty() { "\n-# " } else { " " };
+        let link = format!("{separator}[{site}](<{url}>)");
         if text.chars().count() + link.chars().count() > fun::MAX_MESSAGE_CHARS {
             break;
         }
         text.push_str(&link);
+        sites.push(site);
     }
     text
 }
@@ -2565,16 +2580,19 @@ mod tests {
     #[test]
     fn source_links_go_under_the_answer_while_they_fit() {
         let sources = [
-            "https://a.com",
+            "https://www.a.com/1",
             "https://b.com/x y",
-            "https://c.com",
-            "https://d.com",
+            "https://a.com/2",
+            "https://forums.c.org",
+            "https://127.0.0.1/x",
+            "https://d.now",
             "https://e.com",
         ]
         .map(citation);
         assert_eq!(
             with_source_links("Answer", &sources),
-            "Answer\n-# [src1](<https://a.com>) [src2](<https://c.com>) [src3](<https://d.com>)"
+            "Answer\n-# [a.com](<https://www.a.com/1>) [forums.c.org](<https://forums.c.org>) \
+            [d.now](<https://d.now>)"
         );
         assert_eq!(with_source_links("Answer", &[]), "Answer");
 
