@@ -291,7 +291,7 @@
                     >
                       <textarea
                         bind:value={edits[fact.id]}
-                        maxlength={MAX_ADDITION_CHARS}
+                        maxlength={Math.max(MAX_ADDITION_CHARS, fact.text.length)}
                         aria-label="New text for this fact about {name}"
                         class="w-full rounded border border-gray-700 bg-gray-950 p-2 text-sm text-white outline-none focus:border-indigo-500"
                       ></textarea>
