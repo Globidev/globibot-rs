@@ -64,7 +64,7 @@ use globibot_core::{
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, FileAttachment},
     serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, RoleId, UserId},
-    storage::{self, DiscordProfile, RedisStorage, StorageValue},
+    storage::{self, DiscordProfile, RedisStorage, StorageError, StorageValue},
 };
 use itertools::Itertools;
 
@@ -105,11 +105,19 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to load LLM lore book")?
             .unwrap_or_default();
         lore_book.migrate();
-        let personality_registry = PersonalityRegistry::load_from_storage(storage.clone()).await?;
         let settings = storage
             .get_opt::<LlmSettings>(SETTINGS_KEY)
             .await
             .context("Failed to load LLM settings")?;
+        // The saved personality, unless it was removed from Redis: then the first one by name
+        let personality_names = personality_names(&mut storage).await?;
+        let personality = settings
+            .as_ref()
+            .map(|settings| &settings.personality)
+            .filter(|name| personality_names.contains(name))
+            .or(personality_names.first())
+            .context("No personality in Redis")?
+            .clone();
         let contexts_by_channel = load_contexts(rpc, &mut storage).await?;
         let usage = storage
             .get_opt::<UsageStats>(USAGE_KEY)
@@ -131,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
             guild_id,
             members,
             lore_book,
-            personality_registry,
+            personality,
             settings,
             contexts_by_channel,
             usage,
@@ -349,7 +357,10 @@ async fn llm_settings(
     let image_settings = llm_plugin.image_settings.read().clone();
     let settings = WebLLMSettings {
         model,
-        prompt: llm_plugin.system_prompt(),
+        prompt: llm_plugin
+            .system_prompt()
+            .await
+            .unwrap_or_else(|err| format!("Couldn't build the prompt: {err:#}")),
         context_window_size,
         image_model: image_settings.model,
         image_generation_enabled: image_settings.enabled,
@@ -402,42 +413,47 @@ struct LlmPersonality {
 }
 
 async fn llm_personality(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
-    let personality = llm_plugin.personality.read();
-
-    Json(LlmPersonality {
-        personality: personality.name.clone(),
-        prompt: personality.prompt.clone(),
-        available_personalities: llm_plugin
-            .personality_registry
-            .read()
-            .personalities_by_name
-            .keys()
-            .cloned()
-            .collect(),
-    })
+    let name = llm_plugin.personality.read().clone();
+    let mut storage = llm_plugin.storage.clone();
+    let loaded = async {
+        let prompt = storage.get_opt::<PersonalityPrompt>(&name).await?;
+        let names = personality_names(&mut storage).await?;
+        Ok::<_, StorageError>((prompt, names))
+    };
+    match loaded.await {
+        Ok((prompt, available_personalities)) => Json(LlmPersonality {
+            personality: name,
+            prompt: prompt.map(|p| p.prompt).unwrap_or_default(),
+            available_personalities,
+        })
+        .into_response(),
+        Err(err) => {
+            tracing::error!("Failed to load personalities: {err:?}");
+            (StatusCode::BAD_GATEWAY, "Couldn't load the personalities").into_response()
+        }
+    }
 }
 
 async fn update_llm_personality(
     State(llm_plugin): State<Arc<LlmPlugin>>,
     Json(personality_req): Json<LlmPersonality>,
 ) -> impl IntoResponse {
-    let new_personality = match llm_plugin
-        .personality_registry
-        .read()
-        .personalities_by_name
-        .get(&personality_req.personality)
-    {
-        Some(p) => p.clone(),
-        None => {
+    match personality_names(&mut llm_plugin.storage.clone()).await {
+        Ok(names) if names.contains(&personality_req.personality) => {}
+        Ok(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Unknown personality `{}`", personality_req.personality),
             )
                 .into_response();
         }
-    };
+        Err(err) => {
+            tracing::error!("Failed to load personalities: {err:?}");
+            return (StatusCode::BAD_GATEWAY, "Couldn't load the personalities").into_response();
+        }
+    }
 
-    *llm_plugin.personality.write() = new_personality;
+    *llm_plugin.personality.write() = personality_req.personality;
     llm_plugin.save_settings().await;
 
     llm_personality(State(llm_plugin)).await.into_response()
@@ -646,8 +662,8 @@ struct LlmPlugin {
     storage: RedisStorage,
 
     llm_model: RwLock<String>,
-    personality: RwLock<Personality>,
-    personality_registry: RwLock<PersonalityRegistry>,
+    /// Name of the personality, a key of [`PersonalityPrompt`]. Its prompt is read on each use.
+    personality: RwLock<String>,
     contexts_by_channel: Arc<Mutex<HashMap<ChannelId, ChannelContext>>>,
 
     context_window_size: AtomicUsize,
@@ -682,60 +698,39 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-struct Personality {
-    name: String,
+/// A personality's system prompt, keyed by its name. Added and edited directly in Redis: the
+/// plugin reads them when used, so changes apply without a restart.
+struct PersonalityPrompt {
     prompt: String,
 }
 
-#[derive(Debug)]
-struct PersonalityRegistry {
-    personalities_by_name: HashMap<String, Personality>,
+impl StorageValue for PersonalityPrompt {
+    type Format = storage::StringFormat;
+
+    const REDIS_NS: &'static str = "llm_personality";
 }
 
-impl PersonalityRegistry {
-    async fn load_from_storage(
-        mut storage: storage::RedisStorage,
-    ) -> Result<Self, storage::StorageError> {
-        struct PersonalityPrompt {
-            prompt: String,
-        }
-        impl storage::StorageValue for PersonalityPrompt {
-            type Format = storage::StringFormat;
-
-            const REDIS_NS: &'static str = "llm_personality";
-        }
-
-        impl From<String> for PersonalityPrompt {
-            fn from(prompt: String) -> Self {
-                Self { prompt }
-            }
-        }
-
-        impl AsRef<str> for PersonalityPrompt {
-            fn as_ref(&self) -> &str {
-                &self.prompt
-            }
-        }
-
-        let mut personalities_by_name = HashMap::new();
-        for key in storage.list_keys::<PersonalityPrompt>("*").await? {
-            let PersonalityPrompt { prompt } = storage.get(&key).await?;
-            personalities_by_name.insert(key.clone(), Personality { name: key, prompt });
-        }
-
-        Ok(Self {
-            personalities_by_name,
-        })
+impl From<String> for PersonalityPrompt {
+    fn from(prompt: String) -> Self {
+        Self { prompt }
     }
+}
 
-    /// The alphabetically first personality, so the fallback is the same on every restart
-    fn default_personality(&self) -> Option<Personality> {
-        self.personalities_by_name
-            .values()
-            .min_by(|a, b| a.name.cmp(&b.name))
-            .cloned()
+impl AsRef<str> for PersonalityPrompt {
+    fn as_ref(&self) -> &str {
+        &self.prompt
     }
+}
+
+fn system_prompt_with(personality: &str, lore: &str) -> String {
+    format!("{personality}\n{lore}\n{CHAT_STRUCTURE}")
+}
+
+/// Every personality in Redis, sorted by name
+async fn personality_names(storage: &mut RedisStorage) -> Result<Vec<String>, StorageError> {
+    let mut names = storage.list_keys::<PersonalityPrompt>("*").await?;
+    names.sort();
+    Ok(names)
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -1291,7 +1286,7 @@ impl LlmPlugin {
         guild_id: GuildId,
         members: Vec<Member>,
         mut lore_book: LoreBook,
-        registry: PersonalityRegistry,
+        personality: String,
         saved_settings: Option<LlmSettings>,
         mut contexts_by_channel: HashMap<ChannelId, ChannelContext>,
         usage: UsageStats,
@@ -1360,19 +1355,7 @@ impl LlmPlugin {
                 .or_insert_with(|| UserLore::new(profile));
         }
 
-        // Saved settings win over the defaults, except for a personality that no longer exists
-        let saved_personality = saved_settings.as_ref().and_then(|settings| {
-            registry
-                .personalities_by_name
-                .get(&settings.personality)
-                .cloned()
-        });
-        let personality = match saved_personality {
-            Some(personality) => personality,
-            None => registry
-                .default_personality()
-                .context("Default personality not found in registry")?,
-        };
+        // Saved settings win over the defaults
         let model = saved_settings
             .as_ref()
             .map_or(default_model, |settings| settings.model.clone());
@@ -1399,7 +1382,6 @@ impl LlmPlugin {
             storage,
             llm_model: RwLock::new(model),
             personality: RwLock::new(personality),
-            personality_registry: RwLock::new(registry),
             contexts_by_channel: Arc::new(Mutex::new(contexts_by_channel)),
             context_window_size: AtomicUsize::new(context_window_size),
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
@@ -1414,13 +1396,22 @@ impl LlmPlugin {
     }
 
     /// With the whole lore book, for completions without tools
-    fn system_prompt(&self) -> String {
-        self.system_prompt_with(&self.lore_book.read().to_prompt())
+    async fn system_prompt(&self) -> anyhow::Result<String> {
+        let personality = self.personality_prompt().await?;
+        let lore = self.lore_book.read().to_prompt();
+        Ok(system_prompt_with(&personality, &lore))
     }
 
-    fn system_prompt_with(&self, lore: &str) -> String {
-        let personality = self.personality.read();
-        format!("{}\n{lore}\n{CHAT_STRUCTURE}", personality.prompt)
+    /// The current personality's prompt, read from Redis so edits apply right away
+    async fn personality_prompt(&self) -> anyhow::Result<String> {
+        let name = self.personality.read().clone();
+        let PersonalityPrompt { prompt } = self
+            .storage
+            .clone()
+            .get_opt(&name)
+            .await?
+            .with_context(|| format!("Personality `{name}` is not in Redis"))?;
+        Ok(prompt)
     }
 
     /// Answers a ping or a DM. `context` is the channel's context without this message, and
@@ -1438,6 +1429,8 @@ impl LlmPlugin {
             .as_ref()
             .filter(|chime_in| chime_in.channel_id == message.channel_id)
             .map(ChimeIn::start_answer);
+        // Before typing starts, which a failure here would leave on
+        let personality = self.personality_prompt().await?;
         // Each RPC gets its own context: one has a 10s deadline, and answering can take longer
         let typing = rpc
             .start_typing(rpc::context::current(), message.channel_id)
@@ -1483,7 +1476,7 @@ impl LlmPlugin {
                 message.channel_id.to_string(),
                 format!(
                     "{}\n{WEB_SEARCH_NOTE}",
-                    self.system_prompt_with(&names_prompt)
+                    system_prompt_with(&personality, &names_prompt)
                 ),
                 context.clone(),
                 &tools,
@@ -1568,12 +1561,13 @@ impl LlmPlugin {
             Ok(completion) => Ok(completion.answer),
             Err(err) => {
                 tracing::warn!("Completion with tools failed, retrying without: {err:?}");
+                let lore = self.lore_book.read().to_prompt();
                 self.llm_client
                     .complete(
                         kind,
                         &model,
                         message.channel_id.to_string(),
-                        self.system_prompt(),
+                        system_prompt_with(&personality, &lore),
                         context,
                     )
                     .await
@@ -2052,7 +2046,7 @@ impl LlmPlugin {
     async fn show_personality(&self, ctx: &CommandCtx<'_>) -> anyhow::Result<()> {
         ctx.reply(format!(
             "Current personality is set to `{}`",
-            self.personality.read().name
+            self.personality.read()
         ))
         .await?;
         Ok(())
@@ -2064,19 +2058,16 @@ impl LlmPlugin {
         choice: PersonalityChoice,
     ) -> anyhow::Result<()> {
         let new_personality_name = choice.value();
-        let Some(new_personality) = self
-            .personality_registry
-            .read()
-            .personalities_by_name
-            .get(&new_personality_name)
-            .cloned()
-        else {
+        if !personality_names(&mut self.storage.clone())
+            .await?
+            .contains(&new_personality_name)
+        {
             ctx.reply(format!("Unknown personality `{new_personality_name}`"))
                 .await?;
             return Ok(());
-        };
+        }
 
-        *self.personality.write() = new_personality;
+        *self.personality.write() = new_personality_name.clone();
         self.save_settings().await;
 
         ctx.reply(format!("Personality changed to `{new_personality_name}`"))

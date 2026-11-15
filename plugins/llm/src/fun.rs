@@ -35,14 +35,11 @@ impl LlmPlugin {
         let mut message = LlmMessage::text(Role::User, prompt);
         message.content.extend(images);
 
+        let system_prompt = self.system_prompt().await?;
         // Build the request before awaiting so the model's lock isn't held across the await
-        let completion = self.llm_client.complete(
-            kind,
-            &self.llm_model.read(),
-            None,
-            self.system_prompt(),
-            [message],
-        );
+        let completion =
+            self.llm_client
+                .complete(kind, &self.llm_model.read(), None, system_prompt, [message]);
         let answer = completion.await?;
 
         Ok(sanitize_llm_output(&answer))

@@ -29,7 +29,7 @@ impl LlmPlugin {
     pub async fn save_settings(&self) {
         let settings = LlmSettings {
             model: self.llm_model.read().clone(),
-            personality: self.personality.read().name.clone(),
+            personality: self.personality.read().clone(),
             context_window_size: self.context_window_size.load(Ordering::Relaxed),
             images: Some(self.image_settings.read().clone()),
         };

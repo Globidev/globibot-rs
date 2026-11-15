@@ -148,7 +148,7 @@ impl LlmPlugin {
                 model.clone(),
                 format!("nightly-lore-{channel_id}"),
                 // The whole lore book, so it doesn't suggest what's already there
-                self.system_prompt(),
+                self.system_prompt().await?,
                 vec![LlmMessage::text(Role::User, prompt)],
                 &tools,
                 move |name, arguments| async move {
