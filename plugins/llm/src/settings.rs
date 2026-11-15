@@ -13,6 +13,9 @@ pub struct LlmSettings {
     /// `None` in settings saved before image generation existed: the defaults apply
     #[serde(default)]
     pub images: Option<ImageSettings>,
+    /// The admin's base prompt. `None`: the default in the code.
+    #[serde(default)]
+    pub base_prompt: Option<String>,
 }
 
 impl StorageValue for LlmSettings {
@@ -32,6 +35,7 @@ impl LlmPlugin {
             personality: self.personality.read().clone(),
             context_window_size: self.context_window_size.load(Ordering::Relaxed),
             images: Some(self.image_settings.read().clone()),
+            base_prompt: self.base_prompt_override.read().clone(),
         };
 
         if let Err(err) = self.storage.clone().set(SETTINGS_KEY, &settings).await {

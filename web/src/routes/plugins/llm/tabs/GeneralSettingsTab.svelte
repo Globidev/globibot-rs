@@ -68,6 +68,45 @@
   });
 
   let initPromise = loadData();
+
+  // The admin only: the rules after the personality and lore, saved with a button
+  type BasePrompt = { prompt: string; default: string };
+  let basePrompt = $state<BasePrompt | null>(null);
+  let basePromptDraft = $state('');
+  let basePromptStatus = $state<'idle' | 'saving' | 'saved' | `error:${string}`>('idle');
+
+  async function loadBasePrompt() {
+    const res = await fetch('/plugin-api/llm/base-prompt');
+    if (!res.ok) return;
+    basePrompt = await res.json();
+    basePromptDraft = basePrompt!.prompt;
+  }
+
+  /** `null` goes back to the default */
+  async function saveBasePrompt(prompt: string | null) {
+    basePromptStatus = 'saving';
+    const res = await fetch('/plugin-api/llm/base-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+    if (!res.ok) {
+      basePromptStatus = `error:${await errorText(res)}`;
+      return;
+    }
+    basePrompt = await res.json();
+    basePromptDraft = basePrompt!.prompt;
+    basePromptStatus = 'saved';
+    setTimeout(() => {
+      if (basePromptStatus === 'saved') basePromptStatus = 'idle';
+    }, 2000);
+    // The full prompt below includes it
+    loadData();
+  }
+
+  initPromise.then((data) => {
+    if (data.allowed_to_edit) loadBasePrompt();
+  });
 </script>
 
 {#await initPromise then _}
@@ -161,6 +200,53 @@
         {/if}
       </div>
     </div>
+
+    {#if basePrompt}
+      <section class="mt-6 flex flex-col gap-2 text-left">
+        <label for="base-prompt" class="text-center! font-medium whitespace-nowrap text-gray-400">
+          Base prompt <span class="text-xs font-normal text-gray-500">(admin only)</span>
+        </label>
+        <p class="text-xs text-gray-500">
+          The rules after the personality and lore in every prompt. Applies from the next message.
+          {#if basePrompt.prompt === basePrompt.default}
+            This is the default from the code, and follows its updates.
+          {:else}
+            Customized: code updates to the default don't apply until it's reset.
+          {/if}
+        </p>
+        <textarea
+          id="base-prompt"
+          bind:value={basePromptDraft}
+          rows="16"
+          class="w-full resize-y rounded border border-gray-700 bg-gray-900 p-2 font-mono text-sm text-white outline-none focus:border-indigo-500"
+        ></textarea>
+        <div class="flex items-center gap-2">
+          <span class="text-sm">
+            {#if basePromptStatus === 'saving'}
+              <span class="animate-pulse text-indigo-400">Saving...</span>
+            {:else if basePromptStatus === 'saved'}
+              <span class="text-green-500">✓ Saved</span>
+            {:else if basePromptStatus.startsWith('error')}
+              <span class="text-red-500">⚠ {basePromptStatus.slice(6)}</span>
+            {/if}
+          </span>
+          <button
+            onclick={() => saveBasePrompt(null)}
+            disabled={basePrompt.prompt === basePrompt.default}
+            class="ml-auto cursor-pointer rounded px-3 py-1 text-sm text-gray-400 hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Reset to default
+          </button>
+          <button
+            onclick={() => saveBasePrompt(basePromptDraft)}
+            disabled={basePromptDraft === basePrompt.prompt || !basePromptDraft.trim()}
+            class="cursor-pointer rounded bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      </section>
+    {/if}
 
     <label for="prompt" class="text-center! font-medium whitespace-nowrap text-gray-400">
       Full prompt

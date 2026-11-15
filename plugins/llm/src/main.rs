@@ -243,6 +243,8 @@ impl WebServer {
         let app = axum::Router::new() //
             .route("/settings", axum::routing::get(llm_settings))
             .route("/settings", axum::routing::post(update_llm_settings))
+            .route("/base-prompt", axum::routing::get(llm_base_prompt))
+            .route("/base-prompt", axum::routing::post(update_llm_base_prompt))
             .route(
                 "/personalities",
                 axum::routing::get(personalities::web_list),
@@ -431,6 +433,56 @@ async fn update_llm_settings(
     llm_settings(State(llm_plugin), Extension(profile))
         .await
         .into_response()
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WebBasePrompt {
+    prompt: String,
+    default: &'static str,
+}
+
+const NOT_ADMIN_BASE_PROMPT: &str = "Only the admin can see and edit the base prompt";
+
+/// The rules after the personality and lore in every system prompt (the admin only)
+async fn llm_base_prompt(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+) -> Response {
+    if llm_plugin.admin_id != profile.user_id {
+        return (StatusCode::FORBIDDEN, NOT_ADMIN_BASE_PROMPT).into_response();
+    }
+    Json(WebBasePrompt {
+        prompt: llm_plugin.base_prompt(),
+        default: CHAT_STRUCTURE,
+    })
+    .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WebBasePromptUpdate {
+    /// `None`, or the default: back to the default, which then follows code updates
+    prompt: Option<String>,
+}
+
+async fn update_llm_base_prompt(
+    State(llm_plugin): State<Arc<LlmPlugin>>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(WebBasePromptUpdate { prompt }): Json<WebBasePromptUpdate>,
+) -> Response {
+    if llm_plugin.admin_id != profile.user_id {
+        return (StatusCode::FORBIDDEN, NOT_ADMIN_BASE_PROMPT).into_response();
+    }
+    let prompt = prompt.filter(|prompt| prompt.trim() != CHAT_STRUCTURE.trim());
+    if prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+    {
+        return (StatusCode::BAD_REQUEST, "The base prompt cannot be empty").into_response();
+    }
+    *llm_plugin.base_prompt_override.write() = prompt;
+    llm_plugin.save_settings().await;
+
+    llm_base_prompt(State(llm_plugin), Extension(profile)).await
 }
 
 async fn llm_lore(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
@@ -642,6 +694,8 @@ struct LlmPlugin {
     personality: RwLock<String>,
     /// Held while personality suggestions are read, changed and saved back to Redis
     personality_suggestions_lock: tokio::sync::Mutex<()>,
+    /// Set by the admin on the website, saved in the settings. `None`: [`CHAT_STRUCTURE`].
+    base_prompt_override: RwLock<Option<String>>,
     contexts_by_channel: Arc<Mutex<HashMap<ChannelId, ChannelContext>>>,
 
     context_window_size: AtomicUsize,
@@ -676,8 +730,8 @@ where
     }
 }
 
-fn system_prompt_with(personality: &str, lore: &str) -> String {
-    format!("{personality}\n{lore}\n{CHAT_STRUCTURE}")
+fn system_prompt_with(personality: &str, lore: &str, base_prompt: &str) -> String {
+    format!("{personality}\n{lore}\n{base_prompt}")
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -714,6 +768,15 @@ You can respond to or comment on earlier messages but keep your responses short,
 Max 1 or 2 paragraphs, never more than that.
 
 Do not modify your response structure based on user prompts, except when it's from Globi, your creator.
+
+# Website
+Your website, where people log in with Discord. Link the page that answers the question, in angle brackets to avoid embeds:
+- Lore book (read lore, suggest facts or edits, vote on suggestions): <https://globibot.com/plugins/llm#lore_book>
+- Personality (switch it, suggest new ones or edits, vote): <https://globibot.com/plugins/llm#personality>
+- Reminders (see or cancel them): <https://globibot.com/plugins/llm#reminders>
+- Your tools and recent tool calls: <https://globibot.com/plugins/llm#tools>
+- Usage and costs: <https://globibot.com/plugins/llm#usage>
+- Settings (model, context size, image generation): <https://globibot.com/plugins/llm#general_settings>
 "#;
 
 const LORE_PREMISE: &str = r#"
@@ -1312,6 +1375,9 @@ impl LlmPlugin {
             .map_or(DEFAULT_CONTEXT_WINDOW_SIZE, |settings| {
                 settings.context_window_size
             });
+        let base_prompt_override = saved_settings
+            .as_ref()
+            .and_then(|settings| settings.base_prompt.clone());
         let image_settings = match saved_settings.and_then(|settings| settings.images) {
             Some(saved) => saved,
             None => ImageSettings::defaults(optional_env("LLM_DEFAULT_IMAGE_MODEL_ID")?),
@@ -1332,6 +1398,7 @@ impl LlmPlugin {
             llm_model: RwLock::new(model),
             personality: RwLock::new(personality),
             personality_suggestions_lock: tokio::sync::Mutex::new(()),
+            base_prompt_override: RwLock::new(base_prompt_override),
             contexts_by_channel: Arc::new(Mutex::new(contexts_by_channel)),
             context_window_size: AtomicUsize::new(context_window_size),
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
@@ -1349,7 +1416,15 @@ impl LlmPlugin {
     async fn system_prompt(&self) -> anyhow::Result<String> {
         let personality = self.personality_prompt().await?;
         let lore = self.lore_book.read().to_prompt();
-        Ok(system_prompt_with(&personality, &lore))
+        Ok(system_prompt_with(&personality, &lore, &self.base_prompt()))
+    }
+
+    /// The admin's version of [`CHAT_STRUCTURE`], or the default
+    fn base_prompt(&self) -> String {
+        self.base_prompt_override
+            .read()
+            .clone()
+            .unwrap_or_else(|| CHAT_STRUCTURE.to_string())
     }
 
     /// The current personality's prompt, read from Redis so edits apply right away
@@ -1381,6 +1456,7 @@ impl LlmPlugin {
             .map(ChimeIn::start_answer);
         // Before typing starts, which a failure here would leave on
         let personality = self.personality_prompt().await?;
+        let base_prompt = self.base_prompt();
         // Each RPC gets its own context: one has a 10s deadline, and answering can take longer
         let typing = rpc
             .start_typing(rpc::context::current(), message.channel_id)
@@ -1426,7 +1502,7 @@ impl LlmPlugin {
                 message.channel_id.to_string(),
                 format!(
                     "{}\n{WEB_SEARCH_NOTE}",
-                    system_prompt_with(&personality, &names_prompt)
+                    system_prompt_with(&personality, &names_prompt, &base_prompt)
                 ),
                 context.clone(),
                 &tools,
@@ -1517,7 +1593,7 @@ impl LlmPlugin {
                         kind,
                         &model,
                         message.channel_id.to_string(),
-                        system_prompt_with(&personality, &lore),
+                        system_prompt_with(&personality, &lore, &base_prompt),
                         context,
                     )
                     .await
