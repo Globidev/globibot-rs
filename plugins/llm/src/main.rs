@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         EventType::MessageEdit,
         EventType::MessageDelete,
         EventType::InteractionCreate,
+        EventType::Reaction,
     ])?;
 
     let mut storage = RedisStorage::from_env().await?;
@@ -763,6 +764,7 @@ The conversation may start with a summary of older messages, starting with "[Sum
 Images appear as "[Image: description]" and GIFs as "[GIF: description]". When you are asked about an image, the image itself may be attached.
 "[Image not shared with the bot]" is an image you can't see: its author didn't agree to share it. Don't guess what it shows. People can share an image by pinging you in the message that has it.
 "[Edited]" follows the first line of a message its author edited: you see the edited version. "[Deleted message]" stands for a message its author deleted: don't guess what it said.
+"[Reactions: 😂 4, 👍 2]" after a message (yours included) lists its emoji reactions and how many people used each: a hint at how it landed. Never write that line yourself.
 
 You can respond to or comment on earlier messages but keep your responses short, as to not clutter the chat.
 Max 1 or 2 paragraphs, never more than that.
@@ -1627,12 +1629,14 @@ impl LlmPlugin {
         if let Ok(answer) = completion_res {
             let answer = sanitize_llm_output(&answer);
             // The context keeps the answer alone, so the model doesn't learn to write links itself
-            send(with_source_links(&answer, &sources), files).await??;
+            let sent = send(with_source_links(&answer, &sources), files).await??;
 
             let bot_message = ContextMessage {
-                id: None,
+                // To match the reactions to it
+                id: Some(sent.id),
                 images_consent: None,
                 message: LlmMessage::text(Role::Assistant, answer),
+                reactions: Vec::new(),
             };
             self.register_message(rpc, message, bot_message).await?;
         } else {
@@ -1890,6 +1894,7 @@ impl LlmPlugin {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                 },
+                reactions: Vec::new(),
             }
         };
 
@@ -2274,6 +2279,16 @@ impl HandleEvents for LlmPlugin {
             } => {
                 if let Some(context) = self.contexts_by_channel.lock().get_mut(&channel_id) {
                     context.delete(message_id);
+                }
+            }
+
+            Event::Reaction {
+                channel_id,
+                message_id,
+                change,
+            } => {
+                if let Some(context) = self.contexts_by_channel.lock().get_mut(&channel_id) {
+                    context.react(message_id, &change);
                 }
             }
 

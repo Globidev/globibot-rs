@@ -10,7 +10,8 @@ use std::{
 };
 
 use globibot_core::{
-    serenity::all::{Channel, MessageId},
+    events::ReactionChange,
+    serenity::all::{Channel, MessageId, ReactionType, UserId},
     storage::{self, StorageValue},
 };
 use itertools::Itertools;
@@ -39,6 +40,8 @@ const RECENT_IMAGE_MAX_MESSAGES: u64 = 10;
 const RECENT_IMAGE_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 /// How far back a ping sees the latest embed post
 const RECENT_EMBEDS_MAX_MESSAGES: u64 = 10;
+/// The most used emoji shown under a message
+const MAX_REACTION_EMOJI: usize = 5;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextMessage {
@@ -52,6 +55,78 @@ pub struct ContextMessage {
     pub images_consent: Option<Consent>,
     #[serde(flatten)]
     pub message: Message,
+    /// From the reaction events seen since the message was pushed, in the order their emoji
+    /// first appeared. Shown after the message, not stored in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<EmojiReactions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EmojiReactions {
+    /// The emoji itself, or `:name:` for a custom one
+    emoji: String,
+    users: Vec<UserId>,
+}
+
+impl ContextMessage {
+    /// The message as sent to the model: with a line of its most used reactions, if it has any
+    pub fn prompt_message(&self) -> Message {
+        let mut message = self.message.clone();
+        if self.reactions.is_empty() {
+            return message;
+        }
+        let counts = self
+            .reactions
+            .iter()
+            .sorted_by_key(|reactions| std::cmp::Reverse(reactions.users.len()))
+            .take(MAX_REACTION_EMOJI)
+            .map(|reactions| format!("{} {}", reactions.emoji, reactions.users.len()))
+            .join(", ");
+        message.content.push(ContentPart::Text(TextContentPart {
+            text: format!("[Reactions: {counts}]"),
+        }));
+        message
+    }
+
+    fn react(&mut self, change: &ReactionChange) {
+        match change {
+            ReactionChange::Add { user_id, emoji } => {
+                let emoji = emoji_text(emoji);
+                match self.reactions.iter_mut().find(|r| r.emoji == emoji) {
+                    Some(reactions) if reactions.users.contains(user_id) => {}
+                    Some(reactions) => reactions.users.push(*user_id),
+                    None => self.reactions.push(EmojiReactions {
+                        emoji,
+                        users: vec![*user_id],
+                    }),
+                }
+            }
+            ReactionChange::Remove { user_id, emoji } => {
+                let emoji = emoji_text(emoji);
+                for reactions in &mut self.reactions {
+                    if reactions.emoji == emoji {
+                        reactions.users.retain(|user| user != user_id);
+                    }
+                }
+                self.reactions
+                    .retain(|reactions| !reactions.users.is_empty());
+            }
+            ReactionChange::RemoveAll => self.reactions.clear(),
+            ReactionChange::RemoveEmoji { emoji } => {
+                let emoji = emoji_text(emoji);
+                self.reactions.retain(|reactions| reactions.emoji != emoji);
+            }
+        }
+    }
+}
+
+/// Custom emoji as `:name:`, shorter than `<:name:id>` and all the model needs
+fn emoji_text(emoji: &ReactionType) -> String {
+    match emoji {
+        ReactionType::Unicode(emoji) => emoji.clone(),
+        ReactionType::Custom { name, .. } => format!(":{}:", name.as_deref().unwrap_or("emoji")),
+        _ => "?".to_string(),
+    }
 }
 
 /// The latest images posted in a channel. Not saved: their links expire anyway.
@@ -119,7 +194,7 @@ impl ChannelContext {
         Some(
             self.messages
                 .drain(..drop_count)
-                .map(|context_message| context_message.message)
+                .map(|context_message| context_message.prompt_message())
                 .collect(),
         )
     }
@@ -176,8 +251,25 @@ impl ChannelContext {
                 text: EDITED.to_string(),
             }),
         );
+        edited.reactions = std::mem::take(&mut stored.reactions);
         *stored = edited;
         true
+    }
+
+    /// Applies a reaction change to a message. False if the message isn't in the window.
+    pub fn react(&mut self, id: MessageId, change: &ReactionChange) -> bool {
+        match self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|stored| stored.id == Some(id))
+        {
+            Some(stored) => {
+                stored.react(change);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Replaces a deleted message with a marker: who wrote it stays, nothing of what it said or
@@ -216,6 +308,7 @@ impl ChannelContext {
             None => DELETED.to_string(),
         };
         stored.images_consent = None;
+        stored.reactions.clear();
         stored.message.content = vec![ContentPart::Text(TextContentPart { text })];
         true
     }
@@ -274,11 +367,7 @@ impl ChannelContext {
             .map(|summary| Message::text(Role::User, format!("{SUMMARY_TAG}\n{summary}")));
         summary
             .into_iter()
-            .chain(
-                self.messages
-                    .iter()
-                    .map(|context_message| context_message.message.clone()),
-            )
+            .chain(self.messages.iter().map(ContextMessage::prompt_message))
             .collect()
     }
 
@@ -394,6 +483,7 @@ mod tests {
             id: Some(MessageId::new(id + 1)),
             images_consent: None,
             message: Message::text(Role::User, text.to_string()),
+            reactions: Vec::new(),
         }
     }
 
@@ -623,6 +713,49 @@ mod tests {
     }
 
     #[test]
+    fn reactions_are_counted_and_shown_after_the_message() {
+        let (mut context, _) = context_with(2);
+        let id = MessageId::new(2);
+        let laugh = || ReactionType::Unicode("😂".to_string());
+        let custom = ReactionType::Custom {
+            animated: false,
+            id: globibot_core::serenity::all::EmojiId::new(9),
+            name: Some("omegalul".to_string()),
+        };
+        let add = |user: u64, emoji: ReactionType| ReactionChange::Add {
+            user_id: UserId::new(user),
+            emoji,
+        };
+        assert!(context.react(id, &add(1, laugh())));
+        // The same user twice, e.g. a replayed event, counts once
+        context.react(id, &add(1, laugh()));
+        context.react(id, &add(2, laugh()));
+        context.react(id, &add(1, custom.clone()));
+        assert!(!context.react(MessageId::new(99), &add(1, laugh())));
+
+        let reactions_line =
+            |context: &ChannelContext| match context.prompt_messages()[1].content.last() {
+                Some(ContentPart::Text(part)) => part.text.clone(),
+                _ => panic!("expected text"),
+            };
+        assert_eq!(reactions_line(&context), "[Reactions: 😂 2, :omegalul: 1]");
+
+        // Kept through an edit, gone with the emoji or the message
+        context.edit(user_message(1, "edited"));
+        assert_eq!(reactions_line(&context), "[Reactions: 😂 2, :omegalul: 1]");
+        context.react(id, &ReactionChange::RemoveEmoji { emoji: laugh() });
+        context.react(
+            id,
+            &ReactionChange::Remove {
+                user_id: UserId::new(1),
+                emoji: custom,
+            },
+        );
+        assert!(context.messages[1].reactions.is_empty());
+        assert_eq!(context.prompt_messages()[1].content.len(), 2);
+    }
+
+    #[test]
     fn loads_contexts_saved_without_message_ids() {
         let saved = serde_json::from_value::<SavedContext>(serde_json::json!({
             "summary": null,
@@ -637,6 +770,7 @@ mod tests {
             id: Some(MessageId::new(5)),
             images_consent: None,
             message: Message::text(Role::User, "hi".to_string()),
+            reactions: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["id"], "5");
