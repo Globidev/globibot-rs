@@ -8,6 +8,7 @@ mod images;
 mod message_search;
 mod nightly_lore;
 mod openrouter;
+mod personalities;
 mod reminders;
 mod settings;
 mod tool;
@@ -39,6 +40,7 @@ use openrouter::{
     ContentPart, Message as LlmMessage, Role, TextContentPart, ToolOutput, UrlCitation,
 };
 use parking_lot::{Mutex, RwLock};
+use personalities::{PersonalityPrompt, personality_names};
 use reminders::{REMINDERS_KEY, Reminders};
 use settings::{LlmSettings, SETTINGS_KEY};
 use tokio::net::ToSocketAddrs;
@@ -64,7 +66,7 @@ use globibot_core::{
     plugin::{HandleEvents, HasEvents, HasRpc, Plugin},
     rpc::{self, FileAttachment},
     serenity::all::{Channel, ChannelId, GuildId, Member, Message, ReactionType, RoleId, UserId},
-    storage::{self, DiscordProfile, RedisStorage, StorageError, StorageValue},
+    storage::{self, DiscordProfile, RedisStorage, StorageValue},
 };
 use itertools::Itertools;
 
@@ -190,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let web_server = WebServer::new(storage, &cookie_secret, llm_plugin);
+    let web_server = WebServer::new(storage, &cookie_secret, llm_plugin, plugin.rpc.clone());
 
     tokio::select! {
         _ = web_server.serve(web_addr_listen) => {
@@ -218,14 +220,22 @@ struct WebServer {
     storage: RedisStorage,
     cookie_key: Key,
     llm_plugin: Arc<LlmPlugin>,
+    /// To announce personality switches
+    rpc: rpc::ProtocolClient,
 }
 
 impl WebServer {
-    pub fn new(storage: RedisStorage, cookie_secret: &str, llm_plugin: Arc<LlmPlugin>) -> Self {
+    pub fn new(
+        storage: RedisStorage,
+        cookie_secret: &str,
+        llm_plugin: Arc<LlmPlugin>,
+        rpc: rpc::ProtocolClient,
+    ) -> Self {
         Self {
             storage,
             cookie_key: Key::from(cookie_secret.as_bytes()),
             llm_plugin,
+            rpc,
         }
     }
 
@@ -233,8 +243,30 @@ impl WebServer {
         let app = axum::Router::new() //
             .route("/settings", axum::routing::get(llm_settings))
             .route("/settings", axum::routing::post(update_llm_settings))
-            .route("/personality", axum::routing::get(llm_personality))
-            .route("/personality", axum::routing::post(update_llm_personality))
+            .route(
+                "/personalities",
+                axum::routing::get(personalities::web_list),
+            )
+            .route(
+                "/personality",
+                axum::routing::post(personalities::web_switch),
+            )
+            .route(
+                "/personality/suggest",
+                axum::routing::post(personalities::web_suggest),
+            )
+            .route(
+                "/personality/vote",
+                axum::routing::post(personalities::web_vote),
+            )
+            .route(
+                "/personality/accept",
+                axum::routing::post(personalities::web_accept),
+            )
+            .route(
+                "/personality/dismiss",
+                axum::routing::post(personalities::web_dismiss),
+            )
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
             .route("/credits", axum::routing::get(llm_credits))
@@ -399,64 +431,6 @@ async fn update_llm_settings(
     llm_settings(State(llm_plugin), Extension(profile))
         .await
         .into_response()
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct LlmPersonality {
-    personality: String,
-
-    #[serde(skip_deserializing)]
-    prompt: String,
-
-    #[serde(skip_deserializing)]
-    available_personalities: Vec<String>,
-}
-
-async fn llm_personality(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
-    let name = llm_plugin.personality.read().clone();
-    let mut storage = llm_plugin.storage.clone();
-    let loaded = async {
-        let prompt = storage.get_opt::<PersonalityPrompt>(&name).await?;
-        let names = personality_names(&mut storage).await?;
-        Ok::<_, StorageError>((prompt, names))
-    };
-    match loaded.await {
-        Ok((prompt, available_personalities)) => Json(LlmPersonality {
-            personality: name,
-            prompt: prompt.map(|p| p.prompt).unwrap_or_default(),
-            available_personalities,
-        })
-        .into_response(),
-        Err(err) => {
-            tracing::error!("Failed to load personalities: {err:?}");
-            (StatusCode::BAD_GATEWAY, "Couldn't load the personalities").into_response()
-        }
-    }
-}
-
-async fn update_llm_personality(
-    State(llm_plugin): State<Arc<LlmPlugin>>,
-    Json(personality_req): Json<LlmPersonality>,
-) -> impl IntoResponse {
-    match personality_names(&mut llm_plugin.storage.clone()).await {
-        Ok(names) if names.contains(&personality_req.personality) => {}
-        Ok(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Unknown personality `{}`", personality_req.personality),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            tracing::error!("Failed to load personalities: {err:?}");
-            return (StatusCode::BAD_GATEWAY, "Couldn't load the personalities").into_response();
-        }
-    }
-
-    *llm_plugin.personality.write() = personality_req.personality;
-    llm_plugin.save_settings().await;
-
-    llm_personality(State(llm_plugin)).await.into_response()
 }
 
 async fn llm_lore(State(llm_plugin): State<Arc<LlmPlugin>>) -> impl IntoResponse {
@@ -655,6 +629,8 @@ struct LlmPlugin {
     starboard_channel_id: Option<ChannelId>,
     /// Where lore is suggested every night, from that channel's messages
     nightly_lore_channel_id: Option<ChannelId>,
+    /// Where switching the personality on the website is announced
+    personality_announce_channel_id: Option<ChannelId>,
     /// Where it may join conversations without being pinged
     chime_in: Option<ChimeIn>,
 
@@ -664,6 +640,8 @@ struct LlmPlugin {
     llm_model: RwLock<String>,
     /// Name of the personality, a key of [`PersonalityPrompt`]. Its prompt is read on each use.
     personality: RwLock<String>,
+    /// Held while personality suggestions are read, changed and saved back to Redis
+    personality_suggestions_lock: tokio::sync::Mutex<()>,
     contexts_by_channel: Arc<Mutex<HashMap<ChannelId, ChannelContext>>>,
 
     context_window_size: AtomicUsize,
@@ -698,39 +676,8 @@ where
     }
 }
 
-/// A personality's system prompt, keyed by its name. Added and edited directly in Redis: the
-/// plugin reads them when used, so changes apply without a restart.
-struct PersonalityPrompt {
-    prompt: String,
-}
-
-impl StorageValue for PersonalityPrompt {
-    type Format = storage::StringFormat;
-
-    const REDIS_NS: &'static str = "llm_personality";
-}
-
-impl From<String> for PersonalityPrompt {
-    fn from(prompt: String) -> Self {
-        Self { prompt }
-    }
-}
-
-impl AsRef<str> for PersonalityPrompt {
-    fn as_ref(&self) -> &str {
-        &self.prompt
-    }
-}
-
 fn system_prompt_with(personality: &str, lore: &str) -> String {
     format!("{personality}\n{lore}\n{CHAT_STRUCTURE}")
-}
-
-/// Every personality in Redis, sorted by name
-async fn personality_names(storage: &mut RedisStorage) -> Result<Vec<String>, StorageError> {
-    let mut names = storage.list_keys::<PersonalityPrompt>("*").await?;
-    names.sort();
-    Ok(names)
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -1303,6 +1250,7 @@ impl LlmPlugin {
         let llm_client = openrouter::Client::from_env(usage)?;
         let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
         let nightly_lore_channel_id = optional_env("LLM_NIGHTLY_LORE_CHANNEL_ID")?;
+        let personality_announce_channel_id = optional_env("LLM_PERSONALITY_ANNOUNCE_CHANNEL_ID")?;
         let images_role_id: Option<RoleId> = optional_env("LLM_IMAGES_ROLE_ID")?;
 
         // Consent can be withdrawn by dropping the role: forget what it covered
@@ -1377,11 +1325,13 @@ impl LlmPlugin {
             images_role_id,
             starboard_channel_id,
             nightly_lore_channel_id,
+            personality_announce_channel_id,
             chime_in,
             llm_client,
             storage,
             llm_model: RwLock::new(model),
             personality: RwLock::new(personality),
+            personality_suggestions_lock: tokio::sync::Mutex::new(()),
             contexts_by_channel: Arc::new(Mutex::new(contexts_by_channel)),
             context_window_size: AtomicUsize::new(context_window_size),
             cooldowns: Cooldowns::new(Duration::from_secs(user_cooldown_secs)),
