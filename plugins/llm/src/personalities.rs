@@ -372,6 +372,23 @@ async fn announce(
     }
 }
 
+/// Only logged: the suggestion is saved either way
+async fn dm_admin(rpc: rpc::ProtocolClient, admin_id: UserId, text: String) {
+    let channel_id = match rpc.dm_channel(rpc::context::current(), admin_id).await {
+        Ok(Ok(channel_id)) => channel_id,
+        Ok(Err(err)) => return tracing::warn!("Failed to open the admin's DMs: {err}"),
+        Err(err) => return tracing::warn!("Failed to open the admin's DMs: {err}"),
+    };
+    match rpc
+        .send_message(rpc::context::current(), channel_id, text)
+        .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => tracing::warn!("Failed to DM the admin: {err}"),
+        Err(err) => tracing::warn!("Failed to DM the admin: {err}"),
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct WebSuggest {
     name: String,
@@ -380,6 +397,7 @@ pub struct WebSuggest {
 
 pub async fn web_suggest(
     State(plugin): State<Arc<LlmPlugin>>,
+    State(rpc): State<rpc::ProtocolClient>,
     Extension(profile): Extension<DiscordProfile>,
     Json(WebSuggest { name, change }): Json<WebSuggest>,
 ) -> Response {
@@ -397,11 +415,24 @@ pub async fn web_suggest(
     };
     let current = plugin.personality.read().clone();
     let name = name.trim();
+    let what = match &change {
+        PersonalityChange::Create { .. } => format!("a new personality `{name}`"),
+        PersonalityChange::Edit { .. } => format!("an edit to `{name}`"),
+        PersonalityChange::Delete => format!("deleting `{name}`"),
+    };
     if let Err(why) = suggestions.suggest(name, change, profile.clone(), &names, &current) {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
     if let Err(err) = storage.set(SUGGESTIONS_KEY, &suggestions).await {
         return storage_error(err);
+    }
+
+    if profile.user_id != plugin.admin_id {
+        let text = format!(
+            "🎭 `{}` suggested {what}: <https://globibot.com/plugins/llm#personality>",
+            profile.username
+        );
+        tokio::spawn(dm_admin(rpc, plugin.admin_id, text));
     }
 
     respond(&plugin, &profile).await
