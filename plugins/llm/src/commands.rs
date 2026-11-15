@@ -67,6 +67,8 @@ bot_choices! {
         Scottish,
         #[choice(name = "Aussie", value = "aussie")]
         Aussie,
+        #[choice(name = "New Yorker", value = "new-yorker")]
+        NewYorker,
     }
 }
 
