@@ -1,6 +1,6 @@
 use crate::events::Publisher;
 
-use globibot_core::events::Event;
+use globibot_core::events::{Event, ReactionChange};
 use globibot_core::serenity::all::GatewayIntents;
 use globibot_core::serenity::{
     self, Client, async_trait,
@@ -8,7 +8,7 @@ use globibot_core::serenity::{
     gateway::ChunkGuildFilter,
     model::{
         application::Interaction,
-        channel::Message,
+        channel::{Message, Reaction},
         event::MessageUpdateEvent,
         guild::Guild,
         id::{ChannelId, GuildId, MessageId},
@@ -88,6 +88,54 @@ impl serenity::client::EventHandler for EventHandler {
         tracing::info!("discord cache ready: {} guilds", guilds.len());
     }
 
+    async fn reaction_add(&self, _ctx: Context, reaction: Reaction) {
+        let Some(user_id) = reaction.user_id else {
+            return;
+        };
+        self.broadcast_reaction(
+            &reaction,
+            ReactionChange::Add {
+                user_id,
+                emoji: reaction.emoji.clone(),
+            },
+        );
+    }
+
+    async fn reaction_remove(&self, _ctx: Context, reaction: Reaction) {
+        let Some(user_id) = reaction.user_id else {
+            return;
+        };
+        self.broadcast_reaction(
+            &reaction,
+            ReactionChange::Remove {
+                user_id,
+                emoji: reaction.emoji.clone(),
+            },
+        );
+    }
+
+    async fn reaction_remove_all(
+        &self,
+        _ctx: Context,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
+        self.publisher.broadcast(Event::Reaction {
+            channel_id,
+            message_id,
+            change: ReactionChange::RemoveAll,
+        });
+    }
+
+    async fn reaction_remove_emoji(&self, _ctx: Context, removed: Reaction) {
+        self.broadcast_reaction(
+            &removed,
+            ReactionChange::RemoveEmoji {
+                emoji: removed.emoji.clone(),
+            },
+        );
+    }
+
     async fn message_delete(
         &self,
         _ctx: Context,
@@ -98,6 +146,16 @@ impl serenity::client::EventHandler for EventHandler {
         self.publisher.broadcast(Event::MessageDelete {
             channel_id,
             message_id,
+        });
+    }
+}
+
+impl EventHandler {
+    fn broadcast_reaction(&self, reaction: &Reaction, change: ReactionChange) {
+        self.publisher.broadcast(Event::Reaction {
+            channel_id: reaction.channel_id,
+            message_id: reaction.message_id,
+            change,
         });
     }
 }

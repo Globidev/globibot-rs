@@ -7,8 +7,8 @@ use futures::SinkExt;
 use serde::{Deserialize, Serialize};
 use serenity::model::{
     application::CommandInteraction,
-    channel::Message,
-    id::{ChannelId, MessageId},
+    channel::{Message, ReactionType},
+    id::{ChannelId, MessageId, UserId},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -28,6 +28,28 @@ pub enum Event {
     InteractionCreate {
         interaction: Box<CommandInteraction>,
     },
+    /// A reaction added or removed. Only the change, not the totals: plugins count themselves.
+    Reaction {
+        channel_id: ChannelId,
+        message_id: MessageId,
+        change: ReactionChange,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReactionChange {
+    Add {
+        user_id: UserId,
+        emoji: ReactionType,
+    },
+    Remove {
+        user_id: UserId,
+        emoji: ReactionType,
+    },
+    /// Every reaction removed from the message, e.g. by a moderator
+    RemoveAll,
+    /// Every reaction with this emoji removed
+    RemoveEmoji { emoji: ReactionType },
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,6 +58,7 @@ pub enum EventType {
     MessageDelete,
     MessageEdit,
     InteractionCreate,
+    Reaction,
 }
 
 impl Event {
@@ -45,6 +68,7 @@ impl Event {
             Event::MessageDelete { .. } => EventType::MessageDelete,
             Event::MessageEdit { .. } => EventType::MessageEdit,
             Event::InteractionCreate { .. } => EventType::InteractionCreate,
+            Event::Reaction { .. } => EventType::Reaction,
         }
     }
 }
