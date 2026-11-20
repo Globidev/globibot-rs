@@ -187,6 +187,31 @@
       .toSorted((a, b) => (rankByUser[a.userId] ?? Infinity) - (rankByUser[b.userId] ?? Infinity));
   });
 
+  // Highlights the search in names and facts (CSS Custom Highlight API, no DOM changes).
+  // Reads `entries` and `edits` to run again when the shown names and facts change
+  let lorePanel = $state<HTMLElement>();
+  $effect(() => {
+    void entries;
+    void Object.keys(edits);
+    const query = searchQuery.trim();
+    if (!lorePanel || !query || !CSS.highlights) return;
+    const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    const ranges: Range[] = [];
+    for (const el of lorePanel.querySelectorAll('[data-search-text]')) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        for (const match of node.textContent!.matchAll(pattern)) {
+          const range = new Range();
+          range.setStart(node, match.index);
+          range.setEnd(node, match.index + match[0].length);
+          ranges.push(range);
+        }
+      }
+    }
+    CSS.highlights.set('lore-search', new Highlight(...ranges));
+    return () => CSS.highlights.delete('lore-search');
+  });
+
   let peopleWithLore = $derived(Object.values(data?.lore_by_user ?? {}).filter(hasLore).length);
   let pendingCount = $derived(
     Object.values(data?.suggestions_by_user ?? {}).reduce((count, s) => count + s.length, 0)
@@ -255,7 +280,7 @@
   {:else if entries.length === 0}
     <div class="text-sm text-gray-400">Nobody matches.</div>
   {:else}
-    <div class="grid items-start gap-3 lg:grid-cols-2">
+    <div bind:this={lorePanel} class="grid items-start gap-3 lg:grid-cols-2">
       {#each entries as { userId, lore, suggestions } (userId)}
         {@const isMe = userId === currentUserId}
         {@const name = lore.member.username}
@@ -264,7 +289,7 @@
             {@render avatar(lore.member, 'size-9')}
             <div class="flex min-w-0 flex-1 flex-col">
               <h3 class="truncate text-sm font-semibold text-gray-100">
-                {name}
+                <span data-search-text>{name}</span>
                 {#if isMe}<span class="ml-1 text-xs font-normal text-gray-500">(you)</span>{/if}
               </h3>
               {#if suggestions.length > 0}
@@ -314,6 +339,7 @@
                     </form>
                   {:else}
                     <p
+                      data-search-text
                       class="text-sm leading-relaxed break-words whitespace-pre-wrap {fact.outdated
                         ? 'text-gray-500'
                         : 'text-gray-200'}"
@@ -474,6 +500,10 @@
 
   .btn-vote {
     @apply flex cursor-pointer items-center gap-1 rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  :global(::highlight(lore-search)) {
+    @apply bg-amber-400/40 text-white;
   }
 
   textarea {
