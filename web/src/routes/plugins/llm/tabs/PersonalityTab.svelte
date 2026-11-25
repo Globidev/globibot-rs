@@ -5,10 +5,20 @@
   type Data = {
     current: string;
     // Sorted by name
-    personalities: { name: string; prompt: string }[];
+    personalities: Personality[];
     suggestions: PersonalitySuggestion[];
     is_admin: boolean;
   };
+
+  type Personality = {
+    name: string;
+    prompt: string;
+    // The bot's nickname and avatar in the server while it's active. null: its global ones.
+    nickname: string | null;
+    avatar_version: string | null;
+  };
+
+  type AvatarChange = { kind: 'Keep' } | { kind: 'Remove' } | { kind: 'Set'; data_uri: string };
 
   type PersonalityChange =
     | { kind: 'Create'; prompt: string }
@@ -29,6 +39,9 @@
   // Same limits as the plugin
   const MAX_NAME_CHARS = 32;
   const MAX_PROMPT_CHARS = 10_000;
+  const MAX_NICKNAME_CHARS = 32;
+  // Uploads are cropped to a square and resized to at most this, as PNG
+  const AVATAR_SIZE = 512;
   const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
   const OMEGALUL = 'https://cdn.discordapp.com/emojis/373119675829190656.webp?size=48';
   const VOTES: { vote: SuggestionVote; label: string }[] = [
@@ -49,6 +62,9 @@
   let edits = $state<Record<string, string>>({});
   let newName = $state('');
   let newPrompt = $state('');
+  // Per personality name: its nickname and avatar being edited (admin only)
+  let profileEdits = $state<Record<string, { nickname: string; avatar: AvatarChange }>>({});
+  let applyStatus = $state<'idle' | 'applying' | 'applied'>('idle');
   // Per personality name ('' for the new personality form): the last error
   let errors = $state<Record<string, string>>({});
 
@@ -124,6 +140,61 @@
   /** Withdraws our own suggestion, or rejects one as the admin */
   function dismiss(sug: PersonalitySuggestion) {
     post('personality/dismiss', { suggestion_id: sug.id }, errorKey(sug));
+  }
+
+  const avatarUrl = (p: Personality) =>
+    p.avatar_version &&
+    `/plugin-api/llm/personality/avatar?name=${encodeURIComponent(p.name)}&v=${p.avatar_version}`;
+
+  /** Crops to a centered square and resizes to a PNG. Any image the browser shows, SVG too. */
+  async function toAvatarDataUri(file: File): Promise<string> {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const size = Math.min(side, AVATAR_SIZE);
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const x = (img.naturalWidth - side) / 2;
+      const y = (img.naturalHeight - side) / 2;
+      canvas.getContext('2d')!.drawImage(img, x, y, side, side, 0, 0, size, size);
+      return canvas.toDataURL('image/png');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function pickAvatar(name: string, file: File | undefined) {
+    if (!file) return;
+    delete errors[name];
+    try {
+      profileEdits[name].avatar = { kind: 'Set', data_uri: await toAvatarDataUri(file) };
+    } catch {
+      errors[name] = "Couldn't read that image";
+    }
+  }
+
+  async function saveProfile(name: string) {
+    const { nickname, avatar } = profileEdits[name];
+    if (await post('personality/profile', { name, nickname, avatar }, name)) {
+      delete profileEdits[name];
+    } else {
+      // Saved even when Discord refused it
+      await load();
+    }
+  }
+
+  async function applyProfile() {
+    applyStatus = 'applying';
+    const applied = await post('personality/profile/apply', {}, 'switch');
+    applyStatus = applied ? 'applied' : 'idle';
+    if (applied) {
+      setTimeout(() => {
+        if (applyStatus === 'applied') applyStatus = 'idle';
+      }, 2000);
+    }
   }
 
   /** Errors about new personalities show under the form, the others under their personality */
@@ -245,7 +316,21 @@
             <span class="text-red-500">⚠ {switchStatus.slice(6)}</span>
           {/if}
         </span>
+        {#if data.is_admin}
+          <button
+            onclick={applyProfile}
+            disabled={applyStatus === 'applying'}
+            title="Sets the bot's nickname and avatar in the server to the active personality's again"
+            class="btn-ghost sm:ml-auto"
+          >
+            {#if applyStatus === 'applying'}Applying...{:else if applyStatus === 'applied'}✓ Applied{:else}Reapply
+              nickname & avatar{/if}
+          </button>
+        {/if}
       </div>
+      {#if switchStatus === 'idle' && errors.switch}
+        {@render error('switch')}
+      {/if}
       {#if current}
         <details>
           <summary class="cursor-pointer text-xs text-gray-500">Its prompt</summary>
@@ -255,16 +340,35 @@
     </section>
 
     <div class="grid items-start gap-3 lg:grid-cols-2">
-      {#each data.personalities as { name, prompt } (name)}
+      {#each data.personalities as personality (personality.name)}
+        {@const { name, prompt, nickname } = personality}
         {@const isActive = name === data.current}
+        {@const avatar = avatarUrl(personality)}
         <article class="flex flex-col gap-3 rounded-lg bg-gray-900 p-4">
           <header class="flex items-center gap-2">
+            {#if avatar}
+              <img src={avatar} alt="" loading="lazy" class="size-6 shrink-0 rounded-full" />
+            {/if}
             <h3 class="text-sm font-semibold text-gray-100">{name}</h3>
+            {#if nickname}
+              <span class="truncate text-xs text-gray-400" title="Nickname in the server">
+                as {nickname}
+              </span>
+            {/if}
             {#if isActive}
               <span class="rounded bg-indigo-500/20 px-1.5 text-xs text-indigo-300">active</span>
             {/if}
             {#if !(name in edits)}
               <span class="ml-auto flex gap-1">
+                {#if data.is_admin && !(name in profileEdits)}
+                  <button
+                    onclick={() =>
+                      (profileEdits[name] = { nickname: nickname ?? '', avatar: { kind: 'Keep' } })}
+                    class="btn-ghost"
+                  >
+                    Nickname & avatar
+                  </button>
+                {/if}
                 <button onclick={() => (edits[name] = prompt)} class="btn-ghost">
                   Suggest edit
                 </button>
@@ -312,6 +416,67 @@
               <summary class="cursor-pointer text-xs text-gray-500">Prompt</summary>
               <p class="mt-2 text-sm break-words whitespace-pre-wrap text-gray-300">{prompt}</p>
             </details>
+          {/if}
+
+          {#if name in profileEdits}
+            {@const edit = profileEdits[name]}
+            <form
+              onsubmit={(e) => {
+                e.preventDefault();
+                saveProfile(name);
+              }}
+              class="flex flex-col gap-2 rounded-md bg-gray-950 p-3"
+            >
+              <div class="flex items-center gap-3">
+                {#if edit.avatar.kind === 'Set'}
+                  <img src={edit.avatar.data_uri} alt="New avatar" class="size-12 rounded-full" />
+                {:else if edit.avatar.kind === 'Keep' && avatar}
+                  <img src={avatar} alt="Current avatar" class="size-12 rounded-full" />
+                {:else}
+                  <div
+                    class="flex size-12 items-center justify-center rounded-full bg-gray-800 text-[10px] text-gray-500"
+                  >
+                    global
+                  </div>
+                {/if}
+                <div class="flex flex-col gap-1">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    aria-label="Avatar for {name}"
+                    onchange={(e) => pickAvatar(name, e.currentTarget.files?.[0])}
+                    class="text-xs text-gray-400 file:mr-2 file:cursor-pointer file:rounded file:border-0 file:bg-gray-800 file:px-2 file:py-1 file:text-gray-200"
+                  />
+                  {#if edit.avatar.kind === 'Set' || (edit.avatar.kind === 'Keep' && avatar)}
+                    <button
+                      type="button"
+                      onclick={() => (edit.avatar = { kind: 'Remove' })}
+                      class="btn-ghost self-start"
+                    >
+                      Use the global avatar
+                    </button>
+                  {/if}
+                </div>
+              </div>
+              <input
+                bind:value={edit.nickname}
+                maxlength={MAX_NICKNAME_CHARS}
+                placeholder="Nickname (empty: the global name)"
+                aria-label="Nickname for {name}"
+                class="rounded border border-gray-700 bg-gray-950 p-2 text-sm text-white outline-none focus:border-indigo-500"
+              />
+              <p class="text-xs text-gray-500">
+                {isActive
+                  ? 'Applied to the server when saved.'
+                  : 'Applied to the server when switching to this personality.'}
+              </p>
+              <div class="flex justify-end gap-2">
+                <button type="button" onclick={() => delete profileEdits[name]} class="btn-ghost">
+                  Cancel
+                </button>
+                <button type="submit" class="btn-primary">Save</button>
+              </div>
+            </form>
           {/if}
 
           {@render error(name)}

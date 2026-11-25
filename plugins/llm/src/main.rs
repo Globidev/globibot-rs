@@ -270,6 +270,18 @@ impl WebServer {
                 "/personality/dismiss",
                 axum::routing::post(personalities::web_dismiss),
             )
+            .route(
+                "/personality/profile",
+                axum::routing::post(personalities::web_set_profile),
+            )
+            .route(
+                "/personality/profile/apply",
+                axum::routing::post(personalities::web_apply_profile),
+            )
+            .route(
+                "/personality/avatar",
+                axum::routing::get(personalities::web_avatar),
+            )
             .route("/lore", axum::routing::get(llm_lore))
             .route("/usage", axum::routing::get(llm_usage))
             .route("/credits", axum::routing::get(llm_credits))
@@ -2121,11 +2133,16 @@ impl LlmPlugin {
             return Ok(());
         }
 
+        let changed = *self.personality.read() != new_personality_name;
         *self.personality.write() = new_personality_name.clone();
         self.save_settings().await;
 
         ctx.reply(format!("Personality changed to `{new_personality_name}`"))
             .await?;
+
+        if changed && let Err(err) = self.apply_personality_profile(ctx.rpc).await {
+            tracing::warn!("Failed to apply the personality's nickname and avatar: {err:?}");
+        }
 
         Ok(())
     }

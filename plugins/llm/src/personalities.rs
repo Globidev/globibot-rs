@@ -1,15 +1,23 @@
 //! Personalities: system prompts stored in Redis as `llm_personality:<name>`, read when used so
 //! changes apply without a restart. Anyone can suggest a new one, an edit or a deletion on the
 //! website, everyone votes, and the admin accepts.
+//!
+//! Each personality can also have a nickname and avatar in the guild ([`PersonalityProfile`]),
+//! set by the admin and applied when switching to it.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
+};
 
 use axum::{
     Extension, Json,
-    extract::State,
-    http::StatusCode,
+    extract::{Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::Engine;
 use globibot_core::{
     rpc,
     serenity::all::{ChannelId, UserId},
@@ -39,6 +47,71 @@ impl From<String> for PersonalityPrompt {
 impl AsRef<str> for PersonalityPrompt {
     fn as_ref(&self) -> &str {
         &self.prompt
+    }
+}
+
+/// A personality's nickname and avatar in the guild, set by the admin. `None`: the bot's global
+/// name or avatar. Its namespace doesn't match `llm_personality:*`, so it's not listed as a
+/// personality.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersonalityProfile {
+    pub nickname: Option<String>,
+    /// A data URI: `data:image/png;base64,...`
+    pub avatar: Option<String>,
+}
+
+impl StorageValue for PersonalityProfile {
+    type Format = storage::JsonFormat;
+
+    const REDIS_NS: &'static str = "llm_personality_profile";
+}
+
+/// Discord's limit
+const MAX_NICKNAME_CHARS: usize = 32;
+/// About 1MB of image. The website resizes uploads to 512x512 PNGs first.
+const MAX_AVATAR_CHARS: usize = 1_400_000;
+const AVATAR_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/gif"];
+
+/// The media type and bytes of an avatar's data URI, if it's a supported image
+fn decode_avatar(data_uri: &str) -> Option<(&'static str, Vec<u8>)> {
+    let (media_type, data) = data_uri.strip_prefix("data:")?.split_once(";base64,")?;
+    let media_type = AVATAR_TYPES.into_iter().find(|t| *t == media_type)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    Some((media_type, bytes))
+}
+
+/// Changes the website shows as a new URL, so browsers don't keep the old image
+fn avatar_version(data_uri: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    data_uri.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+impl LlmPlugin {
+    /// Sets the bot's nickname and avatar in the guild to the active personality's
+    pub(crate) async fn apply_personality_profile(
+        &self,
+        rpc: &rpc::ProtocolClient,
+    ) -> anyhow::Result<()> {
+        let name = self.personality.read().clone();
+        let profile = self
+            .storage
+            .clone()
+            .get_opt::<PersonalityProfile>(&name)
+            .await?
+            .unwrap_or_default();
+        rpc.edit_own_member(
+            rpc::context::current(),
+            self.guild_id,
+            profile.nickname.clone(),
+            profile.avatar,
+        )
+        .await??;
+        *self.nickname.write() = profile.nickname;
+        tracing::info!("Applied the nickname and avatar of personality `{name}`");
+        Ok(())
     }
 }
 
@@ -238,6 +311,9 @@ struct WebPersonalities {
 struct WebPersonality {
     name: String,
     prompt: String,
+    nickname: Option<String>,
+    /// Changes with the avatar, `None` without one. Fetched from `GET /personality/avatar`.
+    avatar_version: Option<String>,
 }
 
 async fn load_suggestions(
@@ -258,7 +334,16 @@ async fn load_web_personalities(
     for name in personality_names(&mut storage).await? {
         // Deleted since it was listed: left out
         if let Some(PersonalityPrompt { prompt }) = storage.get_opt(&name).await? {
-            personalities.push(WebPersonality { name, prompt });
+            let profile = storage
+                .get_opt::<PersonalityProfile>(&name)
+                .await?
+                .unwrap_or_default();
+            personalities.push(WebPersonality {
+                name,
+                prompt,
+                nickname: profile.nickname,
+                avatar_version: profile.avatar.as_deref().map(avatar_version),
+            });
         }
     }
     let suggestions = load_suggestions(&mut storage).await?.suggestions;
@@ -322,6 +407,14 @@ pub async fn web_switch(
     *plugin.personality.write() = name.clone();
     plugin.save_settings().await;
 
+    if changed {
+        let (plugin, rpc) = (Arc::clone(&plugin), rpc.clone());
+        tokio::spawn(async move {
+            if let Err(err) = plugin.apply_personality_profile(&rpc).await {
+                tracing::warn!("Failed to apply the personality's nickname and avatar: {err:?}");
+            }
+        });
+    }
     if changed && let Some(channel_id) = plugin.personality_announce_channel_id {
         tokio::spawn(announce(
             Arc::clone(&plugin),
@@ -511,7 +604,12 @@ pub async fn web_accept(
                 .set(&suggestion.name, &PersonalityPrompt { prompt })
                 .await
         }
-        PersonalityChange::Delete => storage.del::<PersonalityPrompt>(&suggestion.name).await,
+        PersonalityChange::Delete => {
+            match storage.del::<PersonalityPrompt>(&suggestion.name).await {
+                Ok(()) => storage.del::<PersonalityProfile>(&suggestion.name).await,
+                Err(err) => Err(err),
+            }
+        }
     };
     if let Err(err) = applied {
         return storage_error(err);
@@ -546,6 +644,174 @@ pub async fn web_dismiss(
     respond(&plugin, &profile).await
 }
 
+fn forbidden_unless_admin(plugin: &LlmPlugin, profile: &DiscordProfile) -> Option<Response> {
+    (plugin.admin_id != profile.user_id).then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "Only the admin can change personality nicknames and avatars",
+        )
+            .into_response()
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum AvatarChange {
+    Keep,
+    Remove,
+    Set { data_uri: String },
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct WebProfile {
+    name: String,
+    /// Empty or `None`: the bot's global name
+    nickname: Option<String>,
+    avatar: AvatarChange,
+}
+
+/// Sets a personality's nickname and avatar (the admin only). Applied to Discord right away if
+/// it's the active one.
+pub async fn web_set_profile(
+    State(plugin): State<Arc<LlmPlugin>>,
+    State(rpc): State<rpc::ProtocolClient>,
+    Extension(profile): Extension<DiscordProfile>,
+    Json(WebProfile {
+        name,
+        nickname,
+        avatar,
+    }): Json<WebProfile>,
+) -> Response {
+    if let Some(forbidden) = forbidden_unless_admin(&plugin, &profile) {
+        return forbidden;
+    }
+    let nickname = nickname
+        .map(|nickname| nickname.trim().to_string())
+        .filter(|nickname| !nickname.is_empty());
+    if nickname
+        .as_ref()
+        .is_some_and(|nickname| nickname.chars().count() > MAX_NICKNAME_CHARS)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Nicknames are 32 characters at most",
+        )
+            .into_response();
+    }
+    if let AvatarChange::Set { data_uri } = &avatar {
+        if data_uri.len() > MAX_AVATAR_CHARS {
+            return (
+                StatusCode::BAD_REQUEST,
+                "The avatar is too big (about 1MB at most)",
+            )
+                .into_response();
+        }
+        if decode_avatar(data_uri).is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Avatars are PNG, JPEG or GIF data URIs",
+            )
+                .into_response();
+        }
+    }
+
+    let mut storage = plugin.storage.clone();
+    let loaded = async {
+        Ok::<_, StorageError>((
+            personality_names(&mut storage).await?,
+            storage.get_opt::<PersonalityProfile>(&name).await?,
+        ))
+    };
+    let (names, saved) = match loaded.await {
+        Ok(loaded) => loaded,
+        Err(err) => return storage_error(err),
+    };
+    if !names.contains(&name) {
+        return (StatusCode::BAD_REQUEST, "No such personality").into_response();
+    }
+    let new_profile = PersonalityProfile {
+        nickname,
+        avatar: match avatar {
+            AvatarChange::Keep => saved.and_then(|saved| saved.avatar),
+            AvatarChange::Remove => None,
+            AvatarChange::Set { data_uri } => Some(data_uri),
+        },
+    };
+    if let Err(err) = storage.set(&name, &new_profile).await {
+        return storage_error(err);
+    }
+
+    if *plugin.personality.read() == name
+        && let Err(err) = plugin.apply_personality_profile(&rpc).await
+    {
+        tracing::warn!("Failed to apply the personality's nickname and avatar: {err:?}");
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("Saved, but Discord refused it: {err}"),
+        )
+            .into_response();
+    }
+
+    respond(&plugin, &profile).await
+}
+
+/// Applies the active personality's nickname and avatar again (the admin only), after a
+/// failure or a change made in Discord
+pub async fn web_apply_profile(
+    State(plugin): State<Arc<LlmPlugin>>,
+    State(rpc): State<rpc::ProtocolClient>,
+    Extension(profile): Extension<DiscordProfile>,
+) -> Response {
+    if let Some(forbidden) = forbidden_unless_admin(&plugin, &profile) {
+        return forbidden;
+    }
+    if let Err(err) = plugin.apply_personality_profile(&rpc).await {
+        tracing::warn!("Failed to apply the personality's nickname and avatar: {err:?}");
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("Discord refused it: {err}"),
+        )
+            .into_response();
+    }
+
+    respond(&plugin, &profile).await
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct WebAvatarQuery {
+    name: String,
+}
+
+/// A personality's avatar image. Its URL has a version, so it can be cached.
+pub async fn web_avatar(
+    State(plugin): State<Arc<LlmPlugin>>,
+    Query(WebAvatarQuery { name }): Query<WebAvatarQuery>,
+) -> Response {
+    let saved = plugin
+        .storage
+        .clone()
+        .get_opt::<PersonalityProfile>(&name)
+        .await;
+    let data_uri = match saved {
+        Ok(saved) => saved.and_then(|saved| saved.avatar),
+        Err(err) => return storage_error(err),
+    };
+    match data_uri.as_deref().and_then(decode_avatar) {
+        Some((media_type, bytes)) => (
+            [
+                (header::CONTENT_TYPE, media_type),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "No avatar").into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +828,18 @@ mod tests {
         PersonalityChange::Create {
             prompt: prompt.to_string(),
         }
+    }
+
+    #[test]
+    fn avatars_decode() {
+        let (media_type, bytes) = decode_avatar("data:image/png;base64,aGk=").unwrap();
+        assert_eq!(
+            (media_type, bytes.as_slice()),
+            ("image/png", b"hi".as_slice())
+        );
+        assert!(decode_avatar("data:image/svg+xml;base64,aGk=").is_none());
+        assert!(decode_avatar("data:image/png;base64,not base64!").is_none());
+        assert!(decode_avatar("https://example.com/a.png").is_none());
     }
 
     #[test]
