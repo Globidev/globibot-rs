@@ -62,7 +62,7 @@
   let edits = $state<Record<string, string>>({});
   let newName = $state('');
   let newPrompt = $state('');
-  // Per personality name: its nickname and avatar being edited (admin only)
+  // Per personality name: its nickname and avatar being edited
   let profileEdits = $state<Record<string, { nickname: string; avatar: AvatarChange }>>({});
   let applyStatus = $state<'idle' | 'applying' | 'applied'>('idle');
   // Per personality name ('' for the new personality form): the last error
@@ -285,7 +285,8 @@
   <p class="text-xs text-gray-500">
     The bot's personality is the start of its system prompt. Anyone can switch it, and suggest a new
     personality, an edit or a deletion: everyone votes, and the admin accepts. New personalities
-    show up in <code>/llm personality set</code> only once they're added to the bot's code.
+    show up in <code>/llm personality set</code> only once they're added to the bot's code. Anyone can
+    also give a personality a nickname and avatar, which the bot uses in the server while it's active.
   </p>
 
   {#if loadError}
@@ -316,17 +317,15 @@
             <span class="text-red-500">⚠ {switchStatus.slice(6)}</span>
           {/if}
         </span>
-        {#if data.is_admin}
-          <button
-            onclick={applyProfile}
-            disabled={applyStatus === 'applying'}
-            title="Sets the bot's nickname and avatar in the server to the active personality's again"
-            class="btn-ghost sm:ml-auto"
-          >
-            {#if applyStatus === 'applying'}Applying...{:else if applyStatus === 'applied'}✓ Applied{:else}Reapply
-              nickname & avatar{/if}
-          </button>
-        {/if}
+        <button
+          onclick={applyProfile}
+          disabled={applyStatus === 'applying'}
+          title="Sets the bot's nickname and avatar in the server to the active personality's again"
+          class="btn-ghost sm:ml-auto"
+        >
+          {#if applyStatus === 'applying'}Applying...{:else if applyStatus === 'applied'}✓ Applied{:else}Reapply
+            nickname & avatar{/if}
+        </button>
       </div>
       {#if switchStatus === 'idle' && errors.switch}
         {@render error('switch')}
@@ -360,7 +359,7 @@
             {/if}
             {#if !(name in edits)}
               <span class="ml-auto flex gap-1">
-                {#if data.is_admin && !(name in profileEdits)}
+                {#if !(name in profileEdits)}
                   <button
                     onclick={() =>
                       (profileEdits[name] = { nickname: nickname ?? '', avatar: { kind: 'Keep' } })}

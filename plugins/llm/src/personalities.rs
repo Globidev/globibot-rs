@@ -3,7 +3,7 @@
 //! website, everyone votes, and the admin accepts.
 //!
 //! Each personality can also have a nickname and avatar in the guild ([`PersonalityProfile`]),
-//! set by the admin and applied when switching to it.
+//! set by anyone logged in and applied when switching to it.
 
 use std::{
     collections::HashMap,
@@ -50,7 +50,7 @@ impl AsRef<str> for PersonalityPrompt {
     }
 }
 
-/// A personality's nickname and avatar in the guild, set by the admin. `None`: the bot's global
+/// A personality's nickname and avatar in the guild, set by anyone logged in. `None`: the bot's global
 /// name or avatar. Its namespace doesn't match `llm_personality:*`, so it's not listed as a
 /// personality.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -644,16 +644,6 @@ pub async fn web_dismiss(
     respond(&plugin, &profile).await
 }
 
-fn forbidden_unless_admin(plugin: &LlmPlugin, profile: &DiscordProfile) -> Option<Response> {
-    (plugin.admin_id != profile.user_id).then(|| {
-        (
-            StatusCode::FORBIDDEN,
-            "Only the admin can change personality nicknames and avatars",
-        )
-            .into_response()
-    })
-}
-
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum AvatarChange {
@@ -670,7 +660,7 @@ pub struct WebProfile {
     avatar: AvatarChange,
 }
 
-/// Sets a personality's nickname and avatar (the admin only). Applied to Discord right away if
+/// Sets a personality's nickname and avatar (anyone logged in). Applied to Discord right away if
 /// it's the active one.
 pub async fn web_set_profile(
     State(plugin): State<Arc<LlmPlugin>>,
@@ -682,9 +672,6 @@ pub async fn web_set_profile(
         avatar,
     }): Json<WebProfile>,
 ) -> Response {
-    if let Some(forbidden) = forbidden_unless_admin(&plugin, &profile) {
-        return forbidden;
-    }
     let nickname = nickname
         .map(|nickname| nickname.trim().to_string())
         .filter(|nickname| !nickname.is_empty());
@@ -740,6 +727,10 @@ pub async fn web_set_profile(
     if let Err(err) = storage.set(&name, &new_profile).await {
         return storage_error(err);
     }
+    tracing::info!(
+        "`{}` set the nickname and avatar of personality `{name}`",
+        profile.username
+    );
 
     if *plugin.personality.read() == name
         && let Err(err) = plugin.apply_personality_profile(&rpc).await
@@ -755,16 +746,13 @@ pub async fn web_set_profile(
     respond(&plugin, &profile).await
 }
 
-/// Applies the active personality's nickname and avatar again (the admin only), after a
+/// Applies the active personality's nickname and avatar again (anyone logged in), after a
 /// failure or a change made in Discord
 pub async fn web_apply_profile(
     State(plugin): State<Arc<LlmPlugin>>,
     State(rpc): State<rpc::ProtocolClient>,
     Extension(profile): Extension<DiscordProfile>,
 ) -> Response {
-    if let Some(forbidden) = forbidden_unless_admin(&plugin, &profile) {
-        return forbidden;
-    }
     if let Err(err) = plugin.apply_personality_profile(&rpc).await {
         tracing::warn!("Failed to apply the personality's nickname and avatar: {err:?}");
         return (
