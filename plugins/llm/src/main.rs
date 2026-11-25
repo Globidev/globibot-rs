@@ -679,6 +679,8 @@ struct LlmPlugin {
     guild_id: GuildId,
     /// Members with this role agree to their images being sent to the model provider
     images_role_id: Option<RoleId>,
+    /// The bot's own role: pinging it counts as pinging the bot
+    bot_role_id: Option<RoleId>,
     starboard_channel_id: Option<ChannelId>,
     /// Where lore is suggested every night, from that channel's messages
     nightly_lore_channel_id: Option<ChannelId>,
@@ -1317,6 +1319,7 @@ impl LlmPlugin {
         let nightly_lore_channel_id = optional_env("LLM_NIGHTLY_LORE_CHANNEL_ID")?;
         let personality_announce_channel_id = optional_env("LLM_PERSONALITY_ANNOUNCE_CHANNEL_ID")?;
         let images_role_id: Option<RoleId> = optional_env("LLM_IMAGES_ROLE_ID")?;
+        let bot_role_id: Option<RoleId> = optional_env("LLM_BOT_ROLE_ID")?;
 
         // Consent can be withdrawn by dropping the role: forget what it covered
         let role_holders = members
@@ -1391,6 +1394,7 @@ impl LlmPlugin {
             admin_id,
             guild_id,
             images_role_id,
+            bot_role_id,
             starboard_channel_id,
             nightly_lore_channel_id,
             personality_announce_channel_id,
@@ -1412,6 +1416,14 @@ impl LlmPlugin {
             reminders: Mutex::new(reminders),
             reminders_wakeup: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Mentions the bot or its role
+    fn pings_bot(&self, message: &Message) -> bool {
+        message.mentions_user_id(self.bot_id)
+            || self
+                .bot_role_id
+                .is_some_and(|role| message.mention_roles.contains(&role))
     }
 
     /// With the whole lore book, for completions without tools
@@ -1666,7 +1678,7 @@ impl LlmPlugin {
             let in_dm = message.guild_id.is_none();
             let author = replied_to.author.id;
             // Replying to your own image with a ping shares it now
-            let shared = replied_to.mentions_user_id(self.bot_id) || author == message.author.id;
+            let shared = self.pings_bot(replied_to) || author == message.author.id;
             let has_role = !in_dm && !shared && self.has_images_role(rpc, author).await;
             if !images.urls.is_empty() && images::consent(in_dm, shared, author, has_role).is_some()
             {
@@ -1856,7 +1868,7 @@ impl LlmPlugin {
             .then(|| {
                 images::consent(
                     is_dm,
-                    message.mentions_user_id(self.bot_id),
+                    self.pings_bot(message),
                     message.author.id,
                     has_role,
                 )
@@ -2208,7 +2220,7 @@ impl HandleEvents for LlmPlugin {
                 }
 
                 // Every DM is for the bot
-                let mentioned = is_dm || message.mentions_user_id(self.bot_id);
+                let mentioned = is_dm || self.pings_bot(&message);
                 let answering = mentioned && self.cooldowns.try_start(message.author.id).is_ok();
 
                 // Taken before this message is added, which is sent separately with its images
