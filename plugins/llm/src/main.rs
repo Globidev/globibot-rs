@@ -688,6 +688,8 @@ struct LlmPlugin {
     personality_announce_channel_id: Option<ChannelId>,
     /// Where it may join conversations without being pinged
     chime_in: Option<ChimeIn>,
+    /// The bot's nickname in the guild, as last seen or set from a personality
+    nickname: RwLock<Option<String>>,
 
     llm_client: openrouter::Client,
     storage: RedisStorage,
@@ -1351,6 +1353,10 @@ impl LlmPlugin {
                 },
                 profile_from_member,
             );
+        let nickname = members
+            .iter()
+            .find(|member| member.user.id == bot_id)
+            .and_then(|member| member.nick.clone());
         let chime_in = optional_env::<ChannelId>("LLM_CHIME_IN_CHANNEL_ID")?.map(|channel_id| {
             let bot_names = vec!["globibot".to_string(), bot_profile.username.to_lowercase()];
             ChimeIn::new(channel_id, bot_names)
@@ -1399,6 +1405,7 @@ impl LlmPlugin {
             nightly_lore_channel_id,
             personality_announce_channel_id,
             chime_in,
+            nickname: RwLock::new(nickname),
             llm_client,
             storage,
             llm_model: RwLock::new(model),
@@ -1773,9 +1780,18 @@ impl LlmPlugin {
             .lock()
             .get(&message.channel_id)
             .and_then(|context| context.since_last_answer(now));
+        let mut bot_names = chime_in.bot_names.clone();
+        if let Some(nickname) = &*self.nickname.read() {
+            bot_names.extend(
+                nickname
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_lowercase),
+            );
+        }
         let candidate = Candidate {
             text: &message.content,
-            bot_names: &chime_in.bot_names,
+            bot_names: &bot_names,
             replies_to_bot: message
                 .referenced_message
                 .as_ref()
@@ -1798,9 +1814,11 @@ impl LlmPlugin {
             return Ok(());
         };
         let model = self.llm_model.read().clone();
+        let nickname = self.nickname.read().clone();
         let (answering, verdict) = chime_in::should_chime_in(
             &self.llm_client,
             &model,
+            nickname.as_deref(),
             message.channel_id,
             &context,
             &request_message,
@@ -1865,14 +1883,7 @@ impl LlmPlugin {
                 .is_some_and(|member| member.roles.contains(&role))
         });
         let images_consent = (!images.urls.is_empty())
-            .then(|| {
-                images::consent(
-                    is_dm,
-                    self.pings_bot(message),
-                    message.author.id,
-                    has_role,
-                )
-            })
+            .then(|| images::consent(is_dm, self.pings_bot(message), message.author.id, has_role))
             .flatten();
         let stored = {
             let mut texts = vec![format!("{user_name} (<@{user_id}>): {content_safe}")];

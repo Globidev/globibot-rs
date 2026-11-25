@@ -140,6 +140,7 @@ pub fn is_candidate(candidate: &Candidate) -> bool {
 pub async fn should_chime_in(
     llm_client: &openrouter::Client,
     model: &str,
+    nickname: Option<&str>,
     channel_id: ChannelId,
     context: &[Message],
     candidate: &Message,
@@ -155,7 +156,13 @@ pub async fn should_chime_in(
             UsageKind::ChimeInCheck,
             model,
             format!("chime-in-{channel_id}"),
-            CLASSIFIER_PROMPT.to_string(),
+            match nickname {
+                Some(nickname) => format!(
+                    "{CLASSIFIER_PROMPT}\n\nIn this server, Globibot goes by the nickname \
+                     `{nickname}`."
+                ),
+                None => CLASSIFIER_PROMPT.to_string(),
+            },
             [Message::text(Role::User, transcript)],
         )
         .await?;
