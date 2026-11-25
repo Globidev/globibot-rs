@@ -91,6 +91,14 @@ pub trait Protocol {
     async fn list_guild_members(guild_id: GuildId) -> DiscordApiResult<Vec<Member>>;
     /// `None` if the user isn't in the guild
     async fn get_member(guild_id: GuildId, user_id: UserId) -> DiscordApiResult<Option<Member>>;
+    /// Sets the bot's nickname and avatar in a guild. `None` goes back to its global name or
+    /// avatar. `avatar` is a data URI: `data:image/png;base64,...`. Discord rate limits avatar
+    /// changes.
+    async fn edit_own_member(
+        guild_id: GuildId,
+        nickname: Option<String>,
+        avatar: Option<String>,
+    ) -> DiscordApiResult<()>;
 
     /// Discord's message search, only in channels `reader` can read. With `public_only`, also
     /// only in channels everyone in the guild can read, for results shown in a public channel.

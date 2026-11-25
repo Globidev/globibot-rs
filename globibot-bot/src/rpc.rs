@@ -447,6 +447,23 @@ impl Protocol for Server {
         Ok(user_id.create_dm_channel(&self.discord_http).await?.id)
     }
 
+    async fn edit_own_member(
+        self,
+        _ctx: Context,
+        guild_id: GuildId,
+        nickname: Option<String>,
+        avatar: Option<String>,
+    ) -> DiscordApiResult<()> {
+        let map = serde_json::Map::from_iter([
+            ("nick".to_string(), serde_json::json!(nickname)),
+            ("avatar".to_string(), serde_json::json!(avatar)),
+        ]);
+        self.discord_http
+            .edit_member_me(guild_id, &map, None)
+            .await?;
+        Ok(())
+    }
+
     async fn list_guild_members(
         self,
         _ctx: Context,
