@@ -694,6 +694,8 @@ struct LlmPlugin {
     /// The bot's own role: pinging it counts as pinging the bot
     bot_role_id: Option<RoleId>,
     starboard_channel_id: Option<ChannelId>,
+    /// Where Starboard comments are posted, instead of replying in the Starboard channel
+    starboard_comment_channel_id: Option<ChannelId>,
     /// Where lore is suggested every night, from that channel's messages
     nightly_lore_channel_id: Option<ChannelId>,
     /// Where switching the personality on the website is announced
@@ -1330,6 +1332,7 @@ impl LlmPlugin {
         let default_model = std::env::var("LLM_DEFAULT_MODEL_ID")?;
         let llm_client = openrouter::Client::from_env(usage)?;
         let starboard_channel_id = optional_env("LLM_STARBOARD_CHANNEL_ID")?;
+        let starboard_comment_channel_id = optional_env("LLM_STARBOARD_COMMENT_CHANNEL_ID")?;
         let nightly_lore_channel_id = optional_env("LLM_NIGHTLY_LORE_CHANNEL_ID")?;
         let personality_announce_channel_id = optional_env("LLM_PERSONALITY_ANNOUNCE_CHANNEL_ID")?;
         let images_role_id: Option<RoleId> = optional_env("LLM_IMAGES_ROLE_ID")?;
@@ -1414,6 +1417,7 @@ impl LlmPlugin {
             images_role_id,
             bot_role_id,
             starboard_channel_id,
+            starboard_comment_channel_id,
             nightly_lore_channel_id,
             personality_announce_channel_id,
             chime_in,

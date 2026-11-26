@@ -179,13 +179,27 @@ impl LlmPlugin {
             .complete_one_shot(UsageKind::Starboard, prompt, shown_images)
             .await?;
 
-        rpc.send_reply(
-            rpc::context::current(),
-            message.channel_id,
-            answer,
-            message.id,
-        )
-        .await??;
+        match self.starboard_comment_channel_id {
+            // Replies can't cross channels: link the post instead
+            Some(channel_id) if channel_id != message.channel_id => {
+                let link = message.id.link(message.channel_id, message.guild_id);
+                rpc.send_message(
+                    rpc::context::current(),
+                    channel_id,
+                    sanitize_llm_output(&format!("{link}\n{answer}")),
+                )
+                .await??;
+            }
+            _ => {
+                rpc.send_reply(
+                    rpc::context::current(),
+                    message.channel_id,
+                    answer,
+                    message.id,
+                )
+                .await??;
+            }
+        }
         Ok(())
     }
 }
